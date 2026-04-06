@@ -1,0 +1,308 @@
+Bank Reconciliation: Nostro, Suspense, and GL-to-Risk
+NOSTRO ACCOUNT
+
+A bank's own account held at another bank (the "correspondent") in a foreign currency or for access to a foreign payment system -- from the Latin "nostro" meaning "ours."
+
+A UK bank holds a USD nostro account at JPMorgan New York with a balance of $25 million to settle dollar-denominated client payments. Every transaction must appear in both the UK bank's mirror ledger and JPMorgan's statement.
+
+Nostro reconciliation is critical because a mismatch means the bank's reported cash position is wrong -- a GBP 1.5 million unreconciled break could mask a failed payment, a duplicated entry, or an unauthorised debit.
+
+SUSPENSE ACCOUNT
+
+A temporary holding account where transactions are parked when the bank cannot immediately identify the correct destination account, customer, or GL code.
+
+An incoming SWIFT payment of GBP 45,000 arrives with a truncated reference -- the bank cannot match it to a customer, so it sits in the payments suspense account until operations staff identify the intended recipient.
+
+Suspense accounts must be cleared within strict SLA timelines (typically 30 days maximum) because aged suspense items can hide errors, fraud, or unbooked losses that distort the bank's financial position.
+
+In Lessons 3 through 13, you built and stress-tested the three regulatory pillars: IFRS 9, Basel, and AML. Every calculation in those lessons depended on the same assumption: the numbers are correct. The ECL is calculated from accurate exposure data. The capital ratio uses the right RWA. The AML screen matches against the correct transaction records. Reconciliation is where that assumption is tested.
+
+Bank reconciliation is the operational discipline that ensures every number in every system agrees: or, when they do not agree, that every difference is identified, classified, aged, escalated, and resolved. A bank that cannot reconcile its books cannot trust its regulatory returns, its financial statements, or its risk reports. This lesson covers the five categories of bank reconciliation and shows how the banking plugin's reconciliation skills automate the matching while humans investigate the breaks.
+
+Five Categories of Bank Reconciliation​
+Category	What Is Compared	Why It Matters
+Nostro	Bank's mirror ledger vs correspondent bank's statement	Ensures cash balances with other banks are accurate
+Suspense	Unallocated items vs source transactions	Prevents items from ageing indefinitely without resolution
+Inter-company	Group entity books vs counterparty entity books	Ensures intra-group balances eliminate on consolidation
+Securities/Trade	Front office trade vs back office settlement	Ensures trades are settled and booked correctly
+Regulatory	Internal calculations vs regulatory returns	Ensures filed returns match internal risk systems
+
+Each category follows the same matching hierarchy, but the data sources and break types differ.
+
+The Matching Hierarchy​
+
+When the reconciliation agent processes a pair of data sets, it applies matches in priority order:
+
+Level	Match Type	Description	Automation
+1	Exact	Reference number, amount, date all match perfectly	Fully automated
+2	Fuzzy	Reference or amount matches within tolerance (e.g., FX rounding)	Automated with confirmation
+3	Date tolerance	Same reference and amount but different settlement dates (timing)	Automated, flagged for review
+4	Partial sum pool	Multiple items on one side sum to a single item on the other	Suggested by AI, human confirms
+5	Unmatched residual	No match found: requires human investigation	Human required
+
+The banking plugin's recon-nostro and recon-suspense skills operate at Levels 1-3 automatically and suggest Level 4 matches for human review. Level 5 items are flagged as exceptions with a hypothesis about the likely cause.
+
+Break Classification​
+
+When items do not match, every break must be classified:
+
+Break Type	Description	Example
+Mirror only	Item appears in bank's records but not on correspondent's statement	Payment sent but not yet processed by correspondent
+Statement only	Item appears on correspondent's statement but not in bank's records	Fee charged by correspondent, not yet booked internally
+Amount mismatch	Same transaction but different amounts	FX conversion difference, fee not included
+Duplicate	Same transaction recorded twice in one system	System error during batch processing
+Timing	Same transaction, same amount, different dates	Settlement date vs value date difference
+Ageing SLA​
+
+Every unresolved break has an age, and every age triggers an escalation:
+
+Age	Action	Escalation To
+0-2 business days	Monitor: likely timing difference	Operations analyst
+3-5 business days	Investigate: notify team lead	Team lead
+6-15 business days	Escalate: head of operations review	Head of operations
+16-30 business days	Critical: CFO notification	CFO
+Over 30 business days	Write-off assessment required	CFO + Audit committee
+
+Items over 30 days require a formal decision: either resolve the break or write off the amount. The write-off triggers an IFRS 9 impact (the amount reduces retained earnings and therefore CET1): which connects back to the cross-pillar cascade from Lesson 11.
+
+Four-Way IFRS 9 Provision Reconciliation​
+
+The most important reconciliation for this chapter connects IFRS 9 to the rest of the bank's systems. Four sources must agree:
+
+Source	What It Contains	System
+ECL Model	Calculated ECL by stage, segment, scenario	Risk analytics platform
+Risk System	Booked provisions by facility	Credit risk system
+General Ledger	Provision balance in the accounts	Core banking / ERP
+Regulatory Disclosure	IFRS 7 note figures, Pillar 3 disclosure	Regulatory reporting system
+
+The provision movement tie-out follows this formula:
+
+Opening Provision + New Charges - Write-offs + Recoveries +/- FX Translation = Closing Provision
+
+Each of the four sources must produce the same closing balance. When they do not, the break reveals a data integrity issue that affects regulatory returns, financial statements, or both.
+
+Common Four-Way Breaks​
+Break	Typical Cause	Resolution
+ECL Model vs Risk System	Model rerun timing: model ran before latest staging update	Re-run model with current staging
+Risk System vs GL	Booking lag: risk system updated but GL journal not yet posted	Post the journal entry
+GL vs Regulatory Disclosure	Rounding or aggregation difference in disclosure preparation	Adjust disclosure to match GL
+ECL Model vs Regulatory Disclosure	Methodology difference: model uses 5 scenarios, disclosure uses 3	Document and disclose the methodology
+AI Automation Levels for Reconciliation​
+
+The banking plugin implements three levels of reconciliation automation:
+
+Level 1: Auto-Matching: The recon-nostro and recon-suspense skills automatically match items using the matching hierarchy (Levels 1-3). Matched items are cleared without human intervention. This handles 70-85% of items in a typical reconciliation.
+
+Level 2 (Exception Intelligence: For unmatched items, the skill generates a hypothesis about the likely cause. For example: "Statement-only item of GBP 12,500 on Day 15) probable correspondent fee. Suggested match: fee schedule line item for monthly custody charge." The human reviews the hypothesis and accepts, rejects, or investigates further.
+
+Level 3: Continuous Reconciliation: Rather than running reconciliation at end-of-day, the skills monitor transaction feeds in real-time and flag breaks as they occur. This reduces the ageing problem because breaks are identified within hours rather than days.
+
+Exercise 14: Nostro Reconciliation​
+
+Duration: 35 minutes Skills used: recon-nostro
+
+You are reconciling the bank's GBP nostro account with Barclays. The bank's mirror ledger shows 7 entries. Barclays' statement shows 8 entries. Match them and classify every break.
+
+Mirror Ledger (Bank's Records)​
+Ref	Date	Description	Debit	Credit
+M001	Day 1	Client payment - ABC Corp		GBP 250,000
+M002	Day 2	SWIFT transfer in	GBP 180,000	
+M003	Day 3	Salary batch - 450 employees		GBP 1,850,000
+M004	Day 5	CHAPS payment - supplier		GBP 95,000
+M005	Day 7	SWIFT transfer in	GBP 420,000	
+M006	Day 8	Client payment - XYZ Ltd		GBP 310,000
+M007	Day 10	CHAPS payment - tax authority		GBP 750,000
+Statement (Barclays' Records)​
+Ref	Date	Description	Debit	Credit
+S001	Day 1	Payment - ABC Corp		GBP 250,000
+S002	Day 2	Incoming SWIFT	GBP 180,000	
+S003	Day 3	Salary batch		GBP 1,850,000
+S004	Day 5	CHAPS out		GBP 95,000
+S005	Day 7	Incoming SWIFT	GBP 420,000	
+S006	Day 8	Payment - XYZ Ltd		GBP 308,500
+S007	Day 10	CHAPS out - HMRC		GBP 750,000
+S008	Day 10	Monthly custody fee		GBP 2,500
+Your Tasks​
+Match mirror entries to statement entries
+Identify all breaks (unmatched or mismatched items)
+Classify each break (timing, amount mismatch, mirror-only, statement-only)
+For M006/S006 (GBP 310,000 vs GBP 308,500): what is the likely cause of the GBP 1,500 difference?
+For S008 (GBP 2,500 custody fee): this has no mirror entry: what action is needed?
+Produce an ageing report assuming today is Day 12
+Exercise 15: IFRS 9 Provision Reconciliation​
+
+Duration: 40 minutes Skills used: recon-provision-four-way
+
+Reconcile the IFRS 9 provision across four sources. Three known breaks exist: find them and trace each to its root cause.
+
+Source Data​
+Source	Stage 1	Stage 2	Stage 3	Total
+ECL Model	GBP 18.2M	GBP 62.5M	GBP 44.8M	GBP 125.5M
+Risk System	GBP 18.2M	GBP 63.1M	GBP 44.8M	GBP 126.1M
+General Ledger	GBP 18.2M	GBP 62.5M	GBP 43.2M	GBP 123.9M
+Regulatory Disclosure	GBP 18.0M	GBP 63.0M	GBP 45.0M	GBP 126.0M
+Known Issues​
+
+The finance team has flagged three issues that may explain some or all of the breaks:
+
+Staging update timing: The risk system received a batch staging update at 6pm on the reporting date. The ECL model was run at 4pm using the previous staging.
+Write-off processing: A GBP 1.6M Stage 3 write-off was approved on the reporting date but the GL journal was posted on the following business day.
+Regulatory rounding: The regulatory disclosure rounds all figures to the nearest GBP 0.5M for Pillar 3 reporting.
+Your Tasks​
+Identify all four-way breaks (where sources disagree)
+Map each break to one of the three known issues
+For each break, determine: Which source has the "correct" figure?
+Recommend adjustments to bring all four sources into agreement
+Produce a provision movement reconciliation:
+Movement	Amount
+Opening provision	GBP 118.0M
+New charges	?
+Write-offs	?
+Recoveries	+GBP 0.3M
+FX translation	-GBP 0.2M
+Closing provision	Should equal the "correct" total
+Exercise 16: Suspense Clearance​
+
+Duration: 30 minutes Skills used: recon-suspense
+
+Clear 12 suspense items across 3 suspense accounts. Apply ageing SLAs and recommend actions.
+
+Suspense Items​
+Item	Account	Amount	Date Entered	Age (Days)	Description
+SP01	Payments	GBP 45,000	Day -2	2	Unallocated incoming SWIFT: no reference
+SP02	Payments	GBP 12,800	Day -5	5	Partial payment: customer ref truncated
+SP03	Payments	GBP 890,000	Day -8	8	Large incoming: sender name mismatch
+SP04	Payments	GBP 3,200	Day -22	22	Small unallocated: multiple possible matches
+SP05	Fees	GBP 1,500	Day -1	1	Custody fee: account coding query
+SP06	Fees	GBP 8,750	Day -12	12	Correspondent bank charge: awaiting invoice
+SP07	Fees	GBP 250	Day -35	35	Small item: unable to identify source
+SP08	Trading	GBP 125,000	Day -3	3	FX settlement: value date mismatch
+SP09	Trading	GBP 2,100,000	Day -1	1	Bond settlement: awaiting custodian confirmation
+SP10	Trading	GBP 340,000	Day -7	7	Equity trade: counterparty dispute on price
+SP11	Trading	GBP 15,000	Day -18	18	Failed trade: awaiting broker response
+SP12	Payments	GBP 67,500	Day -28	28	Returned payment: original transaction unclear
+Your Tasks​
+Apply the ageing SLA to each item: who should be notified?
+Prioritise: which items need immediate action?
+For each item, suggest a clearance action (match, return, write-off, or escalate)
+SP07 (GBP 250, age 35 days) exceeds the 30-day SLA: recommend formal disposition
+SP09 (GBP 2.1M, age 1 day) is the largest item: is the ageing SLA appropriate given the amount, or should large items have different escalation rules?
+Calculate: what is the total suspense balance by account and by ageing band?
+Using the Banking Plugin​
+
+The bank-reconciliation skill performs nostro matching, classifies breaks, applies ageing SLAs, and generates exception hypotheses. Here is a worked example.
+
+Worked example. Kenji Watanabe, Reconciliation Officer at Pacific Ledger Bank, is running the daily GBP nostro reconciliation against the correspondent bank. He types:
+
+Reconcile this nostro account:
+Mirror ledger (bank's records):
+  M001: Day 1, Credit GBP 250,000 (ABC Corp payment)
+  M002: Day 2, Debit GBP 180,000 (SWIFT in)
+  M003: Day 3, Credit GBP 1,850,000 (salary batch)
+  M006: Day 8, Credit GBP 310,000 (XYZ Ltd payment)
+Statement (correspondent):
+  S001: Day 1, Credit GBP 250,000 (ABC Corp)
+  S002: Day 2, Debit GBP 180,000 (SWIFT in)
+  S003: Day 3, Credit GBP 1,850,000 (salary batch)
+  S006: Day 8, Credit GBP 308,500 (XYZ Ltd)
+  S008: Day 10, Credit GBP 2,500 (monthly custody fee)
+Today is Day 12.
+Jurisdiction: UK PRA
+
+
+The agent routes through bank-reconciliation to produce a nostro reconciliation report.
+
+What to expect: The agent produces a matching report with break classifications and ageing escalation. Your output will vary based on the entries you provide, but look for these sections:
+
+Section	Intent	What to Verify
+Matched items	Lists entries matched at each level (exact, fuzzy, date tolerance)	All exact matches correctly paired; matching percentage reported
+Breaks	Classifies each unmatched or mismatched item by type	Each break type correct (amount mismatch, mirror-only, statement-only, timing, duplicate)
+Hypotheses	Suggests a likely cause for each break	Hypotheses are plausible (e.g., correspondent fee for small differences, timing for date mismatches)
+Ageing and escalation	Applies ageing SLA to each break	Correct escalation level for each break's age; action recommendations appropriate
+YOUR OUTPUT WILL VARY
+
+The specific matches and breaks depend on the mirror and statement entries you provide. The teaching point is the matching hierarchy and break classification discipline: verify that every item is either matched or classified with an ageing escalation, not that specific amounts match.
+
+Kenji investigates discrepancies by checking the correspondent's fee schedule, confirms any handling charges deducted at source, and posts adjustment entries to clear the breaks.
+
+Try With AI​
+
+Setup: Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1: Reproduce​
+Match these nostro entries and classify all breaks:
+
+Mirror ledger (7 entries):
+M001: Day 1, Credit GBP 250,000 (ABC Corp payment)
+M002: Day 2, Debit GBP 180,000 (SWIFT in)
+M003: Day 3, Credit GBP 1,850,000 (salary batch)
+M004: Day 5, Credit GBP 95,000 (CHAPS supplier)
+M005: Day 7, Debit GBP 420,000 (SWIFT in)
+M006: Day 8, Credit GBP 310,000 (XYZ Ltd payment)
+M007: Day 10, Credit GBP 750,000 (CHAPS tax)
+
+Statement (8 entries):
+S001-S005: Match perfectly with M001-M005
+S006: Day 8, Credit GBP 308,500 (XYZ Ltd)
+S007: Day 10, Credit GBP 750,000 (HMRC)
+S008: Day 10, Credit GBP 2,500 (custody fee)
+
+For each break:
+1. Classify as: timing, amount mismatch, mirror-only, statement-only
+2. Explain the likely cause
+3. Recommend the resolution action
+4. Apply ageing SLA (today is Day 12)
+
+
+What you are learning: Nostro reconciliation is the foundation of all bank reconciliation. The GBP 1,500 difference between M006 and S006 could be a fee deduction, an FX adjustment, or a data error: each has a different resolution path. The custody fee (S008) is a statement-only item that needs booking in the bank's records. By classifying breaks, you build the skill of systematic exception handling that applies to all five reconciliation categories.
+
+Prompt 2: Adapt​
+Reconcile these IFRS 9 provision figures across four sources:
+
+ECL Model: S1 GBP 18.2M, S2 GBP 62.5M, S3 GBP 44.8M = GBP 125.5M
+Risk System: S1 GBP 18.2M, S2 GBP 63.1M, S3 GBP 44.8M = GBP 126.1M
+GL: S1 GBP 18.2M, S2 GBP 62.5M, S3 GBP 43.2M = GBP 123.9M
+Regulatory: S1 GBP 18.0M, S2 GBP 63.0M, S3 GBP 45.0M = GBP 126.0M
+
+Known issues:
+1. Risk system got a staging update at 6pm; ECL model ran at 4pm
+2. GBP 1.6M Stage 3 write-off approved but GL journal posted next day
+3. Regulatory rounds to nearest GBP 0.5M
+
+For each break: identify which sources disagree, map to a known
+issue, determine the "correct" figure, and recommend adjustments.
+
+
+What you are learning: The four-way provision reconciliation is where IFRS 9 meets operational reality. Models run at different times. GL postings have processing lags. Regulatory disclosures use different rounding conventions. Each break has a logical explanation; but finding that explanation requires understanding how data flows between systems. This is the operational competence that ensures the ECL figures you calculated in Lessons 3-5 actually reach the financial statements correctly.
+
+Prompt 3: Apply​
+I have 12 suspense items across 3 accounts (Payments, Fees,
+Trading). Ages range from 1 to 35 days. Total GBP 3.6M.
+
+Apply this ageing SLA:
+- 0-2 days: monitor
+- 3-5 days: investigate, notify team lead
+- 6-15 days: escalate to head of ops
+- 16-30 days: CFO notification
+- Over 30 days: write-off assessment
+
+For each item, recommend: match, return, escalate, or write-off.
+Then answer: should a GBP 2.1M item aged 1 day really have the
+same escalation timeline as a GBP 250 item? Design an
+amount-weighted SLA that accounts for materiality.
+
+
+What you are learning: Suspense clearance reveals a tension between standardised SLAs and risk-based prioritisation. A flat ageing SLA treats GBP 250 and GBP 2.1M identically, but the risk to the bank is not the same. By designing an amount-weighted SLA, you learn to think about reconciliation as a risk management discipline, not just an operational checklist.
+
+Flashcards Study Aid​
+‹
+⎘
+
+What is a nostro account in banking?
+
+Click to flip
+›
+1 / 13 cards
+⇅ Shuffle
+ⓘ Guide
+↧ Download

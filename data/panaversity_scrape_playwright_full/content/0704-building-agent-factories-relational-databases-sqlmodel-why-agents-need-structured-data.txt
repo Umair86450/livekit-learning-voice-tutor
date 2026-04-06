@@ -1,0 +1,185 @@
+Why Agents Need Structured Data
+
+Your Task Manager agent just helped a user create 50 tasks across 5 projects. The user assigned workers, set priorities, added tags. Then the server restarted.
+
+Everything is gone.
+
+This isn't a hypothetical disaster—it's what happens when agents store data only in memory. The moment your process ends, your users lose their work.
+
+The Persistence Problem​
+
+Consider what your Task Manager agent tracks:
+
+Data	Type	Lifetime
+Tasks	Structured records	Permanent
+Projects	Related records	Permanent
+Worker assignments	Relationships	Permanent
+Conversation history	Sequential	Session or permanent
+Search embeddings	Vectors	Permanent
+
+Memory handles conversation flow during a session. But tasks, projects, assignments—these must survive restarts, scale across instances, and remain consistent when multiple users access them simultaneously.
+
+You need a database.
+
+Relational vs Vector: Different Questions​
+
+You learned about vector databases in Chapter 73. They answer semantic questions:
+
+"Find tasks similar to 'fix authentication'"
+"What documents discuss deployment?"
+"Show me related concepts"
+
+Relational databases answer structured questions:
+
+"List all pending tasks for Project X"
+"Who is assigned to Task #42?"
+"How many tasks did each worker complete this week?"
+Question Type	Database	Why
+"Similar to..."	Vector	Semantic similarity search
+"Filter by..."	Relational	Exact matching, ordering
+"Count/sum..."	Relational	Aggregation queries
+"Related to..."	Both	Depends on relationship type
+
+Your agent needs both. Vector DB for semantic search. Relational DB for structured queries and persistent state.
+
+ACID: Why Agents Need Guarantees​
+
+When your agent updates the database, things can go wrong. Network drops. Server crashes. Two users edit the same task simultaneously.
+
+ACID properties protect you:
+
+Atomicity: All-or-nothing operations. If your agent creates a task with 5 subtasks, either all 6 records exist or none do. No half-created task trees.
+
+# Either both succeed or both fail
+async with session.begin():
+    session.add(parent_task)
+    for subtask in subtasks:
+        session.add(subtask)
+
+
+Consistency: Rules always hold. If your schema says project_id must reference a valid project, the database rejects orphan tasks. Your agent can't accidentally create invalid data.
+
+Isolation: Concurrent operations don't conflict. Two agents updating different tasks on the same project don't corrupt each other's work.
+
+Durability: Once committed, data survives crashes. Your user's 50 tasks persist through server restarts, power failures, and deployments.
+
+Why Async Matters for Agents​
+
+Your agent does many things:
+
+Receives user requests
+Calls LLM APIs
+Reads and writes database
+Sends responses
+
+Synchronous database access blocks everything. While waiting for a query, your agent can't process other requests.
+
+# SYNC: Blocks entire process
+def get_tasks(project_id):
+    return db.query(Task).filter_by(project_id=project_id).all()
+    # Nothing else happens until this returns
+
+# ASYNC: Process continues while waiting
+async def get_tasks(project_id):
+    result = await session.exec(select(Task).where(Task.project_id == project_id))
+    return result.all()
+    # Other requests processed while waiting
+
+
+Async database access lets your agent:
+
+Handle multiple concurrent users
+Process API responses while queries run
+Scale to production workloads
+
+This is why we use create_async_engine and AsyncSession exclusively in this chapter.
+
+The Task Manager Data Model​
+
+Throughout this chapter, you'll build a database layer for the Task Manager:
+
+Project
+  └── Task (many)
+       ├── Worker (assigned)
+       ├── Worker (created_by)
+       └── Task (subtasks - self-referential)
+
+
+This structure exercises:
+
+One-to-many relationships (Project → Tasks)
+Many-to-one with multiple foreign keys (Task → Worker for two purposes)
+Self-referential relationships (Task → parent/subtasks)
+JSONB columns (tags, metadata)
+
+By chapter end, you'll have a complete async database layer matching production patterns.
+
+Try With AI​
+Prompt 1: Classify Your Data​
+I'm building an AI agent that manages customer support tickets.
+It tracks:
+- Ticket records with status, priority, assignee
+- Customer information
+- Similar past tickets for context
+- Conversation history with customers
+
+For each data type, recommend: relational database, vector database,
+or both? Explain your reasoning based on how the data will be queried.
+
+
+What you're learning: Database selection based on query patterns—matching data characteristics to appropriate storage.
+
+Prompt 2: Design for Reliability​
+My agent creates a Project with 10 Tasks in a single user request.
+What ACID property ensures that if task #7 fails to save,
+the entire operation rolls back including the Project and tasks 1-6?
+
+Show me the Python code pattern that implements this guarantee
+using SQLModel's async session.
+
+
+What you're learning: Atomicity in practice—understanding how transactions protect data integrity.
+
+Prompt 3: Justify Async​
+My agent currently uses synchronous database access and handles
+about 10 requests per second. I want to scale to 100 requests
+per second without adding more servers.
+
+Explain how async database access helps, and what changes
+I need to make to my SQLModel code to achieve this.
+
+
+What you're learning: Async performance reasoning—understanding why async matters for scale.
+
+Safety Note​
+
+Database operations can fail. Always handle connection errors, query timeouts, and constraint violations. Your agent should gracefully inform users when database issues occur rather than crashing silently.
+
+Reflect on Your Skill​
+
+You built a relational-db-agent skill in Lesson 0. Test its understanding of these concepts.
+
+Test Your Skill​
+Using my relational-db-agent skill, explain when I should
+use a relational database vs a vector database for my agent.
+Give me a decision framework.
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill distinguish structured queries from semantic search?
+Did it mention ACID properties?
+Did it recommend async patterns?
+Improve Your Skill​
+
+If you found gaps:
+
+My relational-db-agent skill doesn't explain when to use
+relational vs vector databases. Add guidance that:
+- Relational: exact matching, filtering, aggregation, relationships
+- Vector: semantic similarity, fuzzy matching, context retrieval
+- Often use both in agent architectures
+
+
+Your skill now helps you make better architectural decisions.

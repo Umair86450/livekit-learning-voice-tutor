@@ -1,0 +1,391 @@
+Hooks: Event-Driven Automation
+
+Hooks are your commands that run automatically when Claude does something.
+
+Claude edits a file → your formatting command runs
+Claude runs a bash command → your logging command runs
+You submit a prompt → your context injection runs
+Session starts → your setup script runs
+
+Why this matters: You can tell Claude "always format code after editing": but it might forget. A hook guarantees it happens every time, because it's your code running automatically, not Claude choosing to run it.
+
+Why Hooks?​
+
+Without hooks, you hope Claude remembers to:
+
+Format code after editing
+Run tests after changes
+Follow your naming conventions
+Avoid touching sensitive files
+
+With hooks, you guarantee these happen:
+
+PostToolUse hook runs Prettier after every file edit
+PreToolUse hook blocks edits to .env files
+SessionStart hook loads project context automatically
+Notification hook sends Slack alerts when Claude needs input
+
+The key insight: By encoding rules as hooks instead of prompting instructions, you turn suggestions into app-level code that executes every time.
+
+The Five Main Hook Events​
+Event	When It Fires	Common Use Cases
+PreToolUse	Before a tool runs	Validate commands, block dangerous operations, modify inputs
+PostToolUse	After a tool completes	Format code, run tests, log activity
+UserPromptSubmit	When you submit a prompt	Add context, validate input, inject system info
+SessionStart	When Claude Code starts	Load environment variables, show project info
+SessionEnd	When session closes	Cleanup, save logs
+
+Claude Code supports over 20 hook events beyond these five. You may encounter Stop (when Claude finishes responding), Notification (when Claude needs your attention), PermissionRequest (when a permission dialog appears), SubagentStart/SubagentStop (for subagent lifecycle), and others for compaction, config changes, and worktrees. Chapter 18 covers advanced hook events in depth.
+
+How Hooks Work​
+Event fires → Hook script runs → Script output affects Claude
+
+
+The pattern:
+
+An event occurs (e.g., you submit a prompt)
+Claude Code runs your hook script
+Script receives JSON input via stdin
+Script produces output via stdout
+Output gets injected into Claude's context
+
+Exit codes matter:
+
+0 = Success (stdout processed)
+2 = Block the action (show error)
+Other = Non-blocking warning
+Configuring Hooks​
+Option 1: Use the /hooks Command (Easiest)​
+
+Run:
+
+/hooks
+
+
+This opens an interactive menu where you:
+
+Select an event (PreToolUse, PostToolUse, etc.)
+Add a matcher (which tools to match)
+Add your hook command
+Choose storage location (User or Project)
+Option 2: Edit settings.json Directly​
+
+Hooks are configured in .claude/settings.json:
+
+{
+  "hooks": {
+    "EventName": [
+      {
+        "matcher": "ToolPattern",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/your-script.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+Key fields:
+
+EventName: Which event triggers this (PreToolUse, PostToolUse, etc.)
+matcher: Which tools to match (e.g., Bash, Write, Edit, Read)
+command: The script to run
+Matcher Patterns​
+Pattern	Matches
+"Bash"	Only Bash tool
+"Write|Edit"	Write OR Edit tools
+"Notebook.*"	All Notebook tools
+"" or omit	All tools (for that event)
+Try It Now: Your First Hook​
+
+Let's log every Bash command Claude runs.
+
+Prerequisite: Install jq for JSON processing (brew install jq on macOS, apt install jq on Linux).
+
+Method 1: Using /hooks (Quickest)​
+Run /hooks in Claude Code
+Select PreToolUse
+Add matcher: Bash
+Add hook command:
+jq -r '"\(.tool_input.command) - \(.tool_input.description // "No description")"' >> ~/.claude/bash-log.txt
+
+Choose User settings for storage
+Press Esc to save
+
+Now ask Claude to run ls and check your log:
+
+cat ~/.claude/bash-log.txt
+
+Method 2: Edit settings.json Directly​
+
+Add to .claude/settings.json:
+
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '\"\\(.tool_input.command) - \\(.tool_input.description // \"No description\")\"' >> ~/.claude/bash-log.txt"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+Restart Claude Code and test it.
+
+Real Example: UserPromptSubmit Hook​
+
+Here's a real hook that tracks prompts (from this book's codebase):
+
+Script (.claude/hooks/track-prompt.sh):
+
+#!/usr/bin/env bash
+# Track user prompt submissions
+
+# Read JSON input from stdin
+INPUT=$(cat)
+
+# Parse the prompt field
+PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
+
+# Skip if no prompt
+[ -z "$PROMPT" ] && exit 0
+
+# Log it
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+echo "{\"timestamp\": \"$TIMESTAMP\", \"prompt\": \"$PROMPT\"}" >> .claude/activity-logs/prompts.jsonl
+
+exit 0
+
+
+Configuration:
+
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/track-prompt.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+What happens:
+
+You submit a prompt
+Hook receives JSON: {"prompt": "your message", "session_id": "..."}
+Script extracts prompt, logs it with timestamp
+Session continues normally
+Real Example: PreToolUse Hook​
+
+Track when skills are invoked:
+
+Configuration:
+
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/track-skill-invoke.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+What this does:
+
+Fires before the Skill tool runs
+Only matches the Skill tool (not Bash, Write, etc.)
+Can log, validate, or modify the tool call
+Real Example: PostToolUse Hook​
+
+Track subagent results:
+
+Configuration:
+
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/track-subagent-result.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+What this does:
+
+Fires after the Task tool completes
+Receives the task result in JSON input
+Can log, analyze, or trigger follow-up actions
+Hook Input Format​
+
+All hooks receive JSON via stdin. Common fields:
+
+{
+  "session_id": "abc123",
+  "cwd": "/path/to/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "npm test",
+    "description": "Run tests"
+  }
+}
+
+
+Event-specific fields:
+
+UserPromptSubmit: {"prompt": "user's message"}
+PreToolUse/PostToolUse: {"tool_name": "...", "tool_input": {...}}
+SessionStart: Basic session info
+Hook Output Format​
+
+Simple: Just print text to stdout:
+
+echo "Current time: $(date)"
+exit 0
+
+
+Advanced: Output JSON for more control:
+
+echo '{"decision": "allow", "reason": "Auto-approved"}'
+exit 0
+
+
+Block an action:
+
+echo "Blocked: dangerous command" >&2
+exit 2
+
+PRETOOLUSE PERMISSION DECISIONS
+
+For PreToolUse hooks that make permission decisions, the official docs use a structured hookSpecificOutput object containing fields like permissionDecision and additionalContext. The simple format above works for basic allow/block logic; see the official hooks reference for the full schema when building permission-aware hooks.
+
+Beyond Command Hooks​
+
+This lesson teaches "type": "command" hooks, where the hook runs a shell script. Claude Code actually supports four hook types:
+
+command runs a shell command (what you learned above).
+http sends the event data as a POST request to a URL endpoint, useful for team-wide audit services and cloud integrations.
+prompt evaluates a single-turn LLM prompt, letting a hook use AI judgment rather than deterministic logic.
+agent spawns a subagent with tool access to verify conditions, combining hook triggers with full agent capabilities.
+
+The prompt and agent types represent a significant shift: hooks can now make AI-powered decisions, not just rule-based ones. Chapter 18 covers these advanced hook types in detail.
+
+Combining Multiple Hooks​
+
+You can have multiple hooks for the same event:
+
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/validate-bash.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command", "command": "bash .claude/hooks/check-files.sh" }
+        ]
+      }
+    ]
+  }
+}
+
+
+Different matchers trigger different scripts based on which tool is used.
+
+Debugging Hooks​
+
+If hooks aren't working:
+
+Check the script is executable: chmod +x .claude/hooks/your-script.sh
+Test manually: echo '{"test": "data"}' | bash .claude/hooks/your-script.sh
+Check settings.json syntax: Valid JSON? Correct structure?
+Use debug mode: claude --debug shows hook execution
+Where Hooks Live​
+.claude/
+├── settings.json      # Hook configuration
+└── hooks/             # Hook scripts
+    ├── _common.sh     # Shared utilities (optional)
+    ├── session-info.sh
+    ├── track-prompt.sh
+    └── validate-bash.sh
+
+
+Tip: Use a _common.sh file for shared functions like JSON parsing.
+
+What's Next​
+
+Lesson 16 introduces Plugins:pre-packaged bundles of skills, hooks, agents, and MCP servers that you can install from marketplaces. Where hooks let you customize Claude Code's behavior, plugins let you install complete capability packages built by others.
+
+Try With AI​
+
+📝 Create a Simple Hook:
+
+"Help me create a SessionStart hook that shows the git branch and last commit message when I start Claude Code. Walk me through: the script, the settings.json config, and how to test it."
+
+What you're learning: The complete hook lifecycle: from script to configuration to testing. This pattern applies to all hook types.
+
+🔍 Understand Hook Events:
+
+"I want to automatically run prettier after Claude edits a JavaScript file. Which hook event should I use? What would the matcher be? Show me the complete configuration."
+
+What you're learning: Event selection and pattern matching: choosing the right trigger and scope for automated behavior.
+
+🛡️ Validation Hook:
+
+"Help me create a PreToolUse hook that warns me before Claude runs any command with 'rm' or 'delete' in it. The hook should print a warning but not block the command."
+
+What you're learning: Safety guardrails through hooks: implementing "soft" warnings that inform without blocking, a pattern used in production systems.
+
+📊 Logging Hook:
+
+"I want to log all the tools Claude uses during a session. Help me create a PostToolUse hook that appends tool names and timestamps to a log file."
+
+What you're learning: Observability through hooks: instrumenting AI behavior for debugging and analysis. This is how production systems gain visibility.
+
+🔧 Debug a Hook:
+
+"My hook isn't running. Help me debug: How do I test the script manually? How do I check if settings.json is correct? What does claude --debug show?"
+
+What you're learning: Hook debugging methodology: the systematic approach when automation doesn't work. This skill saves significant debugging time.
+
+Flashcards Study Aid​

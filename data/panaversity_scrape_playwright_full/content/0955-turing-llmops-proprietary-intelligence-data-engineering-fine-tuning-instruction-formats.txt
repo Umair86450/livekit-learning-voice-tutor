@@ -1,0 +1,433 @@
+Instruction Formats
+
+Your training data must follow a specific format that the training framework understands. Choose wrong, and training fails silently—the model learns nothing useful.
+
+This lesson covers the three dominant formats: Alpaca (simple, single-turn), ShareGPT (conversational, multi-turn), and ChatML (role-structured, API-compatible). You'll know when to use each and how to convert between them.
+
+The Format Problem​
+
+Training frameworks don't read natural conversation. They need structured data that clearly separates:
+
+What the user said (input)
+What the model should say (output)
+Any system instructions (context)
+
+Different frameworks expect different structures. Pick the wrong format, and your carefully curated data is useless.
+
+Format 1: Alpaca (Single-Turn Simplicity)​
+
+The Alpaca format is the simplest instruction format, designed for single-turn interactions.
+
+Structure​
+{
+  "instruction": "What the user wants",
+  "input": "Optional context or data",
+  "output": "What the model should respond"
+}
+
+Real Example: Task API​
+{
+  "instruction": "Create a task to buy groceries",
+  "input": "",
+  "output": "Created task: 'Buy groceries' | Priority: medium | Due: not set"
+}
+
+
+With optional input:
+
+{
+  "instruction": "Summarize this task",
+  "input": "Task: Review Q4 budget, Priority: high, Due: 2025-01-15, Status: pending",
+  "output": "High-priority task to review Q4 budget, due January 15th, currently pending."
+}
+
+When to Use Alpaca​
+Use Case	Why Alpaca Works
+Command-response patterns	One input, one output, no context needed
+Classification tasks	Input + label, no conversation
+Single-turn Q&A	Question → answer with no follow-up
+Code generation from spec	Specification → code, standalone
+When NOT to Use Alpaca​
+Use Case	Why Alpaca Fails
+Multi-turn dialogue	No way to represent conversation history
+Context-dependent responses	Can't track previous turns
+Clarification workflows	Can't model "ask for more info" patterns
+Alpaca Format Schema (Pydantic)​
+from pydantic import BaseModel
+
+class AlpacaExample(BaseModel):
+    """Single-turn instruction format."""
+    instruction: str
+    input: str = ""  # Optional context
+    output: str
+
+# Validation example
+example = AlpacaExample(
+    instruction="Create a task to buy groceries",
+    input="",
+    output="Created task: 'Buy groceries' | Priority: medium | Due: not set"
+)
+
+
+Output:
+
+AlpacaExample(instruction='Create a task to buy groceries', input='', output="Created task: 'Buy groceries' | Priority: medium | Due: not set")
+
+Format 2: ShareGPT (Multi-Turn Conversations)​
+
+The ShareGPT format handles multi-turn conversations with alternating human/assistant messages.
+
+Structure​
+{
+  "conversations": [
+    {"from": "human", "value": "First user message"},
+    {"from": "gpt", "value": "First assistant response"},
+    {"from": "human", "value": "Follow-up question"},
+    {"from": "gpt", "value": "Follow-up response"}
+  ]
+}
+
+Real Example: Task API with Clarification​
+{
+  "conversations": [
+    {
+      "from": "human",
+      "value": "Create a task for the budget review"
+    },
+    {
+      "from": "gpt",
+      "value": "I'll create a task for the budget review. When is it due?"
+    },
+    {
+      "from": "human",
+      "value": "Friday, and make it high priority"
+    },
+    {
+      "from": "gpt",
+      "value": "Created task: 'Budget review' | Priority: high | Due: 2025-01-17 (Friday)"
+    }
+  ]
+}
+
+When to Use ShareGPT​
+Use Case	Why ShareGPT Works
+Conversational assistants	Natural back-and-forth dialogue
+Clarification workflows	Model learns to ask for missing info
+Context-dependent tasks	Each turn builds on previous
+Real-world chat interfaces	Matches production conversation flow
+When NOT to Use ShareGPT​
+Use Case	Why ShareGPT Is Overkill
+Simple command → response	Extra structure adds no value
+Classification tasks	Single input/output, no conversation
+Batch processing	No dialogue needed
+ShareGPT Format Schema (Pydantic)​
+from pydantic import BaseModel, validator
+from typing import List, Literal
+
+class ShareGPTMessage(BaseModel):
+    """Single message in a conversation."""
+    from_: Literal["human", "gpt"] = None
+    value: str
+
+    class Config:
+        # Allow 'from' as field name in JSON
+        fields = {"from_": "from"}
+
+class ShareGPTExample(BaseModel):
+    """Multi-turn conversation format."""
+    conversations: List[ShareGPTMessage]
+
+    @validator("conversations")
+    def validate_alternation(cls, v):
+        """Ensure human/gpt turns alternate."""
+        for i, msg in enumerate(v):
+            expected = "human" if i % 2 == 0 else "gpt"
+            if msg.from_ != expected:
+                raise ValueError(f"Turn {i} should be {expected}")
+        return v
+
+
+Output when validated:
+
+ShareGPTExample(conversations=[...4 messages...])
+
+Format 3: ChatML (Role-Based Structure)​
+
+The ChatML format uses explicit role markers and is compatible with OpenAI's API structure.
+
+Structure​
+<|im_start|>system
+You are a task management assistant for the Task API.
+<|im_end|>
+<|im_start|>user
+Create a task to buy groceries
+<|im_end|>
+<|im_start|>assistant
+Created task: 'Buy groceries' | Priority: medium | Due: not set
+<|im_end|>
+
+JSON Representation​
+{
+  "messages": [
+    {"role": "system", "content": "You are a task management assistant..."},
+    {"role": "user", "content": "Create a task to buy groceries"},
+    {"role": "assistant", "content": "Created task: 'Buy groceries' | Priority: medium | Due: not set"}
+  ]
+}
+
+When to Use ChatML​
+Use Case	Why ChatML Works
+OpenAI API compatibility	Matches their fine-tuning format exactly
+System prompt injection	Clear place for persona/instructions
+Role-based conversations	system/user/assistant separation
+Production API deployment	Same format as inference calls
+When NOT to Use ChatML​
+Use Case	Why ChatML Is Unnecessary
+Training without system prompts	Extra structure adds complexity
+Non-OpenAI frameworks	May not support ChatML natively
+Simple Alpaca-style tasks	Overkill for single-turn
+ChatML Format Schema (Pydantic)​
+from pydantic import BaseModel, validator
+from typing import List, Literal
+
+class ChatMLMessage(BaseModel):
+    """Single message in ChatML format."""
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+class ChatMLExample(BaseModel):
+    """OpenAI-compatible chat format."""
+    messages: List[ChatMLMessage]
+
+    @validator("messages")
+    def validate_structure(cls, v):
+        """Ensure valid message structure."""
+        if not v:
+            raise ValueError("Must have at least one message")
+
+        # System message (if present) must be first
+        if any(m.role == "system" for m in v[1:]):
+            raise ValueError("System message must be first")
+
+        # Last message should be assistant (what we're training)
+        if v[-1].role != "assistant":
+            raise ValueError("Last message must be assistant response")
+
+        return v
+
+Format Comparison Table​
+Aspect	Alpaca	ShareGPT	ChatML
+Turns	Single	Multi	Multi
+Roles	instruction/input/output	human/gpt	system/user/assistant
+System prompt	No	No	Yes
+Best for	Commands, classification	Dialogue, clarification	OpenAI fine-tuning
+Framework support	Axolotl, Unsloth, most	Unsloth, some adapters	OpenAI, Unsloth
+Format Selection Decision Tree​
+                    Start
+                      │
+                      ▼
+         ┌───── Multi-turn conversation? ─────┐
+         │                                     │
+        Yes                                   No
+         │                                     │
+         ▼                                     ▼
+  Need system prompt?                    ┌── Alpaca ──┐
+         │                               │            │
+    ┌────┴────┐                    Simple commands,
+   Yes       No                    classification,
+    │         │                    single-turn Q&A
+    ▼         ▼
+ ChatML   ShareGPT
+    │         │
+ OpenAI   Dialogue,
+fine-tune  clarification
+
+Converting Between Formats​
+
+When your data is in one format but your framework needs another, convert programmatically:
+
+Alpaca to ShareGPT​
+def alpaca_to_sharegpt(alpaca: dict) -> dict:
+    """Convert Alpaca format to ShareGPT format."""
+    instruction = alpaca["instruction"]
+    input_text = alpaca.get("input", "")
+    output = alpaca["output"]
+
+    # Combine instruction and input
+    if input_text:
+        human_message = f"{instruction}\n\nContext: {input_text}"
+    else:
+        human_message = instruction
+
+    return {
+        "conversations": [
+            {"from": "human", "value": human_message},
+            {"from": "gpt", "value": output}
+        ]
+    }
+
+# Example usage
+alpaca_example = {
+    "instruction": "Create a task to buy groceries",
+    "input": "",
+    "output": "Created task: 'Buy groceries'"
+}
+
+sharegpt_example = alpaca_to_sharegpt(alpaca_example)
+print(sharegpt_example)
+
+
+Output:
+
+{
+    "conversations": [
+        {"from": "human", "value": "Create a task to buy groceries"},
+        {"from": "gpt", "value": "Created task: 'Buy groceries'"}
+    ]
+}
+
+ShareGPT to ChatML​
+def sharegpt_to_chatml(sharegpt: dict, system_prompt: str = "") -> dict:
+    """Convert ShareGPT format to ChatML format."""
+    messages = []
+
+    # Add system prompt if provided
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    # Convert conversations
+    for msg in sharegpt["conversations"]:
+        role = "user" if msg["from"] == "human" else "assistant"
+        messages.append({"role": role, "content": msg["value"]})
+
+    return {"messages": messages}
+
+# Example usage
+sharegpt_example = {
+    "conversations": [
+        {"from": "human", "value": "Create a task to buy groceries"},
+        {"from": "gpt", "value": "Created task: 'Buy groceries'"}
+    ]
+}
+
+chatml_example = sharegpt_to_chatml(
+    sharegpt_example,
+    system_prompt="You are a task management assistant."
+)
+print(chatml_example)
+
+
+Output:
+
+{
+    "messages": [
+        {"role": "system", "content": "You are a task management assistant."},
+        {"role": "user", "content": "Create a task to buy groceries"},
+        {"role": "assistant", "content": "Created task: 'Buy groceries'"}
+    ]
+}
+
+Designing Multi-Turn Conversations​
+
+For ShareGPT and ChatML formats, you'll design multi-turn conversations. Here are patterns that work:
+
+Pattern 1: Clarification Flow​
+{
+  "conversations": [
+    {"from": "human", "value": "Create a task for the meeting"},
+    {"from": "gpt", "value": "I can create a task for the meeting. What's the due date?"},
+    {"from": "human", "value": "Next Monday, high priority"},
+    {"from": "gpt", "value": "Created task: 'Meeting' | Priority: high | Due: 2025-01-20 (Monday)"}
+  ]
+}
+
+
+Why it works: Models learn to ask for missing information instead of hallucinating.
+
+Pattern 2: Confirmation Flow​
+{
+  "conversations": [
+    {"from": "human", "value": "Delete all completed tasks"},
+    {"from": "gpt", "value": "You have 12 completed tasks. Are you sure you want to delete all of them?"},
+    {"from": "human", "value": "Yes, delete them"},
+    {"from": "gpt", "value": "Deleted 12 completed tasks."}
+  ]
+}
+
+
+Why it works: Models learn to confirm destructive actions.
+
+Pattern 3: Error Recovery Flow​
+{
+  "conversations": [
+    {"from": "human", "value": "Update the budget task priority to urgent"},
+    {"from": "gpt", "value": "I don't see a task called 'budget'. Did you mean 'Q4 budget review' or 'Annual budget planning'?"},
+    {"from": "human", "value": "Q4 budget review"},
+    {"from": "gpt", "value": "Updated task: 'Q4 budget review' | Priority: changed to high (Note: 'urgent' maps to high priority)"}
+  ]
+}
+
+
+Why it works: Models learn graceful error handling and disambiguation.
+
+Framework-Specific Requirements​
+
+Different training frameworks have format preferences:
+
+Framework	Preferred Format	Notes
+Unsloth	ShareGPT	Native support, efficient batching
+Axolotl	Alpaca or ChatML	Flexible, many adapters
+OpenAI Fine-tuning	ChatML (JSONL)	Must match exactly
+Hugging Face TRL	Flexible	Use datasets library
+
+For this book's examples (Unsloth on Colab Free Tier), we use ShareGPT format.
+
+Try With AI​
+Prompt 1: Format Detective​
+Here are three training examples in different formats. For each one:
+1. Identify the format (Alpaca, ShareGPT, or ChatML)
+2. Explain how you identified it
+3. Suggest when this format would be appropriate
+
+Example A:
+{"instruction": "Translate to French", "input": "Hello world", "output": "Bonjour le monde"}
+
+Example B:
+{"conversations": [{"from": "human", "value": "What's the weather?"}, {"from": "gpt", "value": "I don't have access to weather data. Could you check a weather app?"}]}
+
+Example C:
+{"messages": [{"role": "system", "content": "You are a helpful assistant"}, {"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello! How can I help?"}]}
+
+
+What you're learning: Pattern recognition for instruction formats. This skill is essential when working with existing datasets or debugging format errors.
+
+Prompt 2: Design Multi-Turn Conversations​
+I need to create 5 ShareGPT training examples for a Task API assistant.
+The conversations should demonstrate:
+1. A clarification flow (asking for missing due date)
+2. A confirmation flow (deleting multiple tasks)
+3. An error recovery flow (task not found)
+4. A multi-step workflow (create then immediately update)
+5. An edge case (conflicting instructions)
+
+For each, explain why the conversation structure teaches good behavior.
+
+
+What you're learning: Designing multi-turn conversations that teach nuanced behaviors. The structure of your conversations directly shapes model behavior.
+
+Prompt 3: Build a Format Converter​
+Help me build a Python script that:
+1. Reads a JSONL file in Alpaca format
+2. Converts each example to ShareGPT format
+3. Optionally adds a system prompt to each conversation
+4. Writes output to a new JSONL file
+5. Validates the output format using Pydantic
+
+Include error handling for malformed input and logging for progress.
+
+
+What you're learning: Practical format conversion for real pipelines. You'll often receive data in one format and need to convert it for your training framework.
+
+Safety Note​
+
+Format mismatches cause silent failures. Your training might run without errors but produce a useless model because the framework couldn't parse your data correctly. Always validate format before training—run a small test batch first.

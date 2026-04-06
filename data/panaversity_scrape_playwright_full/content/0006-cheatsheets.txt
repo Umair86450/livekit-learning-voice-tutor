@@ -1,0 +1,337 @@
+Claude Code
+Cowork
+OpenClaw
+NemoClaw
+OpenShell
+Expand
+Claude Code Workflow Cheatsheet
+SETUP · CONFIGURATION · SKILLS · HOOKS · AGENT TEAMS · SUBAGENTS · SCHEDULED TASKS — 2026 EDITION
+1
+⚡ Getting Started
+# Native install (recommended)
+# macOS / Linux / WSL
+curl -fsSL https://claude.ai/install.sh | bash
+# Windows (PowerShell)
+irm https://claude.ai/install.ps1 | iex
+
+cd your-project && claude
+/init
+Scans your codebase and creates a starter CLAUDE.md file.
+Login — claude login — authenticates via browser
+IDEs — VS Code and JetBrains extensions available
+Verify — claude --version to confirm install
+2
+🧠 Understanding CLAUDE.md
+Persistent memory loaded every session. Tell Claude about your project:
+WHAT
+WHY
+HOW
+○
+What — tech stack, directory map, architecture
+○
+Why — module purpose, design decisions
+○
+How — build/test commands, workflows, gotchas
+# Project: MyApp
+FastAPI + React + Postgres
+
+## Commands
+npm run dev / test / lint
+
+## Architecture
+/app → routes  /lib → utils
+/prisma → DB schema
+3
+📂 Memory File Hierarchy
+~/.claude/CLAUDE.md
+Global — all projects
+CLAUDE.md
+Project — shared on git
+.claude/CLAUDE.md
+Project — alternative location
+./src/CLAUDE.md
+Subfolder — scoped context
+○
+Keep each file under 200 lines
+○
+Subfolder files append context, never overwrite
+○
+Commit to Git for team sharing
+4
+📁 Project File Structure
+your-project/
+├── CLAUDE.md
+├── .claude/
+│   ├── settings.json
+│   ├── settings.local.json
+│   ├── skills/
+│   │   ├── code-review/
+│   │   │   └── SKILL.md
+│   │   └── testing/
+│   │       └── SKILL.md
+│   ├── commands/
+│   │   └── deploy.md
+│   └── agents/
+│       └── reviewer.md
+└── .gitignore
+○
+settings.json — shared team config (commit to git)
+○
+settings.local.json — personal overrides (gitignored)
+○
+commands/ — custom slash commands the team shares
+○
+agents/ — custom subagent definitions
+5
+⚙️ Adding Skills (The Superpower)
+Skills = markdown guides Claude auto-invokes via natural language.
+Project — .claude/skills/name/SKILL.md
+Personal — ~/.claude/skills/name/SKILL.md
+---
+name: testing-patterns
+description: Jest testing patterns
+allowed_tools: Read, Grep, Glob
+---
+
+# Testing Patterns
+Use describe + it + AAA pattern
+Use factory mocks
+○
+description field is critical for auto-activation
+○
+Type /skill-name to invoke explicitly
+6
+🪝 Setting Up Hooks
+Hooks = deterministic callbacks at lifecycle events.
+PRETOOLUSE
+POSTTOOLUSE
+NOTIFICATION
+"hooks": {
+  "PreToolUse": [{
+    "matcher": "Bash",
+    "hooks": [{
+      "type": "command",
+      "command": "scripts/sec.sh",
+      "timeout": 5
+    }]
+  }]
+}
+Exit codes — 0 → allow, 2 → block
+○
+Input via stdin (command) or POST body (HTTP)
+7
+🔒 Permissions & Safety
+{
+  "permissions": {
+    "allow": [
+      "Read:*",
+      "Bash:git:*",
+      "Write:*:*.md"
+    ],
+    "deny": [
+      "Read:env:*",
+      "Bash:sudo:*"
+    ]
+  }
+}
+○
+Wildcard patterns: Tool:arg:glob
+○
+allow auto-approves matching tool calls
+○
+deny blocks matching tool calls entirely
+○
+Set defaultMode to plan, auto, or default
+8
+🏗️ The 4-Layer Architecture
+L1
+CLAUDE.md
+Persistent context and rules
+L2
+Skills
+Auto-invoked knowledge packs
+L3
+Hooks
+Safety gates and automation
+L4
+Agents
+Subagents with their own context
+○
+Each layer builds on the one below — start with L1, add layers as patterns emerge
+9
+🔄 Daily Workflow Pattern
+1
+cd project && claude
+2
+Shift+Tab → Plan Mode
+3
+Describe feature intent
+4
+Shift+Tab → Auto Accept
+5
+! git status → inline bash
+6
+/compact when context grows
+7
+Ctrl+B → background a task
+8
+Esc Esc → rewind if needed
+10
+🧠 Modes & Models
+INTERACTIVE
+PLAN MODE
+EXTENDED THINKING
+claude-opus-4-6 — Most capable — deep reasoning
+claude-sonnet-4-6 — Balanced — daily coding
+claude-haiku-4-5 — Fastest — quick tasks, lowest cost
+Context — Up to 1M tokens with auto-compression
+○
+⌥P to switch models — context preserved
+○
+⌥T to toggle extended thinking
+○
+/rc — remote control from claude.ai web
+○
+/fork — branch conversation to explore alternatives
+11
+🤖 Non-Interactive & CI
+# Single-shot execution
+claude -p "add error handling"
+
+# Pipe content in
+cat logs.txt | claude -p \
+  "summarize errors"
+
+# JSON output for scripting
+claude -p "list TODOs" \
+  --output-format json
+
+# Restrict tools in CI
+claude -p "review" \
+  --allowedTools Read,Grep
+CI auth — Set ANTHROPIC_API_KEY env var
+Exit code — 0 on success — fits pipelines
+○
+Use in GitHub Actions, pre-commit hooks, build scripts
+12
+🔌 MCP Servers
+Model Context Protocol — connect external tools via a standardized interface.
+// .mcp.json (project root)
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["server-package"]
+    }
+  }
+}
+Project — .mcp.json — shared with team via git
+User — ~/.claude.json under mcpServers
+○
+Connect databases, APIs, browsers, cloud services
+○
+Hundreds of community servers available
+13
+🤖 Multi-Agent Parallel Work
+SUBAGENTS
+AGENT TEAMS
+SCHEDULED
+Subagents — Parallel workers via Agent tool, isolated
+Agent Teams — Team lead + teammates, shared task list & mailbox
+/loop 5m — Repeat a prompt on interval (s/m/h/d)
+.claude/agents/reviewer.md
+---
+name: reviewer
+description: Code review agent
+model: claude-sonnet-4-6
+tools: Read, Grep, Glob
+---
+Review for OWASP top 10...
+○
+Worktrees — each agent gets isolated git copy
+○
+Shift+Down to cycle teammates in Agent Teams
+○
+/agents to list and manage definitions
+14
+🌿 Git & PR Workflows
+○
+Commits — auto-generates conventional commit messages from diff
+○
+Branches — creates feature branches, pushes upstream
+○
+Pull requests — writes title, description, files via gh
+○
+Code review — reads diffs, structured feedback
+○
+Secret scanning blocks commits with API keys or tokens
+# Ask Claude naturally:
+"commit these changes"
+"create a PR for this branch"
+"review the last 3 commits"
+15
+💰 Context & Cost Management
+○
+/compact — summarize and compress when context gets long
+○
+/clear — full reset when session is confused
+○
+/cost — check session spend at any time
+○
+Auto-compresses as you approach token limits
+○
+Start fresh sessions every ~20 turns for best quality
+○
+Rule of thumb — /compact first; if still off, /clear and start over
+16
+📌 Quick Reference
+Core Commands
+/init
+Generate CLAUDE.md
+/compact
+Compress context
+/clear
+Reset conversation
+/cost
+Session spend
+/fork
+Branch conversation
+/rc
+Remote from claude.ai
+/loop 5m
+Repeat on interval
+/btw
+Side question (ephemeral)
+/diff
+Review pending changes
+/agents
+List agent definitions
+Key Shortcuts
+⌥P / Alt+P
+Switch model
+⌥T / Alt+T
+Extended thinking
+Ctrl+G
+Text editor
+Ctrl+B
+Background task
+Ctrl+T
+Toggle task list
+Shift+Tab
+Cycle mode
+Shift+Down
+Cycle teammates
+Esc Esc
+Rewind last turn
+!
+Bash mode (inline)
+When to Use
+Interactive — Exploring, debugging, learning
+-p flag — CI/CD, automation, scripts
+Plan mode — Complex features, unclear scope
+Agent Teams — Multi-file parallel work
+/loop — Monitoring, polling, recurring
+/rc — Control CLI from web UI
+⌥T thinking — Hard bugs, architecture
+Claude Code Workflow Cheatsheet — Created 2026
+Anthropic's agentic coding CLI & IDE extensions

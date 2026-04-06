@@ -1,0 +1,469 @@
+NetworkPolicies for Zero-Trust Traffic Control
+
+In March 2023, a security researcher discovered that a popular cloud provider's managed Kubernetes service had no NetworkPolicy enforcement by default. Pods in one tenant's namespace could freely communicate with pods in other tenants' namespaces. The vulnerability went undetected for months because Kubernetes allows all traffic by default—and most teams never lock it down.
+
+Your Task API running in Kubernetes can currently reach every other pod in the cluster. An attacker who compromises your pod gains lateral movement to databases, secret stores, and control plane components. NetworkPolicies transform your cluster from an open network into a zero-trust environment where pods communicate only with explicitly permitted services.
+
+This lesson teaches you to implement the most critical security pattern: default deny first, then explicit allows. Without this pattern, your cluster security is theater.
+
+Prerequisite: Install Calico CNI​
+
+Docker Desktop's default CNI does not enforce NetworkPolicies. You must install Calico before any policies take effect.
+
+Why Calico is required:
+
+CNI	NetworkPolicy Support
+Default Docker Desktop	No enforcement (policies ignored)
+Calico	Full enforcement
+Cilium	Full enforcement
+
+Install Calico with a single command:
+
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.1/manifests/calico.yaml
+
+
+Output:
+
+configmap/calico-config created
+customresourcedefinition.apiextensions.k8s.io/bgpconfigurations.crd.projectcalico.org created
+...
+daemonset.apps/calico-node created
+deployment.apps/calico-kube-controllers created
+
+
+Wait for Calico pods to become ready:
+
+kubectl get pods -n kube-system -l k8s-app=calico-node --watch
+
+
+Output:
+
+NAME                READY   STATUS    RESTARTS   AGE
+calico-node-abc12   1/1     Running   0          2m
+
+
+Once all calico-node pods show Running, NetworkPolicies are enforced cluster-wide.
+
+The Default Deny Pattern​
+
+Critical principle: Default deny must be your first NetworkPolicy.
+
+When you apply a NetworkPolicy that selects pods, Kubernetes switches those pods from "allow all" to "deny all except explicitly allowed." You control this with policyTypes.
+
+Default Deny All Traffic​
+
+Create default-deny.yaml in your Task API namespace:
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: task-api
+spec:
+  podSelector: {}  # Applies to ALL pods in namespace
+  policyTypes:
+  - Ingress
+  - Egress
+
+
+Output (after applying):
+
+kubectl apply -f default-deny.yaml
+
+networkpolicy.networking.k8s.io/default-deny-all created
+
+
+What just happened:
+
+podSelector: {} selects every pod in the task-api namespace
+policyTypes: [Ingress, Egress] denies both inbound and outbound traffic
+No ingress or egress rules means zero allowed traffic
+
+Your Task API pods can no longer reach anything—including DNS.
+
+The DNS Edge Case (CRITICAL)​
+
+Warning: Without a DNS allow rule, service discovery breaks completely.
+
+After applying default deny, try to resolve a service name from your Task API pod:
+
+kubectl exec -n task-api deploy/task-api -- nslookup kubernetes.default
+
+
+Output:
+
+;; connection timed out; no servers could be reached
+command terminated with exit code 1
+
+
+Service discovery fails because pods cannot reach CoreDNS in kube-system. This breaks:
+
+Database connections (postgres.database.svc.cluster.local)
+Inter-service calls (auth-service.auth.svc.cluster.local)
+Any hostname resolution
+Allow DNS Egress​
+
+Create allow-dns.yaml:
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: task-api
+spec:
+  podSelector: {}  # All pods in namespace
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+
+Output:
+
+kubectl apply -f allow-dns.yaml
+
+networkpolicy.networking.k8s.io/allow-dns-egress created
+
+
+Now verify DNS resolution works:
+
+kubectl exec -n task-api deploy/task-api -- nslookup kubernetes.default
+
+
+Output:
+
+Server:    10.96.0.10
+Address:   10.96.0.10#53
+
+Name:   kubernetes.default.svc.cluster.local
+Address: 10.96.0.1
+
+
+Why this works:
+
+Element	Purpose
+namespaceSelector with kubernetes.io/metadata.name: kube-system	Targets only CoreDNS namespace
+Port 53 UDP	Standard DNS queries
+Port 53 TCP	Large DNS responses that exceed UDP size
+
+Common mistake: Using podSelector instead of namespaceSelector for DNS. CoreDNS pods have specific labels, but targeting by namespace is more reliable across Kubernetes versions.
+
+Allow Ingress from Envoy Gateway​
+
+Your Task API receives traffic from the Envoy Gateway (configured in Chapter 86). Allow this ingress:
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+    ports:
+    - protocol: TCP
+      port: 8000
+
+
+Output:
+
+kubectl apply -f allow-gateway-ingress.yaml
+
+networkpolicy.networking.k8s.io/allow-gateway-ingress created
+
+
+Why namespace selection matters:
+
+If you used podSelector without namespaceSelector, the rule would only match pods in the same namespace as your Task API. Gateway pods exist in a different namespace (envoy-gateway-system), so you must use namespaceSelector to cross namespace boundaries.
+
+Allow Egress to Specific Services​
+
+Your Task API needs to reach:
+
+PostgreSQL database (for persistence)
+Redis (for caching)
+
+Create explicit egress rules:
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-database-egress
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: database
+      podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cache
+      podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+
+
+Output:
+
+kubectl apply -f allow-database-egress.yaml
+
+networkpolicy.networking.k8s.io/allow-database-egress created
+
+
+Traffic matrix after all policies:
+
+Source	Destination	Allowed?
+Any pod	Task API :8000	No (except gateway)
+Envoy Gateway	Task API :8000	Yes
+Task API	CoreDNS :53	Yes
+Task API	Postgres :5432	Yes
+Task API	Redis :6379	Yes
+Task API	Any other service	No
+External	Task API	No (no ingress rule)
+Verification with Test Pod​
+
+The only way to confirm NetworkPolicies work is to test them. Deploy a test pod and attempt unauthorized traffic.
+
+Deploy Test Pod​
+kubectl run test-pod \
+  -n task-api \
+  --image=curlimages/curl:latest \
+  --command -- sleep infinity
+
+
+Output:
+
+pod/test-pod created
+
+Test Blocked Traffic​
+
+Try to reach Task API from the test pod:
+
+kubectl exec -n task-api test-pod -- curl -s --connect-timeout 3 http://task-api:8000/health
+
+
+Output:
+
+command terminated with exit code 28
+
+
+Exit code 28 means connection timeout—the NetworkPolicy blocked the traffic.
+
+Test Allowed Traffic (Simulated Gateway)​
+
+To verify gateway traffic works, temporarily add a label that matches your ingress policy:
+
+# This demonstrates the concept - in production, only gateway pods have these labels
+kubectl label ns task-api kubernetes.io/metadata.name=envoy-gateway-system --dry-run=client -o yaml
+
+
+In production, only pods from the envoy-gateway-system namespace can reach your Task API on port 8000.
+
+Cleanup Test Pod​
+kubectl delete pod test-pod -n task-api
+
+
+Output:
+
+pod "test-pod" deleted
+
+Complete NetworkPolicy Set for Task API​
+
+Here is the complete set of policies you created in this lesson:
+
+# 1. Default deny all traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: task-api
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# 2. Allow DNS egress (REQUIRED)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: task-api
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+# 3. Allow ingress from gateway
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+    ports:
+    - protocol: TCP
+      port: 8000
+---
+# 4. Allow egress to database services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-database-egress
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: database
+      podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cache
+      podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+
+
+Save as task-api-network-policies.yaml and apply:
+
+kubectl apply -f task-api-network-policies.yaml
+
+
+Output:
+
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-gateway-ingress created
+networkpolicy.networking.k8s.io/allow-database-egress created
+
+Common Pitfalls​
+Pitfall	Symptom	Fix
+Forgot DNS allow	All service discovery fails	Add allow-dns-egress policy immediately after default deny
+Used podSelector for cross-namespace	Traffic still blocked	Use namespaceSelector for pods in other namespaces
+Missing Calico	Policies have no effect	Install Calico CNI before creating policies
+Wrong port in egress	Connection timeouts	Verify target service port (not container port)
+Reflect on Your Skill​
+
+Test your cloud-security skill against what you learned:
+
+Using my cloud-security skill, generate NetworkPolicies for a new
+microservice that needs to:
+- Accept traffic only from the API gateway
+- Connect to a PostgreSQL database in another namespace
+- Make external HTTPS calls to api.openai.com
+
+
+Evaluation questions:
+
+Does your skill include default-deny as the FIRST policy?
+Does your skill automatically include the DNS allow rule?
+Does your skill handle cross-namespace traffic correctly with namespaceSelector?
+Does your skill warn about the Calico/CNI requirement?
+
+If any answers are "no," update your skill with the patterns from this lesson.
+
+Try With AI​
+
+Test your understanding of NetworkPolicy design and troubleshooting.
+
+Prompt 1:
+
+Generate a default-deny NetworkPolicy for a namespace called "payments"
+that handles credit card processing. Include appropriate DNS egress rules.
+
+
+What you're learning: Whether you can apply the default-deny + DNS pattern to a new namespace. Notice if the generated policy includes both UDP and TCP for port 53, and whether it correctly targets kube-system for CoreDNS.
+
+Prompt 2:
+
+My pods can't resolve hostnames after I applied a default-deny policy.
+I added a DNS allow rule but it still doesn't work. The rule targets
+pods with label app=coredns in the default namespace. What's wrong?
+
+
+What you're learning: Common debugging patterns for NetworkPolicy. The issue is that CoreDNS runs in kube-system (not default) and the correct approach uses namespaceSelector rather than podSelector alone. This is the most common NetworkPolicy mistake.
+
+Prompt 3:
+
+Design NetworkPolicies for a multi-service architecture:
+- Frontend (receives external traffic via ingress controller)
+- API (receives traffic from frontend, calls backend)
+- Backend (receives traffic from API, connects to database)
+- Database (receives traffic only from backend)
+
+Use least-privilege principles.
+
+
+What you're learning: How to design a complete NetworkPolicy architecture for a realistic application. Each service should have its own ingress/egress policies, creating a defense-in-depth traffic matrix.
+
+SECURITY REMINDER
+
+Always test NetworkPolicies in a development namespace before applying to production. A misconfigured egress policy can break your application's ability to reach databases, external APIs, or even DNS. Use kubectl exec with curl or nslookup to verify connectivity after each policy change.

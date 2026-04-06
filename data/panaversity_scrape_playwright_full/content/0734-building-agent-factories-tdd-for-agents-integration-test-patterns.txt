@@ -1,0 +1,651 @@
+Integration Test Patterns
+
+Unit tests verify parts. Integration tests verify the whole.
+
+You've tested individual components: endpoints return correct responses, models persist data correctly, LLM mocks intercept API calls. But agents don't work in isolation. A real agent flow involves multiple steps: a user sends a message, the LLM decides to call a tool, the tool executes against your database, and the LLM responds with the result. Each step depends on the previous one.
+
+Integration tests verify this entire pipeline works together. The challenge: how do you test multi-step flows when each step requires a different LLM response? The answer is respx's side_effect parameter with a list of sequential responses.
+
+This lesson teaches you to test complete agent pipelines—multi-turn conversations, database state changes, and error recovery—all with mocked LLM responses.
+
+The Full Agent Pipeline​
+
+Here's what happens when a user asks your agent to create a task:
+
+User Message
+    ↓
+┌─────────────────────────────────────────────────┐
+│  LLM Call #1: "Create a task called 'New Task'" │
+│  LLM Response: tool_call(create_task, {...})    │
+└─────────────────────────────────────────────────┘
+    ↓
+Tool Executes → Database INSERT
+    ↓
+┌─────────────────────────────────────────────────┐
+│  LLM Call #2: Tool result: "Task created (id=5)"│
+│  LLM Response: "I created the task 'New Task'" │
+└─────────────────────────────────────────────────┘
+    ↓
+Agent Response to User
+
+
+This pipeline involves two LLM calls, one database operation, and coordination between all components. Unit tests can't verify this—they test pieces in isolation. Integration tests verify the pieces connect correctly.
+
+Multi-Turn Mock Sequences​
+
+The key technique: respx's side_effect parameter accepts a list. Each element in the list is returned in sequence for successive calls to the same endpoint.
+
+Basic Multi-Turn Pattern​
+# tests/integration/test_agent_pipeline.py
+import pytest
+import respx
+import httpx
+from httpx import AsyncClient
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_complete_agent_flow(client: AsyncClient):
+    """Test full agent pipeline: tool call → execution → response."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            # First call: LLM decides to use a tool
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": '{"title": "Write integration tests", "priority": "high"}'
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            # Second call: LLM responds after seeing tool result
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "I've created the task 'Write integration tests' with high priority."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+        ]
+    )
+
+    response = await client.post(
+        "/api/agent/chat",
+        json={"message": "Create a high priority task to write integration tests"}
+    )
+
+    assert response.status_code == 200
+    assert "created" in response.json()["response"].lower()
+
+    # Verify the LLM was called twice
+    assert respx.calls.call_count == 2
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_complete_agent_flow PASSED
+
+
+The side_effect list provides responses in order. First call gets the first response (tool call), second call gets the second response (final message). This mirrors exactly what happens in production.
+
+Three-Turn Conversation Flow​
+
+Some agent flows require more turns—asking for clarification, handling ambiguity, or multi-step tool chains:
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clarification_flow(client: AsyncClient):
+    """Test agent that asks for clarification."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            # Turn 1: Agent asks for clarification
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "I can create that task. What priority should it have?"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+            # Turn 2: User provides priority, agent creates task
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_456",
+                            "type": "function",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": '{"title": "Review PR", "priority": "high"}'
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            # Turn 3: Confirmation
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Done! I created 'Review PR' with high priority."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+        ]
+    )
+
+    # First turn: ambiguous request
+    response1 = await client.post(
+        "/api/agent/chat",
+        json={"message": "Create a task to review the PR"}
+    )
+    assert "priority" in response1.json()["response"].lower()
+
+    # Second turn: provide clarification
+    response2 = await client.post(
+        "/api/agent/chat",
+        json={"message": "High priority"}
+    )
+    assert "created" in response2.json()["response"].lower()
+
+    assert respx.calls.call_count == 3
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_clarification_flow PASSED
+
+Database State Verification​
+
+Integration tests must verify that agent actions actually persist to the database. It's not enough that the agent says "I created the task"—the task must exist.
+
+Verifying State After Tool Execution​
+@pytest.mark.asyncio
+@respx.mock
+async def test_task_persisted_after_agent_action(client: AsyncClient):
+    """Verify database state changes after agent creates a task."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_persist_test",
+                            "type": "function",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": '{"title": "Verify persistence", "priority": "medium"}'
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Created 'Verify persistence' task."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+        ]
+    )
+
+    # Verify no tasks exist before
+    before_response = await client.get("/api/tasks")
+    assert len(before_response.json()) == 0
+
+    # Agent creates task
+    await client.post(
+        "/api/agent/chat",
+        json={"message": "Create a medium priority task called 'Verify persistence'"}
+    )
+
+    # Verify task exists after
+    after_response = await client.get("/api/tasks")
+    tasks = after_response.json()
+
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "Verify persistence"
+    assert tasks[0]["priority"] == "medium"
+    assert tasks[0]["status"] == "pending"
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_task_persisted_after_agent_action PASSED
+
+State Verification Helper​
+
+When you verify state frequently, extract a helper:
+
+# tests/helpers.py
+async def verify_task_created(
+    client: AsyncClient,
+    title: str,
+    priority: str = "medium",
+    status: str = "pending"
+) -> dict:
+    """Verify a task with given attributes exists in database."""
+    response = await client.get("/api/tasks")
+    tasks = response.json()
+
+    matching = [t for t in tasks if t["title"] == title]
+    assert len(matching) == 1, f"Expected task '{title}' not found in {tasks}"
+
+    task = matching[0]
+    assert task["priority"] == priority, f"Expected priority {priority}, got {task['priority']}"
+    assert task["status"] == status, f"Expected status {status}, got {task['status']}"
+
+    return task
+
+
+Use it in tests:
+
+from tests.helpers import verify_task_created
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_with_helper(client: AsyncClient):
+    """Use helper to verify state."""
+    # ... mock setup ...
+
+    await client.post("/api/agent/chat", json={"message": "Create task 'Test helper'"})
+
+    task = await verify_task_created(client, title="Test helper", priority="medium")
+    assert task["id"] is not None
+
+Error Handling Path Testing​
+
+Production agents must handle failures gracefully. respx's side_effect also accepts exceptions, letting you simulate network failures, timeouts, and malformed responses.
+
+Testing Timeout Handling​
+@pytest.mark.asyncio
+@respx.mock
+async def test_agent_handles_timeout_gracefully(client: AsyncClient):
+    """Test agent responds gracefully when LLM times out."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=httpx.TimeoutException("Connection timed out after 30s")
+    )
+
+    response = await client.post(
+        "/api/agent/chat",
+        json={"message": "Create a task"}
+    )
+
+    # Agent should return error response, not crash
+    assert response.status_code in [503, 504]
+    error_data = response.json()
+    assert "error" in error_data
+    assert "timeout" in error_data["error"].lower() or "unavailable" in error_data["error"].lower()
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_agent_handles_timeout_gracefully PASSED
+
+Testing Malformed Response Handling​
+@pytest.mark.asyncio
+@respx.mock
+async def test_agent_handles_malformed_response(client: AsyncClient):
+    """Test agent handles unexpected LLM response structure."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            # Missing required 'choices' array
+            "unexpected": "structure",
+            "no_choices": True
+        })
+    )
+
+    response = await client.post(
+        "/api/agent/chat",
+        json={"message": "Create a task"}
+    )
+
+    assert response.status_code == 500
+    assert "error" in response.json()
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_agent_handles_malformed_response PASSED
+
+Testing Retry After Rate Limit​
+@pytest.mark.asyncio
+@respx.mock
+async def test_agent_retries_after_rate_limit(client: AsyncClient):
+    """Test agent retries when hitting rate limit."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            # First attempt: rate limited
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Rate limit exceeded",
+                        "type": "rate_limit_error"
+                    }
+                },
+                headers={"Retry-After": "1"}
+            ),
+            # Retry attempt: success
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Here's your response after retry."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+        ]
+    )
+
+    response = await client.post(
+        "/api/agent/chat",
+        json={"message": "Test retry logic"}
+    )
+
+    assert response.status_code == 200
+    assert "after retry" in response.json()["response"].lower()
+    # Verify two calls were made
+    assert respx.calls.call_count == 2
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_agent_retries_after_rate_limit PASSED
+
+Testing Tool Execution Failure​
+@pytest.mark.asyncio
+@respx.mock
+async def test_agent_handles_tool_failure(client: AsyncClient):
+    """Test agent handles tool execution failure gracefully."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            # LLM calls tool with invalid arguments
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_invalid",
+                            "type": "function",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": '{"invalid_field": "bad_data"}'  # Missing 'title'
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            # LLM acknowledges error and responds
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "I couldn't create the task due to missing information. Please provide a title."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+        ]
+    )
+
+    response = await client.post(
+        "/api/agent/chat",
+        json={"message": "Create task with broken data"}
+    )
+
+    assert response.status_code == 200
+    assert "couldn't" in response.json()["response"].lower() or "title" in response.json()["response"].lower()
+
+
+Output:
+
+tests/integration/test_agent_pipeline.py::test_agent_handles_tool_failure PASSED
+
+Test Organization Structure​
+
+As your test suite grows, organize tests by scope:
+
+tests/
+├── conftest.py              # Shared fixtures (client, session, mocks)
+├── helpers.py               # State verification helpers
+├── factories.py             # Test data factories
+├── unit/
+│   ├── test_models.py       # SQLModel operations
+│   ├── test_tools.py        # Agent tool functions (isolated)
+│   └── test_utils.py        # Utility functions
+├── integration/
+│   ├── test_api.py          # FastAPI endpoint tests
+│   ├── test_agent_pipeline.py   # Multi-turn agent flows
+│   └── test_error_handling.py   # Error path testing
+└── e2e/
+    └── test_flows.py        # Complete user journey flows
+
+
+Why this structure matters:
+
+Directory	What it Tests	Speed	Mocking Level
+unit/	Individual functions	Fastest	Heavy (all deps mocked)
+integration/	Component interaction	Medium	Moderate (LLM mocked)
+e2e/	Full user journeys	Slower	Minimal (still mock LLM)
+
+Run subsets for fast feedback:
+
+# Quick check during development
+pytest tests/unit/ -v
+
+# Full integration check before PR
+pytest tests/integration/ -v
+
+# Complete suite before deploy
+pytest tests/ -v --cov
+
+Skill Pattern Extraction​
+
+You've now learned the core integration test patterns. These belong in your agent-tdd skill.
+
+Patterns to Add to Your Skill​
+
+1. Multi-Step Mock Pattern:
+
+# Sequential LLM responses for multi-turn flows
+respx.post("...").mock(side_effect=[response1, response2, response3])
+
+
+2. State Verification Pattern:
+
+# Verify database state after agent action
+before = await client.get("/api/resource")
+await client.post("/api/agent/chat", json={"message": "..."})
+after = await client.get("/api/resource")
+assert_state_changed(before, after)
+
+
+3. Error Scenario Templates:
+
+# Timeout: side_effect=httpx.TimeoutException(...)
+# Rate limit: httpx.Response(429, ...) followed by success
+# Malformed: httpx.Response(200, json={invalid structure})
+
+Hands-On Exercise​
+
+Create tests/integration/test_agent_pipeline.py with these tests:
+
+"""
+Integration tests for complete agent pipeline.
+
+Requirements:
+1. Test two-turn flow: tool call → response
+2. Verify database state after agent action
+3. Test timeout handling
+4. Test multi-turn conversation with clarification
+"""
+
+import pytest
+import respx
+import httpx
+from httpx import AsyncClient
+
+# TODO: Implement these tests
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_task_flow(client: AsyncClient):
+    """Test agent creates task through full pipeline."""
+    # Mock side_effect with tool call then response
+    # Call agent endpoint
+    # Verify response
+    # Verify database state
+    pass
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_database_state_verified(client: AsyncClient):
+    """Verify task persists after agent creates it."""
+    pass
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_timeout_graceful_handling(client: AsyncClient):
+    """Test agent handles LLM timeout without crashing."""
+    pass
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_multi_turn_clarification(client: AsyncClient):
+    """Test 3-turn flow with clarification step."""
+    pass
+
+
+Run your tests:
+
+pytest tests/integration/test_agent_pipeline.py -v
+
+
+Success criteria:
+
+All 4 tests pass
+Each test uses side_effect appropriately
+State verification confirms database changes
+Error test verifies graceful handling
+Try With AI​
+
+Work with your AI assistant to build comprehensive integration tests.
+
+Prompt 1: Multi-Turn Sequence Design​
+My agent has a 4-step flow:
+1. User asks to create a project
+2. Agent asks for project name (clarification)
+3. User provides name "Marketing Q1"
+4. Agent creates project and 3 default tasks
+
+Design the respx side_effect sequence for this flow. I need:
+- Response for clarification question
+- Response with tool call for create_project
+- Response with 3 tool calls for create_task (parallel)
+- Final confirmation response
+
+Show me the complete test with all mocked responses.
+
+
+What you're learning: Complex mock sequences for realistic multi-step flows. AI helps design the sequence; you verify it matches your agent's actual behavior.
+
+Prompt 2: State Verification Pattern​
+After my agent runs a conversation, I want to verify:
+1. Project exists with correct name
+2. Project has 3 tasks attached
+3. All tasks have status "pending"
+4. Tasks have correct project_id foreign key
+
+Design a state verification function that checks all of this.
+Include helpful assertion messages for debugging.
+
+
+What you're learning: Reusable verification patterns. You specify what state matters; AI generates the verification logic.
+
+Prompt 3: Extract Skill Pattern​
+I've written 6 integration tests for different agent flows.
+Here are the patterns I keep repeating:
+
+1. Setting up side_effect lists for multi-turn
+2. Verifying database state after agent actions
+3. Testing error scenarios (timeout, rate limit, malformed)
+
+Help me extract these into reusable fixtures and helpers
+for my agent-tdd skill. What should the templates look like?
+
+
+What you're learning: Creating reusable intelligence from experience. AI helps identify patterns; you decide what belongs in your skill.
+
+Reflect on Your Skill​
+Test Your Skill​
+Using my agent-tdd skill, show me how to test a multi-turn
+agent conversation where the LLM calls two tools sequentially.
+Does my skill include:
+- The side_effect list pattern for sequential responses?
+- State verification after tool execution?
+- The recommended test organization structure?
+
+Identify Gaps​
+
+After running that prompt, ask yourself:
+
+Does my skill show multi-step side_effect with tool calls?
+Does it include database state verification patterns?
+Does it cover timeout, rate limit, and malformed response testing?
+Does it have the tests/ directory organization structure?
+Improve Your Skill​
+
+If you found gaps:
+
+My agent-tdd skill needs comprehensive integration testing patterns. Add:
+
+1. Multi-turn mock patterns:
+   - side_effect list for sequential LLM calls
+   - Tool call → tool result → final response sequence
+   - Clarification flows with 3+ turns
+
+2. State verification:
+   - Before/after database state checking
+   - Helper function template for common assertions
+   - Foreign key relationship verification
+
+3. Error path testing:
+   - Timeout using side_effect=httpx.TimeoutException
+   - Rate limit with retry (429 then 200)
+   - Malformed response handling
+   - Tool execution failure
+
+4. Test organization:
+   - tests/unit/, tests/integration/, tests/e2e/ structure
+   - When to use each level
+   - Run commands for each scope
+
+Make sure each pattern shows complete, runnable code examples.
+
+
+Your skill now covers the full testing pyramid—from unit tests through integration tests. The patterns you've extracted will save hours on every future agent project.

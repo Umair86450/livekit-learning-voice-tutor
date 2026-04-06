@@ -1,0 +1,308 @@
+Dapr Workflows Overview
+
+Your ChatActor works beautifully for maintaining conversation state. But what happens when you need to process a task that spans hours or days? A customer onboarding flow that waits for document verification. An order fulfillment process that coordinates inventory, payment, and shipping. A multi-step AI analysis pipeline that should resume exactly where it stopped if the server restarts.
+
+Actors excel at stateful entities with identity. But long-running orchestration across multiple services—where you need retries, timeouts, parallel execution, and rollback on failure—calls for a different pattern.
+
+This is where Dapr Workflows shine.
+
+Why Workflows Matter for AI Agents​
+
+Imagine you're building an AI agent that processes research requests. The workflow looks like:
+
+Validate the research query
+Search multiple knowledge bases in parallel
+Synthesize results using an LLM
+Wait for human approval if confidence is low
+Deliver the final report
+
+Each step might take minutes. The human approval step might take days. What happens if your server restarts between steps 3 and 4?
+
+Without workflows, you'd lose everything. The user would need to start over. With Dapr Workflows, the process resumes exactly where it stopped—the search results are preserved, and the workflow continues waiting for human approval.
+
+This is durable execution: your business logic survives infrastructure failures.
+
+Durable Execution: The Core Concept​
+
+Traditional code runs in memory. When the process dies, everything is lost:
+
+Traditional Execution:
+┌─────────────────────────────────────────────────────────────┐
+│  step1() → step2() → [SERVER CRASH] → ??? (lost forever)   │
+└─────────────────────────────────────────────────────────────┘
+
+
+Durable execution persists progress at each step:
+
+Durable Execution:
+┌─────────────────────────────────────────────────────────────┐
+│  step1() → ✓checkpoint → step2() → ✓checkpoint → [CRASH]   │
+│                                                              │
+│  [RESTART] → replay → replay → step3() → ✓checkpoint → ... │
+└─────────────────────────────────────────────────────────────┘
+
+
+Each checkpoint records what happened. On restart, the workflow engine replays the history to reconstruct state, then continues from where it left off.
+
+Event Sourcing: How Checkpoints Work​
+
+Dapr Workflows use event sourcing to persist progress. Instead of storing "current state," they store "sequence of events that led to current state."
+
+When your workflow calls an activity:
+
+Event 1: ActivityScheduled(validate_task, input={task_id: "123"})
+Event 2: ActivityCompleted(validate_task, result={valid: true})
+Event 3: ActivityScheduled(assign_task, input={task_id: "123"})
+Event 4: ActivityCompleted(assign_task, result={assignee: "alice"})
+[CRASH HERE]
+
+
+On restart, the workflow engine:
+
+Reads the event history from the state store
+Replays the workflow code, but skips actual execution—it returns cached results from history
+Reaches the point where history ends (after Event 4)
+Resumes normal execution from there
+
+This is why checkpointing is called "durable"—the state store (Redis, PostgreSQL, etc.) persists across restarts.
+
+The Workflow Engine Architecture​
+
+Dapr Workflows run on the Durable Task Framework, the same foundation used by Azure Durable Functions. Here's how the pieces fit together:
+
+┌──────────────────────────────────────────────────────────────────┐
+│                        Your Application                          │
+│  ┌────────────────────┐    ┌─────────────────────────────────┐  │
+│  │  Workflow Runtime  │    │  Activities (Units of Work)      │  │
+│  │  - Orchestrates    │────│  - Can call external APIs        │  │
+│  │  - Manages replay  │    │  - Can be non-deterministic      │  │
+│  └─────────┬──────────┘    │  - Results are cached            │  │
+│            │                └─────────────────────────────────┘  │
+└────────────┼─────────────────────────────────────────────────────┘
+             │ gRPC Stream
+┌────────────▼─────────────────────────────────────────────────────┐
+│                      Dapr Sidecar                                │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Workflow Engine (Built on Actor Backend)                   │ │
+│  │  - Stores workflow history as events                        │ │
+│  │  - Handles replay and resumption                            │ │
+│  │  - Manages timers and external events                       │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                              │                                    │
+└──────────────────────────────┼────────────────────────────────────┘
+                               │
+┌──────────────────────────────▼────────────────────────────────────┐
+│                     State Store (Redis, etc.)                     │
+│              Workflow history persisted as events                 │
+└───────────────────────────────────────────────────────────────────┘
+
+
+Key insight: Dapr Workflows use the actor backend for state storage. This means:
+
+Workflow state gets the same persistence guarantees as actor state
+You need actorStateStore: "true" in your state store configuration
+Workflows and actors share infrastructure, but serve different purposes
+The Critical Rule: Workflow Determinism​
+
+Here's where many developers get confused—and where bugs become subtle and hard to debug.
+
+Workflow code must be deterministic. Every time the workflow replays, it must make the same decisions in the same order. Otherwise, replay produces a different execution path than the original, and the workflow engine can't match history events to code execution.
+
+What Breaks Determinism​
+
+These patterns cause replay failures:
+
+Pattern	Why It Breaks	What Happens on Replay
+random.randint(1, 100)	Different value each run	Workflow takes different branch than history recorded
+datetime.now()	Different time on replay	Timeout logic behaves differently
+httpx.get(url)	External API state may change	Can't guarantee same response
+os.environ["CONFIG"]	Environment may differ	Configuration changes break replay
+uuid.uuid4()	Different ID each run	Can't match to history
+What Workflows Can Do Safely​
+Pattern	Why It's Safe
+ctx.current_utc_datetime	Workflow context provides deterministic time
+yield ctx.call_activity(...)	Activity results are cached in history
+yield ctx.create_timer(...)	Timer is recorded in history
+ctx.wait_for_external_event(...)	Event data is recorded in history
+Input parameters	Same input produces same execution
+The Mental Model​
+
+Think of it this way:
+
+Workflow code = orchestration logic that must replay identically
+Activity code = actual work that can do anything (results get cached)
+
+If you need to call an API, generate a random number, or get the current time—do it in an activity. The activity's result gets stored in history, and on replay, the workflow receives that cached result instead of re-executing.
+
+# WRONG: Non-deterministic in workflow
+def my_workflow(ctx, input_data):
+    if random.random() > 0.5:  # Different on each replay!
+        yield ctx.call_activity(path_a, input=input_data)
+    else:
+        yield ctx.call_activity(path_b, input=input_data)
+
+# CORRECT: Determinism through activity
+def my_workflow(ctx, input_data):
+    decision = yield ctx.call_activity(make_decision, input=input_data)
+    if decision["path"] == "a":
+        yield ctx.call_activity(path_a, input=input_data)
+    else:
+        yield ctx.call_activity(path_b, input=input_data)
+
+# The activity can use random, datetime, APIs - it only runs once
+def make_decision(ctx, input_data):
+    return {"path": "a" if random.random() > 0.5 else "b"}
+
+When to Use Workflows vs Actors vs Plain State​
+
+This is the question every Dapr developer faces. Here's the decision framework:
+
+Comparison Table​
+Characteristic	Plain State	Actors	Workflows
+Identity	Key-based lookup	Encapsulated per entity	Per workflow instance
+Concurrency	Manual locking needed	Turn-based (automatic)	Sequential per workflow
+Durability	Manual checkpointing	Automatic state persistence	Automatic event sourcing
+Scheduling	External (cron, etc.)	Timers & Reminders	Built-in timers
+Multi-step orchestration	Manual tracking	Possible but awkward	Native pattern
+Parallel execution	Manual coordination	Actor-to-actor calls	when_all, when_any
+Compensation/Rollback	Manual implementation	Manual implementation	Saga pattern support
+Long-running (hours/days)	Complex	Reminders help	Designed for this
+Human-in-the-loop	Polling	Possible	wait_for_external_event
+Decision Framework​
+
+Use Plain State When:
+
+Simple key-value storage needs
+No concurrency concerns
+No multi-step processes
+Example: Storing user preferences, caching responses
+
+Use Actors When:
+
+Entity has identity (user, session, device)
+Turn-based concurrency matters (chat messages must process in order)
+State needs timers/reminders (deadline notifications)
+Multiple independent entities (10,000 users each with their own state)
+Example: ChatActor for conversation history, UserSessionActor for login state
+
+Use Workflows When:
+
+Multi-step process that must complete reliably
+Need parallel execution with aggregation
+Need compensation on failure (undo completed steps)
+Long-running processes (hours to days)
+Human approval or external events required
+Example: Order fulfillment, document processing pipeline, AI research synthesis
+Real-World Mapping​
+Scenario	Best Choice	Reasoning
+Chat conversation history	Actor	Entity with identity, turn-based message processing
+Order processing (reserve → pay → ship)	Workflow	Multi-step orchestration, compensation on failure
+User preference storage	Plain State	Simple key-value, no orchestration
+Research pipeline (search → analyze → approve)	Workflow	Long-running, human-in-the-loop, parallel search
+Session timeout tracking	Actor	Entity with timer/reminder needs
+Batch document processing	Workflow	Parallel execution, fan-out/fan-in pattern
+Real-time game state	Actor	High-frequency updates, entity identity
+Customer onboarding flow	Workflow	Multi-step, external events (document verification)
+The Hybrid Pattern: Actors + Workflows​
+
+Often the best architecture combines both:
+
+┌─────────────────────────────────────────────────────────────────┐
+│  TaskProcessingWorkflow (orchestration)                         │
+│  ┌────────────┐    ┌────────────┐    ┌────────────┐            │
+│  │ Validate   │ -> │ Process    │ -> │ Notify     │            │
+│  │ Activity   │    │ Activity   │    │ Activity   │            │
+│  └────────────┘    └─────┬──────┘    └────────────┘            │
+│                          │                                      │
+│                          ▼                                      │
+│                    ┌────────────┐                               │
+│                    │ TaskActor  │ (entity state)                │
+│                    │ - status   │                               │
+│                    │ - history  │                               │
+│                    │ - reminder │                               │
+│                    └────────────┘                               │
+└─────────────────────────────────────────────────────────────────┘
+
+Workflow handles the multi-step orchestration
+Actor maintains the entity's state with identity
+Workflow activities call actor methods to update state
+Actor reminders handle entity-specific scheduling (deadlines)
+
+This separation lets each pattern do what it does best.
+
+Reflect on Your Skill​
+
+Does your dapr-deployment skill understand when to recommend workflows versus actors? Test it:
+
+Using my dapr-deployment skill, I have a customer onboarding process:
+1. Collect documents (immediate)
+2. Verify identity (external service, may take 2 days)
+3. Create account (if verified)
+4. Send welcome email (after account created)
+5. If verification fails, notify customer and clean up partial state
+
+Should this be an actor, a workflow, or both? Explain your reasoning.
+
+
+If your skill recommends a workflow with compensation logic for the failure case, it understands the pattern. If it suggests putting everything in an actor or plain state, consider adding workflow decision criteria to your skill.
+
+Try With AI​
+Prompt 1: Explore Durable Execution Mechanics​
+I'm learning about Dapr Workflows and durable execution. Walk me through
+exactly what happens when:
+
+1. A workflow with 3 activities (A, B, C) completes activity B
+2. The server crashes before activity C starts
+3. The server restarts
+
+Show me the event history that gets stored, and explain the replay process
+step by step. Use a concrete example like an order processing workflow.
+
+
+What you're learning: The mechanics of event sourcing and replay—understanding that workflow history is a sequence of events, not a snapshot of state.
+
+Prompt 2: Identify Determinism Violations​
+Here's a workflow I wrote. Help me identify any determinism violations
+and explain why each one would cause replay failures:
+
+def process_task_workflow(ctx, task):
+    # Get current time for logging
+    start_time = datetime.utcnow()
+
+    # Randomly select a processing strategy
+    if random.choice(['fast', 'thorough']) == 'fast':
+        result = yield ctx.call_activity(fast_process, input=task)
+    else:
+        result = yield ctx.call_activity(thorough_process, input=task)
+
+    # Check external config
+    config = os.environ.get('PROCESSING_MODE', 'default')
+
+    # Generate unique ID for the result
+    result['id'] = str(uuid.uuid4())
+
+    return result
+
+For each violation, show me the correct pattern using activities.
+
+
+What you're learning: How to audit workflow code for determinism issues and the pattern of moving non-deterministic operations into activities.
+
+Prompt 3: Design Decision Framework Application​
+I'm building an AI agent system with these requirements:
+
+1. Users submit research queries
+2. System searches 3 knowledge bases in parallel
+3. LLM synthesizes results (may take 30 seconds)
+4. If confidence < 80%, wait for human review (may take days)
+5. Deliver final report
+6. Track each user's query history for personalization
+
+Walk me through your decision process: What should be an actor?
+What should be a workflow? What should be plain state?
+Create a diagram showing how the components interact.
+
+
+What you're learning: Applying the actors vs workflows decision framework to a realistic scenario, including hybrid patterns where both are needed.
+
+Safety Note: When implementing workflows in production, always test your replay behavior by actually killing and restarting the workflow service mid-execution. Determinism bugs only surface during replay, and they can be subtle—the workflow might run fine normally but fail mysteriously on restart.

@@ -1,0 +1,796 @@
+Contract Testing with Zod
+
+Your frontend SDK calls a backend API. The backend team ships a new version with a "minor" change: they renamed total_tokens to totalTokens. Your SDK breaks in production. Customers report errors. You spend hours debugging what should have been caught in CI.
+
+This scenario plays out constantly in AI applications, where APIs evolve rapidly and frontend-backend synchronization is critical. The solution isn't more careful coordination meetings or stricter code reviews. The solution is contract testing: automated tests that verify your code's expectations match reality.
+
+Zod makes contract testing elegant. Your schemas aren't just TypeScript types that disappear at compile time. They're runtime validators that catch mismatches the moment they occur. Define a schema once, and it becomes a living contract that documents your expectations, validates actual responses, and alerts you when the API drifts from what your code expects.
+
+This lesson teaches you to use Zod schemas as contracts: validating responses, recording fixtures, handling schema evolution, and catching API drift before your users do.
+
+Why Zod for Contracts?​
+
+TypeScript types disappear after compilation. When your code runs in production, there's no type checking. If the backend sends { totalTokens: 50 } instead of { total_tokens: 50 }, TypeScript won't help you.
+
+Zod solves this by validating data at runtime:
+
+Approach	Compile Time	Runtime	API Changes
+TypeScript only	Catches type errors	No validation	Breaks silently
+Manual validation	No help	Custom code needed	Easy to miss fields
+Zod schemas	Full type inference	Automatic validation	Immediate error with details
+
+Zod infers TypeScript types from your schemas. Define once, get both runtime validation and compile-time types. When validation fails, Zod tells you exactly which field broke and why.
+
+Defining Contract Schemas​
+
+Start by modeling what your API should return. This schema becomes your contract:
+
+import { z } from "zod";
+
+// The contract: what a chat completion response MUST contain
+const ChatCompletionSchema = z.object({
+  id: z.string(),
+  model: z.string(),
+  choices: z.array(
+    z.object({
+      index: z.number(),
+      message: z.object({
+        role: z.enum(["assistant", "user", "system"]),
+        content: z.string().nullable(),
+      }),
+      finish_reason: z.enum(["stop", "length", "tool_calls"]).nullable(),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+});
+
+// Extract the TypeScript type from the schema
+type ChatCompletion = z.infer<typeof ChatCompletionSchema>;
+
+
+Output:
+
+// ChatCompletion type is inferred as:
+// {
+//   id: string;
+//   model: string;
+//   choices: Array<{
+//     index: number;
+//     message: { role: "assistant" | "user" | "system"; content: string | null };
+//     finish_reason: "stop" | "length" | "tool_calls" | null;
+//   }>;
+//   usage: {
+//     prompt_tokens: number;
+//     completion_tokens: number;
+//     total_tokens: number;
+//   };
+// }
+
+
+This schema documents exactly what your code expects. When you or the backend team looks at it, there's no ambiguity about field names, types, or required values.
+
+Validating Responses with safeParse​
+
+Use safeParse to validate responses without throwing exceptions:
+
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+
+const ChatCompletionSchema = z.object({
+  id: z.string(),
+  model: z.string(),
+  choices: z.array(
+    z.object({
+      message: z.object({
+        role: z.string(),
+        content: z.string().nullable(),
+      }),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+});
+
+describe("ChatCompletion contract", () => {
+  it("validates correct responses", () => {
+    const response = {
+      id: "chatcmpl-123",
+      model: "gpt-4",
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: "Hello! How can I help you today?",
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 12,
+        total_tokens: 22,
+      },
+    };
+
+    const result = ChatCompletionSchema.safeParse(response);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.choices[0].message.content).toBe(
+        "Hello! How can I help you today?"
+      );
+    }
+  });
+
+  it("rejects responses with wrong types", () => {
+    const badResponse = {
+      id: "chatcmpl-123",
+      model: "gpt-4",
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: "Hello!",
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: "ten", // Wrong type: string instead of number
+        completion_tokens: 12,
+        total_tokens: 22,
+      },
+    };
+
+    const result = ChatCompletionSchema.safeParse(badResponse);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const error = result.error.issues[0];
+      expect(error.path).toEqual(["usage", "prompt_tokens"]);
+      expect(error.message).toContain("Expected number");
+    }
+  });
+
+  it("rejects responses with missing fields", () => {
+    const incompleteResponse = {
+      id: "chatcmpl-123",
+      model: "gpt-4",
+      choices: [],
+      // usage field is missing entirely
+    };
+
+    const result = ChatCompletionSchema.safeParse(incompleteResponse);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const error = result.error.issues[0];
+      expect(error.path).toEqual(["usage"]);
+      expect(error.code).toBe("invalid_type");
+    }
+  });
+});
+
+
+Output:
+
+ PASS  tests/contract.test.ts
+  ChatCompletion contract
+    ✓ validates correct responses (2ms)
+    ✓ rejects responses with wrong types (1ms)
+    ✓ rejects responses with missing fields (1ms)
+
+
+The safeParse method returns a discriminated union: either { success: true, data: T } or { success: false, error: ZodError }. This lets you handle validation failures gracefully without try/catch blocks.
+
+Recording Fixtures from Real APIs​
+
+Contract tests are only as good as your fixtures. Outdated fixtures test against ghosts. The solution is to record fixtures from actual API responses periodically.
+
+The Fixture Recording Pattern​
+import { writeFileSync, existsSync, mkdirSync } from "fs";
+import { z } from "zod";
+
+const ChatCompletionSchema = z.object({
+  id: z.string(),
+  model: z.string(),
+  choices: z.array(
+    z.object({
+      message: z.object({
+        role: z.string(),
+        content: z.string().nullable(),
+      }),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+});
+
+// Call this in a CI job or development script
+async function recordFixture(name: string, apiCall: () => Promise<unknown>) {
+  const response = await apiCall();
+
+  // Validate before saving - don't record broken responses
+  const result = ChatCompletionSchema.safeParse(response);
+  if (!result.success) {
+    console.error(`Response doesn't match schema:`, result.error.format());
+    throw new Error("Cannot record invalid fixture");
+  }
+
+  // Save the validated response
+  const fixtureDir = "./test/fixtures";
+  if (!existsSync(fixtureDir)) {
+    mkdirSync(fixtureDir, { recursive: true });
+  }
+
+  const fixture = {
+    recordedAt: new Date().toISOString(),
+    data: result.data,
+  };
+
+  writeFileSync(
+    `${fixtureDir}/${name}.json`,
+    JSON.stringify(fixture, null, 2)
+  );
+
+  console.log(`Recorded fixture: ${name}.json`);
+}
+
+
+Output:
+
+Recorded fixture: chat-completion-basic.json
+
+// test/fixtures/chat-completion-basic.json
+{
+  "recordedAt": "2026-01-01T10:30:00.000Z",
+  "data": {
+    "id": "chatcmpl-abc123",
+    "model": "gpt-4",
+    "choices": [
+      {
+        "message": {
+          "role": "assistant",
+          "content": "Hello! How can I help?"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 8,
+      "completion_tokens": 6,
+      "total_tokens": 14
+    }
+  }
+}
+
+Using Fixtures in Tests​
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+import fixture from "./fixtures/chat-completion-basic.json";
+
+const ChatCompletionSchema = z.object({
+  id: z.string(),
+  model: z.string(),
+  choices: z.array(
+    z.object({
+      message: z.object({
+        role: z.string(),
+        content: z.string().nullable(),
+      }),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+});
+
+describe("API contract with recorded fixture", () => {
+  it("validates recorded response matches current schema", () => {
+    const result = ChatCompletionSchema.safeParse(fixture.data);
+
+    if (!result.success) {
+      console.error("Schema drift detected!");
+      console.error("Fixture recorded:", fixture.recordedAt);
+      console.error("Errors:", result.error.format());
+    }
+
+    expect(result.success).toBe(true);
+  });
+});
+
+
+Output:
+
+ PASS  tests/fixture-contract.test.ts
+  API contract with recorded fixture
+    ✓ validates recorded response matches current schema (1ms)
+
+
+Schedule fixture recording in CI (e.g., weekly) to keep fixtures fresh. When tests fail, you know either your schema drifted from the API or you need new fixtures.
+
+Handling Schema Evolution​
+
+APIs evolve. New fields appear, old fields become optional, response shapes change. Your contract tests need to handle evolution gracefully.
+
+Passthrough for Unknown Fields​
+
+By default, Zod strips unknown fields. Use .passthrough() to accept new fields without failing:
+
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+
+// Strict schema - fails on unknown fields
+const StrictUsageSchema = z.object({
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+});
+
+// Flexible schema - accepts new fields
+const FlexibleUsageSchema = z
+  .object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  })
+  .passthrough();
+
+describe("schema evolution", () => {
+  it("strict schema ignores unknown fields silently", () => {
+    const newApiResponse = {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      cached_tokens: 3, // New field from API v2
+    };
+
+    const result = StrictUsageSchema.safeParse(newApiResponse);
+    expect(result.success).toBe(true);
+
+    // But the new field is stripped!
+    if (result.success) {
+      expect("cached_tokens" in result.data).toBe(false);
+    }
+  });
+
+  it("passthrough preserves unknown fields", () => {
+    const newApiResponse = {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      cached_tokens: 3, // New field preserved
+    };
+
+    const result = FlexibleUsageSchema.safeParse(newApiResponse);
+    expect(result.success).toBe(true);
+
+    if (result.success) {
+      expect((result.data as any).cached_tokens).toBe(3);
+    }
+  });
+});
+
+
+Output:
+
+ PASS  tests/evolution.test.ts
+  schema evolution
+    ✓ strict schema ignores unknown fields silently (1ms)
+    ✓ passthrough preserves unknown fields (1ms)
+
+Optional Fields for Backward Compatibility​
+
+When a field becomes optional, use .optional() or .nullable():
+
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+
+// v1 API: always had finish_reason
+const V1ChoiceSchema = z.object({
+  message: z.object({ content: z.string() }),
+  finish_reason: z.string(),
+});
+
+// v2 API: finish_reason is null during streaming
+const V2ChoiceSchema = z.object({
+  message: z.object({ content: z.string() }),
+  finish_reason: z.string().nullable(),
+});
+
+describe("backward compatible schemas", () => {
+  it("v1 schema fails on null finish_reason", () => {
+    const streamingChunk = {
+      message: { content: "Hello" },
+      finish_reason: null,
+    };
+
+    const result = V1ChoiceSchema.safeParse(streamingChunk);
+    expect(result.success).toBe(false);
+  });
+
+  it("v2 schema accepts null finish_reason", () => {
+    const streamingChunk = {
+      message: { content: "Hello" },
+      finish_reason: null,
+    };
+
+    const result = V2ChoiceSchema.safeParse(streamingChunk);
+    expect(result.success).toBe(true);
+  });
+
+  it("v2 schema still accepts string finish_reason", () => {
+    const finalResponse = {
+      message: { content: "Hello!" },
+      finish_reason: "stop",
+    };
+
+    const result = V2ChoiceSchema.safeParse(finalResponse);
+    expect(result.success).toBe(true);
+  });
+});
+
+
+Output:
+
+ PASS  tests/backward-compat.test.ts
+  backward compatible schemas
+    ✓ v1 schema fails on null finish_reason (1ms)
+    ✓ v2 schema accepts null finish_reason (1ms)
+    ✓ v2 schema still accepts string finish_reason (1ms)
+
+Default Values for Missing Fields​
+
+Handle missing fields gracefully with .default():
+
+import { z } from "zod";
+
+const UsageSchema = z.object({
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+  // New in v2, but might be missing from v1 responses
+  cached_tokens: z.number().default(0),
+});
+
+const v1Response = {
+  prompt_tokens: 10,
+  completion_tokens: 5,
+  total_tokens: 15,
+  // No cached_tokens field
+};
+
+const result = UsageSchema.parse(v1Response);
+console.log(result.cached_tokens);
+
+
+Output:
+
+0
+
+Catching API Drift​
+
+API drift happens when frontend and backend evolve independently. Contract tests catch drift by validating that your expectations still match reality.
+
+The Contract Test Pattern​
+import { describe, it, expect, beforeAll } from "vitest";
+import { z } from "zod";
+
+// Your schema: what the frontend expects
+const ExpectedResponseSchema = z.object({
+  id: z.string(),
+  choices: z.array(
+    z.object({
+      message: z.object({
+        role: z.string(),
+        content: z.string().nullable(),
+      }),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+});
+
+// Simulated backend response (in reality, this comes from a test API call)
+function fetchFromBackend(): unknown {
+  // Imagine the backend team renamed total_tokens to totalTokens
+  return {
+    id: "test-123",
+    choices: [{ message: { role: "assistant", content: "Hi!" } }],
+    usage: {
+      prompt_tokens: 5,
+      completion_tokens: 3,
+      totalTokens: 8, // Breaking change!
+    },
+  };
+}
+
+describe("API contract", () => {
+  let backendResponse: unknown;
+
+  beforeAll(async () => {
+    backendResponse = fetchFromBackend();
+  });
+
+  it("backend response matches frontend schema", () => {
+    const result = ExpectedResponseSchema.safeParse(backendResponse);
+
+    if (!result.success) {
+      // Detailed error reporting for CI logs
+      console.error("CONTRACT VIOLATION DETECTED");
+      console.error("Expected schema fields: total_tokens");
+      console.error("Received:", JSON.stringify(backendResponse, null, 2));
+      console.error("Validation errors:");
+      result.error.issues.forEach((issue) => {
+        console.error(`  - Path: ${issue.path.join(".")}`);
+        console.error(`    Message: ${issue.message}`);
+      });
+    }
+
+    expect(result.success).toBe(true);
+  });
+});
+
+
+Output:
+
+CONTRACT VIOLATION DETECTED
+Expected schema fields: total_tokens
+Received: {
+  "id": "test-123",
+  "choices": [{ "message": { "role": "assistant", "content": "Hi!" } }],
+  "usage": {
+    "prompt_tokens": 5,
+    "completion_tokens": 3,
+    "totalTokens": 8
+  }
+}
+Validation errors:
+  - Path: usage.total_tokens
+    Message: Required
+
+ FAIL  tests/api-contract.test.ts
+  API contract
+    ✗ backend response matches frontend schema (5ms)
+
+
+This test fails immediately when the backend changes field names, types, or structure. You catch the problem in CI, not production.
+
+Multi-Schema Contract Suite​
+
+Test different response types in a complete contract suite:
+
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+
+// Define all your API contracts
+const contracts = {
+  chatCompletion: z.object({
+    id: z.string(),
+    choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })),
+    usage: z.object({
+      prompt_tokens: z.number(),
+      completion_tokens: z.number(),
+      total_tokens: z.number(),
+    }),
+  }),
+
+  streamingChunk: z.object({
+    choices: z.array(
+      z.object({
+        delta: z.object({ content: z.string().optional() }),
+        finish_reason: z.string().nullable(),
+      })
+    ),
+  }),
+
+  error: z.object({
+    error: z.object({
+      message: z.string(),
+      type: z.string(),
+      code: z.string().nullable(),
+    }),
+  }),
+};
+
+// Load fixtures for each contract
+import chatFixture from "./fixtures/chat-completion.json";
+import streamFixture from "./fixtures/streaming-chunk.json";
+import errorFixture from "./fixtures/error-response.json";
+
+describe("API Contract Suite", () => {
+  it.each([
+    ["chatCompletion", contracts.chatCompletion, chatFixture.data],
+    ["streamingChunk", contracts.streamingChunk, streamFixture.data],
+    ["error", contracts.error, errorFixture.data],
+  ])("%s contract is valid", (name, schema, fixture) => {
+    const result = schema.safeParse(fixture);
+
+    if (!result.success) {
+      console.error(`Contract violation in ${name}:`, result.error.format());
+    }
+
+    expect(result.success).toBe(true);
+  });
+});
+
+
+Output:
+
+ PASS  tests/contract-suite.test.ts
+  API Contract Suite
+    ✓ chatCompletion contract is valid (1ms)
+    ✓ streamingChunk contract is valid (1ms)
+    ✓ error contract is valid (1ms)
+
+Complete Contract Testing Workflow​
+
+Here's the full workflow for maintaining API contracts:
+
+// src/contracts/chat.ts
+import { z } from "zod";
+
+export const ChatCompletionContract = z.object({
+  id: z.string(),
+  model: z.string(),
+  choices: z.array(
+    z.object({
+      index: z.number(),
+      message: z.object({
+        role: z.enum(["assistant", "user", "system"]),
+        content: z.string().nullable(),
+      }),
+      finish_reason: z.enum(["stop", "length", "tool_calls"]).nullable(),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }).passthrough(), // Accept new fields gracefully
+});
+
+export type ChatCompletion = z.infer<typeof ChatCompletionContract>;
+
+// Validation function for runtime use
+export function validateChatCompletion(data: unknown): ChatCompletion {
+  const result = ChatCompletionContract.safeParse(data);
+
+  if (!result.success) {
+    const paths = result.error.issues.map((i) => i.path.join(".")).join(", ");
+    throw new Error(`Invalid API response. Failed fields: ${paths}`);
+  }
+
+  return result.data;
+}
+
+// tests/contracts/chat.contract.test.ts
+import { describe, it, expect } from "vitest";
+import { ChatCompletionContract, validateChatCompletion } from "../../src/contracts/chat";
+import fixture from "../fixtures/chat-completion.json";
+
+describe("ChatCompletion Contract", () => {
+  describe("schema validation", () => {
+    it("validates recorded fixture", () => {
+      const result = ChatCompletionContract.safeParse(fixture.data);
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts valid minimal response", () => {
+      const minimal = {
+        id: "x",
+        model: "gpt-4",
+        choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      };
+
+      expect(ChatCompletionContract.safeParse(minimal).success).toBe(true);
+    });
+
+    it("rejects missing required fields", () => {
+      const missingUsage = { id: "x", model: "gpt-4", choices: [] };
+      expect(ChatCompletionContract.safeParse(missingUsage).success).toBe(false);
+    });
+  });
+
+  describe("validateChatCompletion function", () => {
+    it("returns typed data on valid input", () => {
+      const result = validateChatCompletion(fixture.data);
+      expect(result.id).toBeDefined();
+      expect(result.choices).toBeInstanceOf(Array);
+    });
+
+    it("throws descriptive error on invalid input", () => {
+      expect(() => validateChatCompletion({ id: 123 })).toThrow("Failed fields:");
+    });
+  });
+});
+
+
+Output:
+
+ PASS  tests/contracts/chat.contract.test.ts
+  ChatCompletion Contract
+    schema validation
+      ✓ validates recorded fixture (1ms)
+      ✓ accepts valid minimal response (1ms)
+      ✓ rejects missing required fields (1ms)
+    validateChatCompletion function
+      ✓ returns typed data on valid input (1ms)
+      ✓ throws descriptive error on invalid input (1ms)
+
+Quick Reference​
+Pattern	When to Use
+z.object({ ... })	Define expected response structure
+.safeParse(data)	Validate without throwing
+.parse(data)	Validate and throw on failure
+.passthrough()	Accept unknown fields (forward compatible)
+.nullable()	Field can be null (common in streaming)
+.optional()	Field can be missing
+.default(value)	Provide fallback for missing fields
+z.infer<typeof Schema>	Extract TypeScript type from schema
+Try With AI​
+Prompt 1: Design a Contract Schema​
+I'm building an AI application that calls an embedding API. The response looks like:
+{
+  "model": "text-embedding-3-small",
+  "data": [{ "index": 0, "embedding": [0.1, 0.2, ...] }],
+  "usage": { "prompt_tokens": 5, "total_tokens": 5 }
+}
+
+Help me design a Zod schema for this response. Consider:
+1. What fields should be required vs optional?
+2. Should I use passthrough for forward compatibility?
+3. How do I handle the embedding array (could be thousands of floats)?
+
+
+What you're learning: How to model real API responses with appropriate strictness. You'll discover trade-offs between strict validation (catches more errors) and flexible schemas (survives API evolution).
+
+Prompt 2: Handle Schema Breaking Changes​
+Our backend team wants to rename "usage.total_tokens" to "usage.totalTokens"
+in API v2. Our frontend uses Zod contracts. Help me design a migration strategy:
+
+1. How do I make my schema accept both old and new field names?
+2. How should I structure my contract tests during the transition?
+3. What's the safest rollout order (frontend first or backend first)?
+
+
+What you're learning: How to handle breaking changes gracefully using Zod features like .or(), .transform(), and discriminated unions. This is critical for maintaining compatibility during API migrations.
+
+Prompt 3: Automate Fixture Recording​
+I want to automatically record API fixtures in CI. Here's my setup:
+- Vitest for testing
+- GitHub Actions for CI
+- OpenAI API for AI calls
+
+Design a workflow that:
+1. Records new fixtures weekly from the real API
+2. Validates them against current schemas
+3. Commits updated fixtures to the repo
+4. Alerts if the schema needs updating
+
+What's the safest way to handle API keys in this workflow?
+
+
+What you're learning: How to integrate contract testing into CI/CD pipelines. You'll learn about secrets management, scheduled jobs, and automated PR creation for fixture updates.
+
+Safety note: Never commit real API keys or sensitive data in fixtures. Use environment variables for API access and sanitize fixtures to remove any user-specific or sensitive information before committing.
+
+Sources:
+
+Zod Official Documentation
+Zod API Reference
+GitHub: colinhacks/zod
+Testing with Zod - Steve Kinney

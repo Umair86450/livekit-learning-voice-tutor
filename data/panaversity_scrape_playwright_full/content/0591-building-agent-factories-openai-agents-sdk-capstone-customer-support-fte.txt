@@ -1,0 +1,483 @@
+Capstone: Building a Customer Support Digital FTE
+
+You have learned every pattern in the OpenAI Agents SDK toolkit. Now you prove mastery by building something you could sell.
+
+Customer support is a $15+ billion market where businesses spend 60-70% of their support budget on labor. A Digital FTE that handles Tier 1 support---FAQs, billing questions, basic troubleshooting---at $500-2,000/month versus $4,000-8,000/month for a human representative represents genuine value.
+
+This capstone is different from a tutorial. There's no step-by-step code to copy. Instead, you'll receive:
+
+Architecture to guide your design
+Requirements to specify what you must build
+Lesson references pointing back to the patterns you learned
+Validation checklist to verify your implementation
+Business strategy to monetize your creation
+
+By the end, you'll have a production-ready Customer Support Digital FTE that demonstrates mastery of this chapter.
+
+System Architecture​
+
+Your Digital FTE follows this architecture:
+
+User Message
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│         INPUT GUARDRAILS                │
+│  ┌─────────────┐  ┌─────────────────┐  │
+│  │ PII Check   │  │ Injection Check │  │
+│  └─────────────┘  └─────────────────┘  │
+└─────────────────────────────────────────┘
+    │ (if passes)
+    ▼
+┌─────────────────────────────────────────┐
+│           TRIAGE AGENT                   │
+│   Routes based on intent analysis        │
+│   Tools: lookup_customer                 │
+└─────────────────────────────────────────┘
+    │
+    ├──── FAQ? ────► FAQAgent ─────────────────►┐
+    │                    │                       │
+    │                    ▼                       │
+    │         ┌──────────────────┐              │
+    │         │  KNOWLEDGE BASE  │              │
+    │         │  (FileSearchTool)│              │
+    │         │  - Policies      │              │
+    │         │  - FAQs          │              │
+    │         │  - Product docs  │              │
+    │         └──────────────────┘              │
+    │                                            │
+    ├── Billing? ──► BillingAgent ─────────────►│
+    │                  │                         │
+    │                  └─► EscalationAgent ────►│
+    │                                            │
+    └─ Technical? ─► TechnicalAgent ───────────►│
+                       │                         │
+                       └─► EscalationAgent ────►│
+                                                 │
+                                                 ▼
+┌─────────────────────────────────────────┐
+│         OUTPUT GUARDRAILS               │
+│  ┌──────────────────────────────────┐  │
+│  │ Secrets/PII Leakage Detection    │  │
+│  └──────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│           SESSION STORAGE               │
+│    SQLiteSession for persistence        │
+└─────────────────────────────────────────┘
+    │
+    ▼
+User Response (with tracing)
+
+Component Requirements​
+
+Build each component using patterns from the specified lessons:
+
+1. Context Model​
+
+Requirements:
+
+Track customer identification (ID, email, plan)
+Track session metadata (ID, start time)
+Track routing history (handoffs, agents involved)
+Track metrics (tokens, estimated cost)
+Track resolution status (resolved, escalated, reason)
+
+Reference: Lesson 2 - Context objects with Pydantic BaseModel
+
+2. Input Guardrails​
+
+Requirements:
+
+PII detection: Block credit card numbers, SSN patterns, bank account numbers
+Prompt injection detection: Block "ignore previous instructions", "you are now", "pretend you are" patterns
+Return user-friendly error messages when triggered
+
+Reference: Lesson 5 - @input_guardrail decorator, GuardrailFunctionOutput, tripwire_triggered
+
+3. Output Guardrails​
+
+Requirements:
+
+Detect API keys, internal IDs, database queries, passwords in output
+Block responses that would leak sensitive data
+
+Reference: Lesson 5 - @output_guardrail decorator
+
+4. Agent Tools​
+
+Requirements:
+
+Tool	Purpose	Returns
+lookup_customer	Find customer by email	Customer info or "not found"
+check_billing_history	Get recent orders	List of orders
+process_refund	Refund orders under $100	Confirmation or escalation needed
+check_support_tickets	Get open tickets	List of tickets
+create_escalation_ticket	Create human handoff	Ticket ID with SLA
+
+Reference: Lesson 2 - @function_tool decorator, RunContextWrapper[T]
+
+5. Specialist Agents​
+
+Requirements:
+
+Agent	Responsibilities	Tools	Handoffs To
+FAQAgent	Answer pricing, policies, features	None	None
+BillingAgent	Handle payments, refunds	check_billing_history, process_refund, check_support_tickets	EscalationAgent
+TechnicalAgent	Resolve product issues	check_support_tickets	EscalationAgent
+EscalationAgent	Prepare cases for humans	create_escalation_ticket	None
+
+Reference: Lesson 1 (basic agents), Lesson 2 (tools), Lesson 4 (handoffs)
+
+6. Triage Agent​
+
+Requirements:
+
+Entry point for all conversations
+Identify customer using lookup_customer
+Route to appropriate specialist based on intent
+Apply input guardrails
+Apply output guardrails
+
+Routing Rules:
+
+General questions (pricing, policies, features) → FAQAgent
+Billing issues (charges, refunds, payments) → BillingAgent
+Technical problems (errors, bugs, API) → TechnicalAgent
+
+Reference: Lesson 4 - handoff() function, on_handoff callbacks, handoff_filters
+
+7. Observability Hooks​
+
+Requirements:
+
+Log agent start/end with timing
+Log tool start/end
+Log handoffs
+Track which agents were involved
+Output structured JSON logs
+
+Reference: Lesson 7 - RunHooks class, lifecycle methods
+
+8. Session Management​
+
+Requirements:
+
+Create sessions with unique IDs
+Persist conversations across turns
+Enable multi-user support
+
+Reference: Lesson 6 - SQLiteSession, session parameter in Runner.run()
+
+9. Knowledge Base (RAG)​
+
+Requirements:
+
+Upload internal documents (policies, FAQs, product guides)
+Create vector store for semantic search
+Integrate FileSearchTool with FAQAgent for policy lookups
+Enable agents to cite sources from knowledge base
+
+Documents to include:
+
+Document	Purpose	Used By
+return-policy.md	Refund and return rules	FAQAgent, BillingAgent
+pricing-guide.md	Plan features and pricing	FAQAgent
+troubleshooting.md	Common technical issues	TechnicalAgent
+escalation-criteria.md	When to escalate to humans	All agents
+
+Reference: Lesson 9 - FileSearchTool, vector stores, file_search tool type
+
+10. MCP Integration (Optional)​
+
+Requirements:
+
+Connect to external documentation server for live product docs
+Enable real-time knowledge updates without redeployment
+Use async with pattern for proper lifecycle management
+
+Reference: Lesson 8 - MCPServerStreamableHttp, params dictionary, agent creation inside context
+
+11. Main Handler​
+
+Requirements:
+
+Accept message, session, context, hooks
+Generate trace ID for each request
+Handle guardrail exceptions with user-friendly messages
+Track token usage and costs
+Use RunConfig with max_turns to prevent infinite loops
+
+Reference: Lesson 7 - gen_trace_id(), trace(), RunConfig
+
+Validation Checklist​
+
+Your implementation passes when:
+
+Routing​
+ FAQ questions route to FAQAgent
+ Billing questions route to BillingAgent
+ Technical questions route to TechnicalAgent
+ Complex issues escalate properly
+Guardrails​
+ Credit card numbers are blocked
+ SSN patterns are blocked
+ Prompt injection attempts are blocked
+ API keys don't appear in output
+Tools​
+ Customer lookup updates context
+ Billing history returns order list
+ Refunds under $100 process successfully
+ Refunds over $100 trigger escalation
+ Escalation tickets include priority and SLA
+Sessions​
+ Conversations persist across turns
+ Different users have isolated sessions
+ Context survives session reconnection
+Knowledge Base (RAG)​
+ Vector store created with policy documents
+ FAQAgent retrieves relevant policies
+ Responses cite sources from knowledge base
+ Policy questions answered accurately
+Observability​
+ Agent lifecycle events are logged
+ Tool calls are logged
+ Handoffs are logged
+ Session summary shows metrics
+Demo Scenarios​
+
+Scenario 1: Billing Issue (Test routing + tools)
+
+Turn 1: "Hi, I'm alice@example.com and I was charged twice this month."
+Expected: Triage identifies customer, routes to BillingAgent
+
+Turn 2: "Yes, I see ORD-1001 and ORD-1002 on the same day for $99 each."
+Expected: BillingAgent confirms duplicate charges
+
+Turn 3: "Please process the refund for the duplicate charge."
+Expected: BillingAgent processes refund, provides confirmation
+
+
+Scenario 2: Policy Question (Test RAG)
+
+Turn 1: "What is your refund policy for annual subscriptions?"
+Expected: Routes to FAQAgent, retrieves from knowledge base, cites return-policy.md
+
+Turn 2: "Can I get a prorated refund if I cancel mid-year?"
+Expected: FAQAgent answers with specific policy details from knowledge base
+
+
+Scenario 3: Guardrail Test
+
+Turn 1: "My credit card is 4532-1234-5678-9012, can you check my account?"
+Expected: Input guardrail blocks, returns user-friendly message about PII
+
+Monetization Models​
+
+Building the agent is half the journey. The other half is turning it into a business.
+
+Model 1: Subscription (Managed Service)​
+Tier	Monthly Price	Included	Best For
+Starter	$500/month	1,000 conversations	Small businesses
+Growth	$1,500/month	5,000 conversations	Growing teams
+Enterprise	$3,000+/month	Unlimited + SLA	Large organizations
+
+Margin calculation (Growth tier):
+
+Revenue: $1,500/month
+Token costs: ~$300/month (5K conversations × ~$0.06 each)
+Infrastructure: ~$100/month
+Gross margin: ~73%
+Model 2: Success Fee (Per Resolution)​
+Metric	Price	Rationale
+Per conversation	$0.50-2.00	Volume-based
+Per resolution	$2.00-5.00	Value-based
+Per escalation avoided	$5.00-15.00	Cost savings
+
+Advantage: Aligns incentives. You only get paid when the Digital FTE delivers value.
+
+Model 3: Hybrid (Base + Success)​
+Component	Price
+Base platform fee	$200/month
+Per conversation	$0.25
+Per escalation avoided	$3.00
+
+Why hybrid works: Predictable base revenue with upside for performance.
+
+Pricing Calculator​
+
+Calculate your minimum viable price:
+
+Monthly conversations: [X]
+Avg tokens per conversation: ~2,000
+Input token cost: (X × 1,200 × $2.50/M) = $A
+Output token cost: (X × 800 × $10.00/M) = $B
+Infrastructure: $50 + (X × $0.01) = $C
+
+Total cost = $A + $B + $C
+Required revenue (65% margin) = Total cost ÷ 0.35
+Per conversation price = Required revenue ÷ X
+
+
+Example at 5,000 conversations:
+
+Token cost: $275
+Infrastructure: $100
+Total: $375
+Required revenue: ~$1,070
+Per conversation: ~$0.21
+What's Next: Distribution and Deployment​
+
+Your Digital FTE is built. Now you need customers and infrastructure:
+
+Next Step	Chapter	What You'll Learn
+Distribution	Ch72: OpenAI Apps SDK	Package your agent for ChatGPT's 800M+ users
+Containerization	Ch49: Docker	Package your agent as a deployable container
+Orchestration	Ch50: Kubernetes	Scale to handle thousands of concurrent users
+Monitoring	Ch51: Helm Charts	Production monitoring and auto-scaling
+
+The BUILD phase is complete. The DISTRIBUTE and DEPLOY phases transform your working prototype into a business.
+
+Progressive Project: Complete Your Support Desk​
+
+You've built the Support Desk progressively through 9 lessons:
+
+Lesson	Capability Added	Key Pattern
+L01	Basic agent	Agent(), Runner.run()
+L02	Function tools	@function_tool, RunContextWrapper
+L03	Sub-agents	.as_tool() pattern
+L04	Handoffs	handoff(), routing, callbacks
+L05	Guardrails	@input_guardrail, @output_guardrail
+L06	Sessions	SQLiteSession, persistence
+L07	Tracing	RunHooks, trace(), metrics
+L08	MCP	MCPServerStreamableHttp, live docs
+L09	RAG	FileSearchTool, knowledge base
+Your Task​
+
+Integrate all 9 versions into a single production system.
+
+You already have the code. The capstone proves you understand how the pieces fit together.
+
+Step 1: Gather your components
+
+Open each version (v1.0-v9.0) of your Support Desk. Identify the imports, classes, and functions you'll need.
+
+Step 2: Design the integration
+
+Sketch how components connect:
+
+Which agents need which tools?
+Where do guardrails attach?
+How does session data flow?
+What gets traced?
+
+Step 3: Build incrementally
+
+Don't try to integrate everything at once:
+
+First: Triage → Specialists (no guardrails, no sessions)
+Then: Add guardrails
+Then: Add sessions
+Then: Add observability
+Finally: Add MCP and RAG (if time permits)
+
+Step 4: Test each integration
+
+After each step, run a test conversation. Fix issues before adding more complexity.
+
+Step 5: Run the validation scenario
+
+Use the demo scenario in the Validation Checklist to verify your complete system.
+
+Applying to Your Domain​
+
+Once your Support Desk works, adapt these patterns to your domain:
+
+Domain	Specialists	Key Guardrails
+Legal	Intake, Research, Document Review	Attorney-client privilege
+Healthcare	Triage, Scheduling, Billing, Clinical	HIPAA, PHI detection
+Finance	Account Services, Trading, Compliance	PII, investment disclaimers
+Education	Admissions, Registration, Financial Aid	FERPA, student records
+
+Domain Adaptation Checklist:
+
+ Identify distinct workflows → specialist agents
+ Map client language → routing rules
+ Research compliance requirements
+ Design domain-specific guardrails
+ Calculate pricing (human cost vs. your value)
+Try With AI​
+
+Use your AI companion to refine your implementation.
+
+Prompt 1: Architecture Review​
+Review my Customer Support Digital FTE implementation:
+
+[Paste your code]
+
+Evaluate:
+1. Are agent responsibilities clearly separated?
+2. Are handoff conditions non-overlapping?
+3. What edge cases might cause routing failures?
+4. How would you improve error handling?
+
+
+What you're learning: Critical analysis of multi-agent systems.
+
+Prompt 2: Compliance Enhancement​
+I'm deploying my Support Digital FTE to handle [INDUSTRY] clients.
+
+Help me:
+1. Identify compliance requirements (GDPR, HIPAA, PCI, SOC2)
+2. Design additional guardrails for compliance
+3. Implement audit logging for compliance evidence
+4. Create data retention policies
+
+
+What you're learning: Compliance-first design for regulated industries.
+
+Prompt 3: Monetization Strategy​
+I've built a [DOMAIN] Digital FTE that handles [USE CASE].
+
+Help me develop:
+1. Ideal customer profile (size, pain points)
+2. Pricing model (subscription, usage, hybrid)
+3. Value calculation vs. human agent
+4. ROI metrics for sales conversations
+5. Common objections and responses
+
+
+What you're learning: Business model development for AI products.
+
+Safety Note​
+
+Production deployment requires careful consideration:
+
+Legal review: Have counsel review guardrails and disclaimers
+Data handling: Ensure session storage complies with GDPR, CCPA
+Liability: Clarify what happens when the agent gives incorrect information
+Human escalation: Always provide a path to human support
+Monitoring: Alert on guardrail triggers and unusual patterns
+Load testing: Agents behave differently under pressure
+Rollback plan: Have a way to disable the Digital FTE if issues arise
+Chapter Complete​
+
+You've mastered the OpenAI Agents SDK:
+
+Skill	Lesson	Status
+Basic agents	L01	✓
+Function tools	L02	✓
+Agents-as-tools	L03	✓
+Handoffs	L04	✓
+Guardrails	L05	✓
+Sessions	L06	✓
+Tracing	L07	✓
+MCP	L08	✓
+RAG	L09	✓
+Integration	L10	✓
+
+You now have the skills to build production-grade Digital FTEs. The next chapters show you how to distribute them (Apps SDK) and deploy them at scale (Cloud-Native).
+
+Your Digital FTE journey continues in Part 7: AI Cloud-Native Development.

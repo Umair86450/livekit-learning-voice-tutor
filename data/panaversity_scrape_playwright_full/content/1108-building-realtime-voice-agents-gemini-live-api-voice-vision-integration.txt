@@ -1,0 +1,689 @@
+Voice and Vision Integration
+
+You are troubleshooting a software issue with a user. They describe the problem: "The button doesn't work." You ask clarifying questions: "Which button? What happens when you click it? What does the screen show?"
+
+This back-and-forth is inefficient. If you could simply see what the user sees, the problem becomes obvious in seconds.
+
+Gemini Live API makes this possible. Your voice agent can see the user's screen while conversing, observe what they are looking at, and provide guidance that references visible elements directly. "I see you're on the Settings page. The button you need is in the top right corner, next to the gear icon."
+
+This lesson teaches you to build agents that see and hear simultaneously.
+
+The Multimodal Advantage​
+
+Traditional voice assistants operate blind. They parse words into intent, generate responses, and hope the user can translate audio instructions to visual actions.
+
+Multimodal voice agents change this:
+
+Traditional Voice Agent:
+User: "How do I export this?"
+Agent: "Click File, then Export, then choose your format."
+User: "I don't see File..."
+Agent: "It should be in the top menu bar."
+User: "There's no menu bar."
+[Frustration builds]
+
+Multimodal Voice Agent:
+User: "How do I export this?"
+Agent: [sees screen] "I see you're in the mobile view. Tap the three dots
+       in the top right, then 'Share', then 'Export as PDF'."
+[Problem solved in one exchange]
+
+
+Shopify deployed this pattern in Sidekick, their merchant assistant. Merchants can share their screen while asking questions, and Sidekick provides guidance that references exactly what they see. According to Shopify's VP of Product, users "often forget they're talking to AI within a minute."
+
+How Vision Works in Gemini Live API​
+
+The Gemini Live API accepts video input alongside audio through the same WebSocket connection. You send video frames as base64-encoded images:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Multimodal Stream Flow                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────┐    ┌──────────┐    ┌────────────────────┐         │
+│  │  Screen  │───>│  Capture │───>│                    │         │
+│  │  Display │    │  + Encode│    │                    │         │
+│  └──────────┘    └──────────┘    │                    │         │
+│                        │         │   Gemini Live API  │         │
+│  ┌──────────┐    ┌─────▼────┐    │                    │         │
+│  │  Micro-  │───>│ WebSocket│───>│   (sees + hears)   │         │
+│  │  phone   │    │  Stream  │    │                    │         │
+│  └──────────┘    └──────────┘    └─────────┬──────────┘         │
+│                                            │                     │
+│                                    ┌───────▼───────┐             │
+│                                    │ Voice Response│             │
+│                                    │ (references   │             │
+│                                    │  visual context)            │
+│                                    └───────────────┘             │
+└─────────────────────────────────────────────────────────────────┘
+
+Video Format Requirements​
+Parameter	Requirement
+Format	JPEG (recommended) or PNG
+Encoding	Base64
+Max Resolution	1024x1024 recommended
+Frame Rate	1-5 FPS typical (context-dependent)
+MIME Type	image/jpeg or image/png
+
+Lower frame rates work well for screen sharing (content changes slowly). Higher rates suit camera input where movement matters.
+
+Implementing Screen Sharing​
+
+Screen sharing captures what the user sees and streams it to Gemini. Here is a complete implementation:
+
+import asyncio
+import base64
+import io
+from PIL import ImageGrab, Image
+from google import genai
+from google.genai import types
+
+class ScreenSharingVoiceAgent:
+    """Voice agent that can see the user's screen."""
+
+    def __init__(self):
+        self.client = genai.Client()
+        self.session = None
+        self.capture_active = False
+
+    async def connect(self, voice: str = "Puck"):
+        """Establish multimodal session with screen sharing."""
+
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice
+                    )
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part(text="""
+                You are a visual troubleshooting assistant.
+                You can see the user's screen. Reference specific UI elements
+                you observe: button locations, text content, error messages.
+                Guide users step-by-step using what you see.
+                Keep responses concise - under 40 words.
+                """)]
+            )
+        )
+
+        self.session = await self.client.aio.live.connect(
+            model="gemini-2.5-flash-native-audio-preview",
+            config=config
+        ).__aenter__()
+
+        print("[agent] Connected with screen sharing capability")
+        return self
+
+    async def start_screen_capture(self, fps: float = 2.0):
+        """Start streaming screen captures to Gemini."""
+
+        self.capture_active = True
+        interval = 1.0 / fps
+
+        while self.capture_active:
+            # Capture screen
+            screenshot = ImageGrab.grab()
+
+            # Resize for efficiency (max 1024px on longest side)
+            screenshot.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+
+            # Encode as JPEG
+            buffer = io.BytesIO()
+            screenshot.save(buffer, format="JPEG", quality=70)
+            image_bytes = buffer.getvalue()
+
+            # Send to Gemini
+            await self.session.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[
+                        types.Blob(
+                            mime_type="image/jpeg",
+                            data=base64.b64encode(image_bytes).decode()
+                        )
+                    ]
+                )
+            )
+
+            await asyncio.sleep(interval)
+
+    async def stop_screen_capture(self):
+        """Stop screen capture stream."""
+        self.capture_active = False
+
+    async def process_responses(self):
+        """Handle voice responses from Gemini."""
+
+        async for response in self.session.receive():
+            if hasattr(response, 'data') and response.data:
+                # Play audio response
+                await self._play_audio(response.data)
+
+            if hasattr(response, 'text') and response.text:
+                print(f"[agent] {response.text}")
+
+    async def _play_audio(self, audio_b64: str):
+        """Play audio through speakers."""
+        import sounddevice as sd
+        import numpy as np
+
+        audio_bytes = base64.b64decode(audio_b64)
+        audio = np.frombuffer(audio_bytes, dtype=np.int16)
+        audio = audio.astype(np.float32) / 32767
+        sd.play(audio, samplerate=16000)
+
+    async def close(self):
+        """Clean up resources."""
+        self.capture_active = False
+        if self.session:
+            await self.session.__aexit__(None, None, None)
+
+
+async def main():
+    agent = ScreenSharingVoiceAgent()
+    await agent.connect()
+
+    # Start parallel tasks
+    capture_task = asyncio.create_task(agent.start_screen_capture(fps=2.0))
+    response_task = asyncio.create_task(agent.process_responses())
+
+    try:
+        # Run until interrupted
+        await asyncio.gather(capture_task, response_task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await agent.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+Output:
+
+[agent] Connected with screen sharing capability
+
+User: "Where do I find the export button?"
+[agent] I can see you're in the document editor. The export button is in
+        the File menu at the top left. Click File, then look for Export
+        near the bottom of the dropdown.
+
+User: "I clicked it but nothing happened"
+[agent] I see the export dialog is behind another window. Click on your
+        document window in the taskbar to bring the export dialog forward.
+
+Frame Rate Selection​
+Scenario	Recommended FPS	Rationale
+Screen sharing (static)	1-2 FPS	Content changes slowly
+Screen sharing (active)	2-3 FPS	Capture menu interactions
+Camera (conversational)	3-5 FPS	See gestures and expressions
+Camera (action-oriented)	5-10 FPS	Capture movement
+
+Higher frame rates consume more bandwidth and API tokens. Start low and increase only if context is missed.
+
+Implementing Camera Input​
+
+Camera input provides real-time visual context during conversations. The user might show you a physical object, demonstrate a problem, or simply want face-to-face interaction.
+
+import asyncio
+import base64
+import cv2
+from google import genai
+from google.genai import types
+
+class CameraVoiceAgent:
+    """Voice agent with camera vision."""
+
+    def __init__(self):
+        self.client = genai.Client()
+        self.session = None
+        self.camera = None
+        self.capture_active = False
+
+    async def connect(self, voice: str = "Kore"):
+        """Establish session with camera capability."""
+
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice
+                    )
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part(text="""
+                You are a helpful assistant that can see through the camera.
+                Describe what you observe when relevant.
+                Help with visual identification, reading text, or understanding context.
+                Be conversational and natural.
+                """)]
+            )
+        )
+
+        self.session = await self.client.aio.live.connect(
+            model="gemini-2.5-flash-native-audio-preview",
+            config=config
+        ).__aenter__()
+
+        # Initialize camera
+        self.camera = cv2.VideoCapture(0)
+        if not self.camera.isOpened():
+            raise RuntimeError("Could not open camera")
+
+        print("[agent] Connected with camera vision")
+        return self
+
+    async def start_camera_stream(self, fps: float = 3.0):
+        """Stream camera frames to Gemini."""
+
+        self.capture_active = True
+        interval = 1.0 / fps
+
+        while self.capture_active:
+            ret, frame = self.camera.read()
+            if not ret:
+                continue
+
+            # Resize for efficiency
+            frame = cv2.resize(frame, (640, 480))
+
+            # Encode as JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            image_bytes = buffer.tobytes()
+
+            # Send to Gemini
+            await self.session.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[
+                        types.Blob(
+                            mime_type="image/jpeg",
+                            data=base64.b64encode(image_bytes).decode()
+                        )
+                    ]
+                )
+            )
+
+            await asyncio.sleep(interval)
+
+    async def stream_audio(self):
+        """Stream microphone audio to Gemini."""
+        import sounddevice as sd
+        import numpy as np
+
+        sample_rate = 16000
+        chunk_duration = 0.1
+
+        def audio_callback(indata, frames, time_info, status):
+            audio_bytes = (indata * 32767).astype('int16').tobytes()
+            asyncio.create_task(self._send_audio(audio_bytes))
+
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype='float32',
+            callback=audio_callback,
+            blocksize=int(sample_rate * chunk_duration)
+        ):
+            while self.capture_active:
+                await asyncio.sleep(0.1)
+
+    async def _send_audio(self, audio_bytes: bytes):
+        """Send audio chunk to Gemini."""
+        if self.session:
+            await self.session.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[
+                        types.Blob(
+                            mime_type="audio/pcm",
+                            data=base64.b64encode(audio_bytes).decode()
+                        )
+                    ]
+                )
+            )
+
+    async def close(self):
+        """Clean up resources."""
+        self.capture_active = False
+        if self.camera:
+            self.camera.release()
+        if self.session:
+            await self.session.__aexit__(None, None, None)
+
+
+Output:
+
+[agent] Connected with camera vision
+
+User: "What's this thing I'm holding?"
+[agent] I can see you're holding a USB-C to HDMI adapter. The silver end
+        plugs into your laptop's USB-C port, and the HDMI end connects to
+        your monitor or TV.
+
+User: "Will it work with my laptop?"
+[agent] I can see your laptop has a USB-C port on the left side, so yes,
+        this adapter should work. Just plug the silver end into that port.
+
+Coordinating Audio and Video Streams​
+
+When streaming both audio and video, coordination matters. Here is the recommended pattern:
+
+Stream Coordination Pattern​
+class MultimodalVoiceAgent:
+    """Voice agent coordinating audio and video streams."""
+
+    async def run(self):
+        """Run all streams concurrently."""
+
+        await self.connect()
+
+        # Create concurrent tasks
+        tasks = [
+            asyncio.create_task(self._video_stream()),
+            asyncio.create_task(self._audio_stream()),
+            asyncio.create_task(self._response_handler()),
+        ]
+
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+        finally:
+            await self.close()
+
+    async def _video_stream(self):
+        """Continuous video capture at configured FPS."""
+        while self.active:
+            frame = await self._capture_frame()
+            await self._send_video(frame)
+            await asyncio.sleep(self.video_interval)
+
+    async def _audio_stream(self):
+        """Continuous audio capture via callback."""
+        # Audio streams via sounddevice callback
+        # No explicit sleep needed - hardware-driven
+        pass
+
+    async def _response_handler(self):
+        """Process incoming responses."""
+        async for response in self.session.receive():
+            await self._handle_response(response)
+
+Bandwidth Considerations​
+
+Multimodal streaming consumes significant bandwidth. Calculate your requirements:
+
+Component	Calculation	Typical Value
+Video	(resolution * quality * fps)	640x480 JPEG @ 70% @ 3fps = ~150 KB/s
+Audio	(sample_rate * bit_depth / 8)	16kHz * 16bit = 32 KB/s
+Total upload	Video + Audio	~180-200 KB/s
+Response audio	Similar to input	~30-50 KB/s
+
+For screen sharing at 2 FPS with lower resolution: ~80-100 KB/s total.
+
+Error Handling for Streams​
+
+Handle stream failures gracefully:
+
+async def _video_stream_with_recovery(self):
+    """Video stream with automatic recovery."""
+
+    consecutive_failures = 0
+    max_failures = 5
+
+    while self.active:
+        try:
+            frame = await self._capture_frame()
+            await self._send_video(frame)
+            consecutive_failures = 0  # Reset on success
+
+        except Exception as e:
+            consecutive_failures += 1
+            print(f"[video] Capture failed: {e}")
+
+            if consecutive_failures >= max_failures:
+                print("[video] Too many failures, pausing video stream")
+                await asyncio.sleep(5.0)  # Back off
+                consecutive_failures = 0
+
+        await asyncio.sleep(self.video_interval)
+
+Production Patterns​
+
+Production multimodal agents require careful architecture. Here are proven patterns:
+
+Pattern 1: On-Demand Vision​
+
+Enable vision only when needed. This reduces cost and bandwidth:
+
+class OnDemandVisionAgent:
+    """Vision activates only when user requests or context requires."""
+
+    def __init__(self):
+        self.vision_active = False
+        self.vision_trigger_phrases = [
+            "look at", "can you see", "what's on", "show you",
+            "see my screen", "see this"
+        ]
+
+    async def process_user_audio(self, transcript: str):
+        """Check if user wants vision activated."""
+
+        # Detect vision request
+        for phrase in self.vision_trigger_phrases:
+            if phrase in transcript.lower():
+                await self.enable_vision()
+                return
+
+        # Auto-disable after period of non-use
+        if self.vision_active and self.seconds_since_vision_reference > 30:
+            await self.disable_vision()
+
+    async def enable_vision(self):
+        """Start sending video frames."""
+        if not self.vision_active:
+            self.vision_active = True
+            asyncio.create_task(self._video_stream())
+            print("[agent] Vision enabled")
+
+    async def disable_vision(self):
+        """Stop sending video frames."""
+        self.vision_active = False
+        print("[agent] Vision disabled")
+
+
+Output:
+
+User: "I have a question about my code"
+[agent processes audio only]
+
+User: "Can you look at my screen? I'm getting an error"
+[agent] Vision enabled
+[agent now sees screen alongside audio]
+[agent] I can see the error now. The issue is on line 47 - you're missing
+        a closing parenthesis on the function call.
+
+[30 seconds pass with no visual references]
+[agent] Vision disabled
+[continues with audio only]
+
+Pattern 2: Selective Frame Capture​
+
+Send frames only when content changes significantly:
+
+import numpy as np
+
+class SelectiveCaptureAgent:
+    """Send frames only when visual content changes."""
+
+    def __init__(self, change_threshold: float = 0.05):
+        self.last_frame = None
+        self.change_threshold = change_threshold
+
+    def frame_changed_significantly(self, current_frame: np.ndarray) -> bool:
+        """Detect if frame differs enough to warrant sending."""
+
+        if self.last_frame is None:
+            self.last_frame = current_frame
+            return True
+
+        # Calculate mean absolute difference
+        diff = np.abs(current_frame.astype(float) - self.last_frame.astype(float))
+        change_ratio = np.mean(diff) / 255.0
+
+        if change_ratio > self.change_threshold:
+            self.last_frame = current_frame
+            return True
+
+        return False
+
+    async def _video_stream(self):
+        """Send frames only when changed."""
+
+        while self.active:
+            frame = await self._capture_frame()
+
+            if self.frame_changed_significantly(frame):
+                await self._send_video(frame)
+                print("[video] Frame sent (content changed)")
+            else:
+                print("[video] Frame skipped (no significant change)")
+
+            await asyncio.sleep(0.2)  # Check at 5 FPS, send less often
+
+
+This pattern reduces bandwidth by 60-80% for typical screen sharing where content is mostly static.
+
+Pattern 3: Region of Interest​
+
+For screen sharing, capture only relevant portions:
+
+class RegionOfInterestAgent:
+    """Capture specific screen regions for efficiency."""
+
+    def __init__(self):
+        self.regions = {}
+
+    def define_region(self, name: str, x: int, y: int, width: int, height: int):
+        """Define a named capture region."""
+        self.regions[name] = (x, y, width, height)
+
+    async def capture_region(self, region_name: str) -> bytes:
+        """Capture only the specified region."""
+
+        if region_name not in self.regions:
+            # Fall back to full screen
+            return await self._capture_full_screen()
+
+        x, y, w, h = self.regions[region_name]
+        screenshot = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+
+        buffer = io.BytesIO()
+        screenshot.save(buffer, format="JPEG", quality=70)
+        return buffer.getvalue()
+
+
+# Usage
+agent = RegionOfInterestAgent()
+
+# Define common regions
+agent.define_region("code_editor", 0, 0, 1200, 800)
+agent.define_region("terminal", 0, 800, 1200, 400)
+agent.define_region("browser", 1200, 0, 800, 1200)
+
+When to Use Voice + Vision​
+
+Not every voice agent needs vision. Evaluate the trade-offs:
+
+Vision Adds Value When​
+Scenario	Why Vision Helps
+Technical support	See the actual error, UI state, configuration
+Guided setup	Walk user through steps with visual confirmation
+Physical assistance	Identify objects, read labels, see environment
+Accessibility	Describe visual content for visually impaired users
+Training	Observe user actions and provide feedback
+Vision Adds Overhead Without Value When​
+Scenario	Why Voice-Only Works
+Information queries	"What's the weather?" needs no vision
+Scheduling	"Book a meeting" is purely conversational
+Content creation	Dictation doesn't need to see the document
+General chat	Social conversation gains little from vision
+Decision Framework​
+Does user need to SHOW something?
+├── Yes → Vision adds value
+│   ├── Is content static? → Low FPS (1-2)
+│   └── Is content dynamic? → Higher FPS (3-5)
+└── No → Voice-only is sufficient
+    └── Add on-demand vision trigger for exceptions
+
+Try With AI​
+Prompt 1: Screen Sharing Architecture​
+I'm building a customer support agent that helps users troubleshoot software issues.
+The agent needs to see the user's screen while conversing.
+
+Help me design the screen sharing architecture:
+
+1. Should I capture the full screen or specific application windows?
+2. What frame rate balances responsiveness with bandwidth cost?
+3. How do I handle multi-monitor setups?
+4. What privacy controls should I implement (exclude certain windows)?
+5. How do I detect when the user switches applications?
+
+My users are typically on Windows and macOS, using home internet connections.
+
+
+What you are learning: Production architecture decisions. Real screen sharing needs to handle edge cases like multi-monitor setups, privacy regions, and varying network conditions that simple demos ignore.
+
+Prompt 2: Bandwidth Optimization​
+My multimodal voice agent sends both audio and video to Gemini Live API.
+I'm seeing high latency and occasional disconnections on slower networks.
+
+Current setup:
+- Video: 720p JPEG @ 3 FPS
+- Audio: 16kHz PCM16
+- Total upload: ~250 KB/s
+
+Help me optimize:
+
+1. What resolution and quality balance visual context with bandwidth?
+2. Should I use adaptive frame rate based on network conditions?
+3. How do I detect network degradation and respond gracefully?
+4. What's the minimum viable video stream for troubleshooting context?
+5. Should I queue frames or drop them when network is slow?
+
+Show me implementation patterns for adaptive streaming.
+
+
+What you are learning: Performance engineering under constraints. Production voice+vision agents must work on real networks with variable bandwidth, not just ideal conditions.
+
+Prompt 3: Use Case Evaluation​
+I'm evaluating whether to add vision capabilities to my Task Manager voice agent.
+
+Current capabilities (voice only):
+- Create, update, complete tasks via voice
+- Query task lists and due dates
+- Set reminders and priorities
+
+Proposed vision additions:
+- Screen sharing for task context
+- Camera for scanning documents/whiteboards
+- Photo capture of physical notes
+
+Help me evaluate:
+
+1. Which vision features add clear value for task management?
+2. Which are nice-to-have versus essential?
+3. What's the implementation and API cost for each?
+4. How do I A/B test to measure actual user value?
+5. What's your recommendation: start with all, start with one, or defer vision?
+
+My target users are professionals managing 20-50 tasks daily.
+
+
+What you are learning: Feature prioritization for multimodal agents. Not every capability adds proportional value. You are learning to evaluate features against user needs and implementation costs before building.
+
+Privacy considerations for multimodal agents: Screen sharing and camera input introduce privacy concerns beyond voice. Always require explicit consent before capturing visual content. Display clear indicators when capture is active. Never activate cameras without user action. In enterprise deployments, integrate with existing screen sharing policies. Test thoroughly with security review before production deployment.

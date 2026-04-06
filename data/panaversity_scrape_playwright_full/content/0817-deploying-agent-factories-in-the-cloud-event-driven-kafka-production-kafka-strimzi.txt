@@ -1,0 +1,599 @@
+Production Kafka with Strimzi
+
+Your development cluster works perfectly on Docker Desktop. One broker, ephemeral storage, no authentication. But production is a different world.
+
+In production, Kafka clusters must survive broker failures without data loss. They must encrypt traffic to prevent eavesdropping. They must authenticate clients to prevent unauthorized access. And they must have enough resources to handle peak load without throttling.
+
+The gap between your development setup and production readiness is significant. Lesson 4 got Kafka running quickly. This lesson makes it production-grade.
+
+Development vs Production: The Gap​
+
+Before diving into configuration, understand what changes between environments:
+
+Aspect	Development	Production	Why It Matters
+Node Architecture	Single dual-role node	Separate controller (3) + broker (3+) pools	Controller failures don't affect message processing; scale independently
+Storage	Ephemeral	Persistent (SSD-backed PVCs)	Data survives pod restarts and node failures
+Replication	Factor 1	Factor 3, min.insync.replicas 2	Survive broker failures without data loss
+Encryption	None (plain listener)	TLS everywhere	Prevent network-level eavesdropping
+Authentication	None	SCRAM-SHA-512 or mTLS	Prevent unauthorized client access
+Authorization	None	Topic-level ACLs	Least-privilege access control
+Resources	Default (minimal)	Explicit CPU/memory limits	Predictable performance, prevent noisy neighbors
+
+Every difference addresses a specific production failure mode. Let's configure each one.
+
+Separate Controller and Broker Node Pools​
+
+In Lesson 4, you deployed a single node running both controller and broker roles. This works for development but creates problems in production:
+
+Blast radius: A controller failure takes down message processing
+Scaling constraints: Controllers don't need to scale like brokers
+Resource contention: Controller metadata operations compete with broker I/O
+
+Production clusters separate these roles into dedicated node pools.
+
+Controller Node Pool​
+
+Controllers manage cluster metadata through Raft consensus. They don't handle client traffic.
+
+# kafka-controller-pool.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: controllers
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: task-events
+spec:
+  replicas: 3
+  roles:
+    - controller
+  storage:
+    type: persistent-claim
+    size: 10Gi
+    class: standard  # Use your cluster's storage class
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: 1000m
+  jvmOptions:
+    -Xms: 512m
+    -Xmx: 1g
+
+
+Key production settings:
+
+Field	Value	Rationale
+replicas: 3	Odd number for Raft quorum	3 controllers tolerate 1 failure; 5 tolerates 2
+roles: [controller]	Controller only	Dedicated to metadata, not message handling
+storage.type: persistent-claim	Durable storage	Metadata survives pod restarts
+storage.size: 10Gi	Modest size	Controllers store metadata, not messages
+resources.limits	Explicit bounds	Prevent runaway memory; enable capacity planning
+Broker Node Pool​
+
+Brokers handle producer/consumer traffic and store message data. They scale based on throughput requirements.
+
+# kafka-broker-pool.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: brokers
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: task-events
+spec:
+  replicas: 3
+  roles:
+    - broker
+  storage:
+    type: persistent-claim
+    size: 100Gi
+    class: standard
+  resources:
+    requests:
+      memory: 4Gi
+      cpu: 1000m
+    limits:
+      memory: 8Gi
+      cpu: 2000m
+  jvmOptions:
+    -Xms: 2g
+    -Xmx: 4g
+
+
+Key production settings:
+
+Field	Value	Rationale
+replicas: 3	Minimum for RF=3	Each partition has 3 copies across brokers
+roles: [broker]	Broker only	Dedicated to message handling
+storage.size: 100Gi	Production sizing	Sized for retention period and throughput
+resources.limits.memory: 8Gi	Generous memory	JVM heap + page cache for read performance
+jvmOptions.-Xmx: 4g	Half of limit	Leave memory for OS page cache
+Why Separate Pools?​
+
+The separation creates independent failure domains:
+
+┌─────────────────────────────────────────────────────────────┐
+│  Controller Pool (Metadata)                                  │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐               │
+│  │ ctrl-0    │  │ ctrl-1    │  │ ctrl-2    │               │
+│  │ (leader)  │  │ (follower)│  │ (follower)│               │
+│  └───────────┘  └───────────┘  └───────────┘               │
+│            Raft consensus for cluster metadata               │
+├─────────────────────────────────────────────────────────────┤
+│  Broker Pool (Messages)                                      │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌─────────┐  │
+│  │ broker-0  │  │ broker-1  │  │ broker-2  │  │ broker-3│  │
+│  │ 100Gi SSD │  │ 100Gi SSD │  │ 100Gi SSD │  │ 100Gi   │  │
+│  └───────────┘  └───────────┘  └───────────┘  └─────────┘  │
+│               Partition replicas distributed                 │
+└─────────────────────────────────────────────────────────────┘
+
+
+Benefits:
+
+Scale brokers independently (add broker-3, broker-4 for more throughput)
+Controller failure doesn't stop message processing (existing brokers continue)
+Different resource profiles (controllers need less memory, brokers need more)
+TLS Encryption​
+
+In development, you used the plain listener on port 9092. Production traffic should be encrypted.
+
+Update Kafka CRD for TLS​
+# kafka-cluster-production.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+  namespace: kafka
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 4.1.1
+    metadataVersion: 4.1-IV0
+    listeners:
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: scram-sha-512
+      - name: external
+        port: 9094
+        type: nodeport
+        tls: true
+        authentication:
+          type: scram-sha-512
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      auto.create.topics.enable: false
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+
+
+Key security settings:
+
+Field	Value	Purpose
+listeners[].tls: true	Enabled	Encrypt traffic with TLS 1.2+
+listeners[].authentication.type	scram-sha-512	Require username/password auth
+min.insync.replicas: 2	2 of 3	Require 2 acks for durability
+auto.create.topics.enable: false	Disabled	Prevent accidental topic creation
+How Strimzi Handles Certificates​
+
+Strimzi automatically manages TLS certificates:
+
+Cluster CA: Signs broker certificates; clients verify server identity
+Clients CA: Signs client certificates (for mTLS); brokers verify client identity
+Auto-renewal: Strimzi rotates certificates before expiration
+
+You don't need to manually create certificates. Strimzi's Entity Operator handles the PKI lifecycle.
+
+To extract the CA certificate for clients:
+
+# Get cluster CA certificate
+kubectl get secret task-events-cluster-ca-cert -n kafka \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+
+
+Clients use this CA certificate to verify they're connecting to the real Kafka cluster, not an impersonator.
+
+SCRAM-SHA-512 Authentication​
+
+TLS encrypts traffic but doesn't identify clients. Add authentication so only authorized clients can connect.
+
+Create KafkaUser with ACLs​
+# kafka-user-task-api.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: task-api
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: task-events
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # Produce to task-* topics
+      - resource:
+          type: topic
+          name: task-
+          patternType: prefix
+        operations:
+          - Write
+          - Describe
+        host: "*"
+      # Consume from task-* topics (for testing)
+      - resource:
+          type: topic
+          name: task-
+          patternType: prefix
+        operations:
+          - Read
+          - Describe
+        host: "*"
+      # Consumer group for task-api
+      - resource:
+          type: group
+          name: task-api-
+          patternType: prefix
+        operations:
+          - Read
+        host: "*"
+
+
+ACL breakdown:
+
+Resource	Pattern	Operations	Purpose
+topic: task-	prefix	Write, Describe	Produce to any topic starting with "task-"
+topic: task-	prefix	Read, Describe	Consume from any topic starting with "task-"
+group: task-api-	prefix	Read	Use consumer groups starting with "task-api-"
+
+Apply the user:
+
+kubectl apply -f kafka-user-task-api.yaml
+
+
+Output:
+
+kafkauser.kafka.strimzi.io/task-api created
+
+Retrieve Credentials​
+
+Strimzi stores the generated password in a Kubernetes Secret:
+
+# Get the password
+kubectl get secret task-api -n kafka \
+  -o jsonpath='{.data.password}' | base64 -d
+
+
+For a Python producer, you'd configure authentication like this:
+
+from confluent_kafka import Producer
+
+producer = Producer({
+    'bootstrap.servers': 'task-events-kafka-bootstrap:9093',
+    'security.protocol': 'SASL_SSL',
+    'sasl.mechanism': 'SCRAM-SHA-512',
+    'sasl.username': 'task-api',
+    'sasl.password': '<password-from-secret>',
+    'ssl.ca.location': '/path/to/ca.crt'
+})
+
+
+Critical settings for authenticated connections:
+
+Config	Value	Purpose
+security.protocol	SASL_SSL	TLS encryption + SASL authentication
+sasl.mechanism	SCRAM-SHA-512	Password-based auth (not plaintext)
+ssl.ca.location	Path to ca.crt	Verify server certificate
+Resource Limits and Requests​
+
+Production clusters need explicit resource boundaries. Without them:
+
+Pods get OOMKilled during traffic spikes
+Other workloads starve when Kafka uses all available resources
+Capacity planning becomes guesswork
+Sizing Guidelines​
+Component	Memory Request	Memory Limit	CPU Request	CPU Limit
+Controller	1Gi	2Gi	500m	1000m
+Broker (small)	4Gi	8Gi	1000m	2000m
+Broker (medium)	8Gi	16Gi	2000m	4000m
+Broker (large)	16Gi	32Gi	4000m	8000m
+
+JVM heap sizing rules:
+
+Set -Xmx to half the memory limit
+Leave the other half for OS page cache (critical for read performance)
+Set -Xms equal to -Xmx for predictable performance
+
+Example for a broker with 8Gi memory limit:
+
+jvmOptions:
+  -Xms: 4g
+  -Xmx: 4g
+  gcLoggingEnabled: true
+
+Persistent Storage Configuration​
+
+Production data must survive pod restarts. Configure storage classes that match your cloud provider:
+
+AWS EKS​
+storage:
+  type: persistent-claim
+  size: 500Gi
+  class: gp3
+  deleteClaim: false
+
+GKE​
+storage:
+  type: persistent-claim
+  size: 500Gi
+  class: premium-rwo
+  deleteClaim: false
+
+Azure AKS​
+storage:
+  type: persistent-claim
+  size: 500Gi
+  class: managed-premium
+  deleteClaim: false
+
+
+Key settings:
+
+Field	Value	Purpose
+deleteClaim: false	Preserve PVCs	Data survives accidental Kafka CRD deletion
+size	Based on retention	Calculate: throughput x retention period
+Storage Sizing Formula​
+Required Storage = (Messages/sec × Avg Message Size × Retention Seconds × Replication Factor) / Broker Count
+
+Example:
+- 10,000 messages/second
+- 1KB average message size
+- 7 days (604,800 seconds) retention
+- Replication factor 3
+- 3 brokers
+
+Storage = (10,000 × 1KB × 604,800 × 3) / 3
+        = 6,048,000,000 KB / 3
+        = 2,016 GB per broker
+
+
+Round up and add 20% headroom for operational flexibility.
+
+Complete Production Configuration​
+
+Here's the full production deployment combining all security and reliability settings:
+
+# production-kafka-cluster.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: controllers
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: task-events
+spec:
+  replicas: 3
+  roles:
+    - controller
+  storage:
+    type: persistent-claim
+    size: 20Gi
+    class: standard
+    deleteClaim: false
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: 1000m
+  jvmOptions:
+    -Xms: 512m
+    -Xmx: 1g
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: brokers
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: task-events
+spec:
+  replicas: 3
+  roles:
+    - broker
+  storage:
+    type: persistent-claim
+    size: 100Gi
+    class: standard
+    deleteClaim: false
+  resources:
+    requests:
+      memory: 4Gi
+      cpu: 1000m
+    limits:
+      memory: 8Gi
+      cpu: 2000m
+  jvmOptions:
+    -Xms: 2g
+    -Xmx: 4g
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+  namespace: kafka
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 4.1.1
+    metadataVersion: 4.1-IV0
+    listeners:
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: scram-sha-512
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      auto.create.topics.enable: false
+      log.retention.hours: 168
+      log.segment.bytes: 1073741824
+      num.partitions: 6
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 100m
+        limits:
+          memory: 512Mi
+          cpu: 500m
+    userOperator:
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 100m
+        limits:
+          memory: 512Mi
+          cpu: 500m
+
+Verifying Production Readiness​
+
+After applying the production configuration:
+
+# Check all pods are running
+kubectl get pods -n kafka
+
+# Verify node pools
+kubectl get kafkanodepools -n kafka
+
+# Check Kafka status
+kubectl get kafka task-events -n kafka -o yaml | grep -A 20 status:
+
+
+Expected output:
+
+NAME                                        READY   STATUS    RESTARTS   AGE
+task-events-controllers-0                   1/1     Running   0          5m
+task-events-controllers-1                   1/1     Running   0          5m
+task-events-controllers-2                   1/1     Running   0          5m
+task-events-brokers-0                       1/1     Running   0          4m
+task-events-brokers-1                       1/1     Running   0          4m
+task-events-brokers-2                       1/1     Running   0          4m
+task-events-entity-operator-...             2/2     Running   0          3m
+
+Migration Path: Development to Production​
+
+If you have an existing development cluster, here's the migration approach:
+
+Create new production node pools alongside existing dual-role pool
+Apply updated Kafka CRD with new listeners and replication settings
+Wait for Strimzi to redistribute partitions to new brokers
+Create KafkaUser resources for all clients
+Update client configurations to use TLS + authentication
+Remove development node pool once all traffic migrated
+
+Strimzi handles partition redistribution automatically when you add brokers. The migration can be done with zero downtime.
+
+Reflect on Your Skill​
+
+You built a kafka-events skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kafka-events skill, configure a production Kafka cluster with TLS encryption, SCRAM authentication, and node pools.
+Does my skill generate Strimzi CRDs with proper security and resource allocation?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include TLS listener configuration and certificate management?
+Did it cover SCRAM user authentication and ACL setup?
+Improve Your Skill​
+
+If you found gaps:
+
+My kafka-events skill is missing production Kafka configuration (TLS, SCRAM, node pools, resource quotas).
+Update it to include how to secure and scale Kafka clusters in production.
+
+Try With AI​
+
+You've configured production Kafka with security and reliability features. Now explore how to validate and optimize your configuration.
+
+Prompt 1: Security Audit​
+I've configured production Kafka with:
+- Separate controller (3 nodes) and broker (3 nodes) pools
+- TLS on port 9093
+- SCRAM-SHA-512 authentication
+- KafkaUser with topic-prefix ACLs
+
+Review my security configuration:
+1. What attack vectors am I still exposed to?
+2. How would you improve the ACL configuration for least privilege?
+3. What monitoring should I add to detect unauthorized access attempts?
+
+Start by asking about my specific security requirements (compliance,
+multi-tenancy, external access) so you can give targeted recommendations.
+
+
+What you're learning: Security configuration involves tradeoffs between usability and protection. AI can help you understand your threat model and prioritize hardening efforts.
+
+Prompt 2: Capacity Planning​
+I'm planning a production Kafka cluster for an event-driven Task API with:
+- Expected load: 5,000 events/second at peak
+- Average event size: 2KB
+- Retention: 30 days
+- Must survive 1 broker failure without data loss
+
+Help me size the cluster:
+1. How many brokers do I need?
+2. What storage per broker?
+3. What memory and CPU?
+
+Walk me through your calculations so I can adjust them as our
+requirements change.
+
+
+What you're learning: Capacity planning requires understanding the relationship between throughput, retention, replication, and resources. AI can teach you the formulas while applying them to your specific scenario.
+
+Prompt 3: Troubleshooting Production Issues​
+My production Kafka cluster is experiencing issues:
+- Producers getting NotEnoughReplicasException intermittently
+- Consumer lag increasing on some partitions
+- One broker showing higher disk usage than others
+
+Here's my configuration:
+- 3 brokers, replication factor 3, min.insync.replicas 2
+- Storage: 100Gi per broker, 60% used on broker-2
+
+Help me diagnose:
+1. What's likely causing each symptom?
+2. What commands should I run to investigate?
+3. What's the priority order for fixing these issues?
+
+
+What you're learning: Production debugging requires correlating symptoms with root causes. AI can help you develop a systematic troubleshooting methodology for distributed systems.
+
+Safety note: Always test configuration changes in a staging environment before production. Incorrect authentication or replication settings can cause client failures or data loss. Keep your development cluster configuration separate so you can iterate quickly without risking production.

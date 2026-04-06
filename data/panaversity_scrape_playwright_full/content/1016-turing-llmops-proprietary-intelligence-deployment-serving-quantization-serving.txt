@@ -1,0 +1,418 @@
+Quantization for Inference
+
+Your fine-tuned model is 14GB in full precision. Your laptop has 8GB of RAM. Something has to give. Quantization reduces model size by representing weights with fewer bits, trading some quality for dramatically smaller memory footprint and faster inference.
+
+This lesson helps you navigate the quantization landscape. You will learn when Q4 is good enough, when Q8 is worth the extra memory, and how to measure the quality difference for your specific use case.
+
+The Quantization Tradeoff​
+
+Quantization compresses model weights from their original precision (usually 16-bit floating point) to lower bit representations. The math is straightforward: fewer bits means smaller files.
+
+Precision	Bits per Weight	Relative Size	Relative Quality
+F16 (full)	16 bits	100% (baseline)	100%
+Q8_0	8 bits	~50%	~99%
+Q6_K	6 bits	~40%	~98%
+Q5_K_M	5 bits	~35%	~97%
+Q4_K_M	4 bits	~30%	~95%
+Q4_0	4 bits	~25%	~92%
+Q2_K	2 bits	~15%	~80%
+
+The quality column is approximate. Actual quality loss depends on the model architecture, training data, and your specific task. A model fine-tuned for structured outputs may tolerate more aggressive quantization than one designed for creative writing.
+
+Understanding K-Quants​
+
+Not all quantization at the same bit level is equal. The "K" in formats like Q4_K_M indicates k-quant quantization, which uses a more sophisticated approach than simple round-to-nearest quantization.
+
+How K-Quants Work​
+
+Standard quantization (Q4_0) applies the same precision reduction to all layers uniformly. K-quants recognize that some layers are more sensitive to precision loss than others.
+
+Standard Quantization (Q4_0):
+┌────────────────────────────────────────────────┐
+│ All layers → 4-bit uniform quantization        │
+│ Simple, fast, but more quality loss            │
+└────────────────────────────────────────────────┘
+
+K-Quant (Q4_K_M):
+┌────────────────────────────────────────────────┐
+│ Attention layers → Higher precision (5-6 bit) │
+│ FFN layers → Lower precision (4 bit)          │
+│ Embeddings → Preserved quality                 │
+│ Result: Same average bits, better quality      │
+└────────────────────────────────────────────────┘
+
+K-Quant Variants​
+
+The suffix indicates the aggressiveness of the quantization:
+
+Variant	Size	Quality	Use Case
+Q4_K_S	Smallest	Lower	Extreme memory constraints
+Q4_K_M	Medium	Better	Default recommendation
+Q5_K_S	Smaller	Good	Balance size and quality
+Q5_K_M	Medium	Better	Quality-sensitive applications
+Q6_K	Larger	Excellent	Near-lossless inference
+
+Recommendation: Start with Q4_K_M. It provides the best quality-to-size ratio for most use cases. Move to Q5_K_M if you notice quality issues, or Q6_K if you have sufficient memory and need maximum quality.
+
+Measuring Quality Loss​
+
+Quality loss from quantization is not just a theoretical concern. You can measure it using perplexity, a standard metric for language model evaluation.
+
+Perplexity Explained​
+
+Perplexity measures how well the model predicts the next token. Lower is better. A perplexity of 10 means the model is, on average, as uncertain as choosing between 10 equally likely options.
+
+# Conceptual perplexity calculation
+import math
+
+def calculate_perplexity(log_probs):
+    """
+    log_probs: list of log probabilities for each token
+    Lower perplexity = better prediction
+    """
+    avg_log_prob = sum(log_probs) / len(log_probs)
+    perplexity = math.exp(-avg_log_prob)
+    return perplexity
+
+
+Output:
+
+Full precision model: perplexity = 5.23
+Q4_K_M model: perplexity = 5.41
+Quality loss: ~3.4%
+
+Benchmark Results​
+
+Real-world benchmarks from llama.cpp on a 7B parameter model:
+
+Quantization	File Size	PPL WikiText	Load Time	Inference Speed
+F16	13.5 GB	5.23	12s	1.0x baseline
+Q8_0	7.2 GB	5.25	6s	1.3x faster
+Q6_K	5.5 GB	5.28	5s	1.5x faster
+Q5_K_M	4.8 GB	5.31	4s	1.7x faster
+Q4_K_M	4.1 GB	5.41	3s	2.0x faster
+Q4_0	3.8 GB	5.68	3s	2.2x faster
+
+The Q4_K_M sweet spot: 70% size reduction, 3% perplexity increase, 2x speed improvement.
+
+Hardware-Based Selection​
+
+Your hardware dictates what quantization levels are practical.
+
+RAM-Only Inference (No GPU)​
+
+When running on CPU with system RAM:
+
+Available RAM → Maximum Model Size → Quantization Choice
+
+8 GB RAM:
+  └─► 7B model: Q4_K_M (~4GB) ✓
+  └─► 7B model: Q8_0 (~7GB) ✓ (tight)
+  └─► 13B model: Q4_K_M (~8GB) ✗ (no room for OS)
+
+16 GB RAM:
+  └─► 7B model: Q8_0 (~7GB) ✓
+  └─► 7B model: F16 (~14GB) ✗ (leaves ~2GB for OS)
+  └─► 13B model: Q4_K_M (~8GB) ✓
+  └─► 13B model: Q5_K_M (~9GB) ✓
+
+32 GB RAM:
+  └─► 7B model: F16 (~14GB) ✓
+  └─► 13B model: Q8_0 (~14GB) ✓
+  └─► 34B model: Q4_K_M (~20GB) ✓
+
+
+Rule of thumb: Leave 4-6 GB free for the operating system and other applications. Model size should be at most (RAM - 6GB).
+
+GPU Inference (VRAM)​
+
+With GPU acceleration, you need to fit the model in VRAM for full speed:
+
+VRAM → Model + Context → Quantization
+
+8 GB VRAM (RTX 3070, RTX 4060):
+  └─► 7B Q4_K_M + 4K context ✓
+  └─► 7B Q8_0 + 2K context ✓
+  └─► 13B Q4_K_M ✗ (need ~10GB)
+
+12 GB VRAM (RTX 3080, RTX 4070):
+  └─► 7B Q8_0 + 8K context ✓
+  └─► 13B Q4_K_M + 4K context ✓
+  └─► 13B Q5_K_M + 2K context ✓
+
+24 GB VRAM (RTX 3090, RTX 4090):
+  └─► 13B Q8_0 + 8K context ✓
+  └─► 34B Q4_K_M + 4K context ✓
+  └─► 70B Q4_K_M ✗ (need ~40GB)
+
+Apple Silicon​
+
+Apple Silicon shares memory between CPU and GPU, enabling larger models:
+
+Mac	Unified Memory	Recommended Max
+M1/M2 (8GB)	8 GB	7B Q4_K_M
+M1/M2 (16GB)	16 GB	13B Q4_K_M or 7B Q8_0
+M1/M2 Pro (32GB)	32 GB	34B Q4_K_M or 13B Q8_0
+M1/M2 Max (64GB)	64 GB	70B Q4_K_M
+M2 Ultra (192GB)	192 GB	70B Q8_0 or 405B Q4_K_M
+Converting to GGUF with Quantization​
+Method 1: Unsloth Export (Recommended)​
+
+If you fine-tuned with Unsloth, use the built-in export:
+
+from unsloth import FastLanguageModel
+
+# Load your fine-tuned model
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="./task-api-model",
+    max_seq_length=2048,
+    load_in_4bit=False,  # Export from full precision
+)
+
+# Export with Q4_K_M quantization
+model.save_pretrained_gguf(
+    "task-api-q4",
+    tokenizer,
+    quantization_method="q4_k_m"
+)
+
+# For higher quality, use Q5_K_M
+model.save_pretrained_gguf(
+    "task-api-q5",
+    tokenizer,
+    quantization_method="q5_k_m"
+)
+
+
+Output:
+
+Saving model to task-api-q4/...
+Converting to GGUF format...
+Applying q4_k_m quantization...
+Done! File: task-api-q4/task-api-model-q4_k_m.gguf (4.1 GB)
+
+Saving model to task-api-q5/...
+Converting to GGUF format...
+Applying q5_k_m quantization...
+Done! File: task-api-q5/task-api-model-q5_k_m.gguf (4.8 GB)
+
+Method 2: llama.cpp Direct Conversion​
+
+For models not trained with Unsloth:
+
+# Clone llama.cpp
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Convert safetensors to GGUF (F16 first)
+python convert-hf-to-gguf.py \
+    ../task-api-model \
+    --outfile ../task-api-f16.gguf \
+    --outtype f16
+
+# Quantize to Q4_K_M
+./llama-quantize \
+    ../task-api-f16.gguf \
+    ../task-api-q4_k_m.gguf \
+    Q4_K_M
+
+
+Output:
+
+Loading model from ../task-api-f16.gguf
+Quantizing to Q4_K_M...
+Writing output to ../task-api-q4_k_m.gguf
+Original size: 13.5 GB
+Quantized size: 4.1 GB
+Compression ratio: 3.29x
+
+Method 3: Multiple Quantization Levels​
+
+Create multiple versions for different deployment targets:
+
+# Create all common quantization levels
+for QUANT in Q4_K_M Q5_K_M Q6_K Q8_0; do
+    ./llama-quantize \
+        ../task-api-f16.gguf \
+        ../task-api-${QUANT}.gguf \
+        $QUANT
+done
+
+
+Output:
+
+Created: task-api-Q4_K_M.gguf (4.1 GB)
+Created: task-api-Q5_K_M.gguf (4.8 GB)
+Created: task-api-Q6_K.gguf (5.5 GB)
+Created: task-api-Q8_0.gguf (7.2 GB)
+
+Verifying Quantization Quality​
+
+After quantization, verify the model still performs acceptably:
+
+# Test the quantized model
+import requests
+
+def test_model_quality(model_name: str, test_prompts: list[str]):
+    """Compare outputs from quantized model against expected behavior."""
+    for prompt in test_prompts:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": model_name,
+                "prompt": prompt,
+                "stream": False
+            }
+        )
+        result = response.json()
+        print(f"Prompt: {prompt[:50]}...")
+        print(f"Response: {result['response'][:200]}...")
+        print("---")
+
+# Test prompts specific to Task API model
+test_prompts = [
+    "Create a task: Review quarterly report by Friday",
+    "List all high-priority tasks",
+    "Mark task 3 as complete",
+]
+
+test_model_quality("task-api:q4_k_m", test_prompts)
+
+
+Output:
+
+Prompt: Create a task: Review quarterly report by Fri...
+Response: {"action": "create_task", "title": "Review quarterly report", "due_date": "Friday", "priority": "normal"}...
+---
+Prompt: List all high-priority tasks...
+Response: {"action": "list_tasks", "filter": {"priority": "high"}}...
+---
+Prompt: Mark task 3 as complete...
+Response: {"action": "update_task", "id": 3, "status": "complete"}...
+---
+
+Reflect on Your Skill​
+
+Update your model-serving skill with quantization selection guidance:
+
+## Quantization Selection
+
+### Quick Decision Guide
+
+
+|
+ Your Situation 
+|
+ Recommended Quant 
+|
+
+
+|
+----------------
+|
+-------------------
+|
+
+
+|
+ First deployment, unsure 
+|
+ Q4_K_M 
+|
+
+
+|
+ Quality-sensitive app 
+|
+ Q5_K_M or Q6_K 
+|
+
+
+|
+ Memory-constrained 
+|
+ Q4_K_S 
+|
+
+
+|
+ Maximum quality needed 
+|
+ Q8_0 
+|
+
+
+|
+ Research/development 
+|
+ F16 
+|
+
+
+
+### Memory Requirements
+
+7B model:
+- Q4_K_M: ~4GB
+- Q5_K_M: ~5GB
+- Q8_0: ~7GB
+- F16: ~14GB
+
+### Quality Verification
+
+Always test quantized model with domain-specific prompts.
+Perplexity increase of 5-10% is usually acceptable.
+If outputs degrade noticeably, move up one quantization level.
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Calculate Your Budget​
+I have a fine-tuned 7B model stored as safetensors (13.5 GB).
+My target hardware:
+- MacBook Pro M2 with 16GB unified memory
+- Need to leave 4GB free for other applications
+- Want to support 4096 token context length
+
+Help me:
+1. Calculate how much memory the model can use
+2. Recommend a quantization level
+3. Estimate the final file size and inference speed
+
+
+What you are learning: Hardware-constrained optimization. You are building the habit of calculating memory budgets before deployment.
+
+Prompt 2: Compare Quality Impact​
+I am deploying a Task API model that generates structured JSON for
+task management. The model was fine-tuned to output specific JSON schemas.
+
+Compare Q4_K_M vs Q5_K_M for this use case:
+1. How might quantization affect JSON structure accuracy?
+2. Is structured output more or less sensitive to quantization than free-form text?
+3. What tests would verify the quantized model still produces valid JSON?
+
+
+What you are learning: Task-specific quality analysis. Different applications have different tolerance for quantization quality loss.
+
+Prompt 3: Troubleshoot Quality Issues​
+After converting my model to Q4_K_M, I'm seeing some issues:
+- Some JSON outputs are malformed (missing closing braces)
+- Occasional nonsense tokens in responses
+- Works fine for simple prompts but fails on complex ones
+
+What could cause these issues? Should I:
+A) Use a higher quantization level (Q5_K_M)?
+B) Check my conversion process for errors?
+C) Look for issues in the original model?
+D) Something else?
+
+
+What you are learning: Quantization debugging. When quality degrades, you need to diagnose whether it is a quantization issue or something else.
+
+Safety Note​
+
+Quantization is a one-way operation on the model weights. Always keep your original safetensors or full-precision GGUF file. If you discover quality issues later, you will need the original to re-quantize at a different level.

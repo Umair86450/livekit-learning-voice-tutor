@@ -1,0 +1,354 @@
+Lab: Inference on T4
+
+This is a hands-on lab. By the end, you'll have a working Colab notebook that loads Llama-3-8B-Instruct with 4-bit quantization and generates responses to Task API prompts.
+
+No theory in this lesson—just code, outputs, and troubleshooting. Keep your previous lessons open for reference.
+
+Prerequisites​
+
+Before starting:
+
+ Google account for Colab access
+ Hugging Face account (free) for model access
+ Completed Lessons 4-6 (VRAM budgeting, quantization, optimization)
+Part 1: Colab Setup​
+Step 1: Create a New Notebook​
+Go to colab.research.google.com
+Click File -> New Notebook
+Rename to ch62-inference-lab.ipynb
+Step 2: Enable GPU Runtime​
+Click Runtime -> Change runtime type
+Select T4 GPU from the dropdown
+Click Save
+Step 3: Verify GPU Access​
+
+Create your first cell and run it:
+
+# Cell 1: GPU Verification
+import torch
+
+# Check CUDA availability
+print(f"CUDA available: {torch.cuda.is_available()}")
+
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    print(f"CUDA version: {torch.version.cuda}")
+else:
+    print("ERROR: No GPU detected. Check Runtime -> Change runtime type")
+
+
+Output:
+
+CUDA available: True
+GPU: Tesla T4
+VRAM: 15.0 GB
+CUDA version: 12.1
+
+
+If you see "No GPU detected," go back to Runtime settings.
+
+Part 2: Install Dependencies​
+Step 4: Install Required Packages​
+# Cell 2: Install Dependencies
+# This takes 2-3 minutes
+
+!pip install -q transformers accelerate bitsandbytes
+!pip install -q huggingface_hub
+
+print("Installation complete!")
+
+
+Output:
+
+Installation complete!
+
+
+If you see deprecation warnings, that's normal—they don't affect functionality.
+
+Step 5: Hugging Face Authentication​
+
+You need to authenticate to access Llama-3-8B (gated model).
+
+# Cell 3: Hugging Face Login
+from huggingface_hub import login
+
+# Option 1: Interactive login (recommended for first time)
+login()
+
+# Option 2: Use token directly (if you have it saved)
+# login(token="hf_your_token_here")
+
+
+What happens:
+
+Colab shows a text input box
+Go to huggingface.co/settings/tokens
+Create a new token with "Read" permissions
+Paste the token and press Enter
+
+Output:
+
+Token has been saved to /root/.huggingface/token
+Login successful
+
+Step 6: Verify Model Access​
+
+Before loading the large model, verify your access:
+
+# Cell 4: Verify Access to Llama-3
+from huggingface_hub import model_info
+
+try:
+    info = model_info("meta-llama/Meta-Llama-3-8B-Instruct")
+    print(f"Model access verified: {info.id}")
+    print(f"Downloads: {info.downloads:,}")
+except Exception as e:
+    print(f"Access error: {e}")
+    print("\nTo fix: Go to https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct")
+    print("and accept the license agreement.")
+
+
+Output:
+
+Model access verified: meta-llama/Meta-Llama-3-8B-Instruct
+Downloads: 12,345,678
+
+
+If you get an access error, click the link and accept the Llama 3 license on Hugging Face.
+
+Part 3: Load the Quantized Model​
+Step 7: Configure Quantization​
+# Cell 5: Quantization Configuration
+from transformers import BitsAndBytesConfig
+import torch
+
+# QLoRA-ready 4-bit configuration
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,  # T4 doesn't support bfloat16
+    bnb_4bit_use_double_quant=True,
+)
+
+print("Quantization config ready")
+print(f"  - Precision: 4-bit NF4")
+print(f"  - Compute dtype: float16")
+print(f"  - Double quantization: enabled")
+
+
+Output:
+
+Quantization config ready
+  - Precision: 4-bit NF4
+  - Compute dtype: float16
+  - Double quantization: enabled
+
+Step 8: Load Model and Tokenizer​
+
+This is the memory-intensive step. Watch the progress carefully.
+
+# Cell 6: Load Model (takes 3-5 minutes)
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import time
+
+model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+print(f"Loading {model_name}...")
+print("This takes 3-5 minutes on first run.\n")
+
+start_time = time.time()
+
+# Load tokenizer (fast)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token
+print(f"Tokenizer loaded in {time.time() - start_time:.1f}s")
+
+# Load model with quantization (slow)
+model_start = time.time()
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=quantization_config,
+    device_map="auto",
+    trust_remote_code=True,
+)
+print(f"Model loaded in {time.time() - model_start:.1f}s")
+
+# Report memory usage
+vram_used = torch.cuda.memory_allocated() / 1024**3
+vram_reserved = torch.cuda.memory_reserved() / 1024**3
+print(f"\nVRAM allocated: {vram_used:.2f} GB")
+print(f"VRAM reserved: {vram_reserved:.2f} GB")
+print(f"Headroom: {15.0 - vram_reserved:.2f} GB")
+
+
+Output:
+
+Loading meta-llama/Meta-Llama-3-8B-Instruct...
+This takes 3-5 minutes on first run.
+
+Tokenizer loaded in 2.3s
+Model loaded in 187.4s
+
+VRAM allocated: 4.89 GB
+VRAM reserved: 5.12 GB
+Headroom: 9.88 GB
+
+
+Key insight: The 8B model uses only ~5GB with 4-bit quantization, matching our calculation from Lesson 4 (8B x 0.5 bytes = 4GB base + overhead).
+
+Step 9: Verify Model Works​
+
+Quick sanity check before moving to Task API prompts:
+
+# Cell 7: Quick Test
+test_prompt = "The capital of France is"
+
+inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
+
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=20,
+        do_sample=False,  # Deterministic for testing
+    )
+
+result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(f"Prompt: {test_prompt}")
+print(f"Response: {result}")
+
+# Verify output is reasonable
+if "Paris" in result:
+    print("\nModel verification PASSED")
+else:
+    print("\nModel verification: Check output quality")
+
+
+Output:
+
+Prompt: The capital of France is
+Response: The capital of France is Paris. Paris is the largest city in France and the
+
+Model verification PASSED
+
+Part 4: Task API Inference​
+
+Now let's use the model for our running example: Task API.
+
+Step 10: Define the Task Assistant Prompt​
+# Cell 8: Task API Prompt Template
+def create_task_prompt(user_message: str) -> str:
+    """Format prompt for Llama-3-8B-Instruct."""
+    system_message = """You are a helpful task management assistant.
+When users describe tasks, you:
+1. Create a structured task with title, description, due date, and priority
+2. Ask clarifying questions if information is missing
+3. Suggest relevant tags or categories"""
+
+    # Llama 3 Instruct format
+    prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{system_message}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+    return prompt
+
+# Test the template
+test_message = "I need to review the Q4 budget by Friday"
+print(create_task_prompt(test_message))
+
+
+Output:
+
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful task management assistant.
+When users describe tasks, you:
+1. Create a structured task with title, description, due date, and priority
+2. Ask clarifying questions if information is missing
+3. Suggest relevant tags or categories<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+I need to review the Q4 budget by Friday<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+
+Step 11: Create Inference Function​
+# Cell 9: Inference Function
+def generate_task_response(user_message: str, max_tokens: int = 200) -> str:
+    """Generate a task management response."""
+    prompt = create_task_prompt(user_message)
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=0.7,
+            top_p=0.9,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    # Decode only the new tokens (skip the prompt)
+    response = tokenizer.decode(
+        outputs[0][inputs["input_ids"].shape[1]:],
+        skip_special_tokens=True
+    )
+
+    return response.strip()
+
+# Test the function
+print("Testing inference function...")
+response = generate_task_response("I need to review the Q4 budget by Friday")
+print(f"\nResponse:\n{response}")
+
+
+Output:
+
+Testing inference function...
+
+Response:
+I'd be happy to help you create a task for reviewing the Q4 budget.
+
+**Task Created:**
+- **Title:** Review Q4 Budget
+- **Description:** Conduct a thorough review of the quarterly budget for Q4
+- **Due Date:** Friday (this week)
+- **Priority:** High
+
+A few questions to refine this task:
+1. Is this a personal review or will you be presenting findings to a team?
+2. Are there specific areas of the budget you want to focus on?
+3. Should I set a reminder for Thursday to give you prep time?
+
+Step 12: Run Multiple Task Examples​
+# Cell 10: Test Multiple Scenarios
+test_cases = [
+    "Schedule a team standup for every Monday at 9am",
+    "Remind me to call the client about the proposal",
+    "I need to finish the presentation but I'm not sure when it's due",
+]
+
+print("=" * 60)
+print("Task API Inference Examples")
+print("=" * 60)
+
+for i, task in enumerate(test_cases, 1):
+    print(f"\n--- Example {i} ---")
+    print(f"User: {task}")
+    print(f"\nAssistant:")
+    response = generate_task_response(task)
+    print(response)
+    print()
+
+
+Output:
+
+============================================================
+Task API Inference Examples
+============================================================
+
+--- Example 1 ---
+User: Schedule a team standup for every Monday at 9am

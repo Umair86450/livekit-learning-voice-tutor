@@ -1,0 +1,537 @@
+TIES, SLERP, and DARE Strategies
+
+You understand the theory: TIES trims and elects, DARE drops and rescales, SLERP preserves magnitude. Now you'll implement these strategies with MergeKit, tune their parameters, and evaluate the results.
+
+This lesson is hands-on. You'll merge your Task API adapters using each technique, compare results, and develop intuition for when each strategy excels.
+
+Environment Setup​
+Install MergeKit​
+# Create environment
+python -m venv mergekit-env
+source mergekit-env/bin/activate
+
+# Install MergeKit
+pip install mergekit
+
+# Verify installation
+mergekit-yaml --help
+
+
+Output:
+
+usage: mergekit-yaml [-h] [--config CONFIG] [--out-path OUT_PATH] ...
+
+Prepare Adapters​
+
+Ensure your adapters are ready:
+
+ls -la adapters/
+# task_api_persona/    # TaskMaster persona from Ch95
+# task_api_agentic/    # Tool-calling from Ch96
+
+
+Both adapters should be LoRA format trained on the same base model (Llama-3.2-3B-Instruct).
+
+Strategy 1: TIES Merging​
+
+TIES (Trim, Elect Signs, and Merge) handles parameter conflicts through a three-step process.
+
+Basic TIES Configuration​
+# ties_merge.yaml
+merge_method: ties
+slices:
+  - sources:
+      - model: ./adapters/task_api_persona
+        layer_range: [0, 28]  # Llama-3.2-3B has 28 layers
+      - model: ./adapters/task_api_agentic
+        layer_range: [0, 28]
+parameters:
+  weight: 0.5           # Equal weighting
+  density: 0.5          # Keep top 50% of changes
+base_model: unsloth/Llama-3.2-3B-Instruct
+dtype: float16
+
+Execute TIES Merge​
+mergekit-yaml ties_merge.yaml ./merged_ties --cuda
+
+
+Output:
+
+Loading base model: unsloth/Llama-3.2-3B-Instruct
+Loading adapter: ./adapters/task_api_persona
+Loading adapter: ./adapters/task_api_agentic
+Applying TIES merging...
+  Layer 0: 1,245 params trimmed, 2,341 sign conflicts resolved
+  Layer 1: 1,189 params trimmed, 2,156 sign conflicts resolved
+  ...
+  Layer 27: 1,302 params trimmed, 2,087 sign conflicts resolved
+Merge complete. Output: ./merged_ties
+Total parameters: 3.2B
+Merge time: 2m 34s
+
+Understanding Density Parameter​
+
+Density controls how aggressively TIES trims small changes:
+
+Density	Behavior	Use Case
+0.2	Very aggressive trim (keep only 20%)	Highly redundant adapters
+0.5	Balanced (default)	General purpose
+0.7	Light trim (keep 70%)	Adapters with distinct, important changes
+1.0	No trimming (sign election only)	When all changes matter
+Tuning Density​
+def tune_density(base_model: str, adapters: list, densities: list, eval_fn):
+    """Find optimal density through systematic testing."""
+    results = []
+
+    for density in densities:
+        # Generate config
+        config = generate_ties_config(base_model, adapters, density)
+        save_yaml(config, "temp_config.yaml")
+
+        # Merge
+        subprocess.run(["mergekit-yaml", "temp_config.yaml", f"./merged_d{density}"])
+
+        # Evaluate
+        score = eval_fn(f"./merged_d{density}")
+        results.append({"density": density, "score": score})
+        print(f"Density {density}: Score {score:.3f}")
+
+    # Find optimal
+    best = max(results, key=lambda x: x["score"])
+    return best
+
+# Run tuning
+densities = [0.3, 0.4, 0.5, 0.6, 0.7]
+best = tune_density(
+    "unsloth/Llama-3.2-3B-Instruct",
+    ["./adapters/task_api_persona", "./adapters/task_api_agentic"],
+    densities,
+    evaluate_merged_model
+)
+print(f"Optimal density: {best['density']}")
+
+
+Output:
+
+Density 0.3: Score 0.823
+Density 0.4: Score 0.867
+Density 0.5: Score 0.891
+Density 0.6: Score 0.879
+Density 0.7: Score 0.854
+Optimal density: 0.5
+
+Strategy 2: DARE-TIES Merging​
+
+DARE (Drop And REscale) takes an aggressive approach: randomly drop most parameters, rescale survivors.
+
+DARE Insight​
+
+Research found that fine-tuned models retain capability even with 90% of parameter changes dropped. This enables:
+
+Aggressive compression
+Reduced merge conflicts (fewer non-zero params)
+Faster merging
+DARE-TIES Configuration​
+
+DARE-TIES combines DARE's dropping with TIES's sign election:
+
+# dare_ties_merge.yaml
+merge_method: dare_ties
+slices:
+  - sources:
+      - model: ./adapters/task_api_persona
+        layer_range: [0, 28]
+      - model: ./adapters/task_api_agentic
+        layer_range: [0, 28]
+parameters:
+  weight: 0.5
+  density: 0.3    # Keep only 30% of parameters (drop 70%)
+  rescale: true   # Rescale survivors to compensate
+base_model: unsloth/Llama-3.2-3B-Instruct
+dtype: float16
+
+Execute DARE-TIES Merge​
+mergekit-yaml dare_ties_merge.yaml ./merged_dare_ties --cuda
+
+
+Output:
+
+Loading base model: unsloth/Llama-3.2-3B-Instruct
+Loading adapters...
+Applying DARE-TIES merging (density=0.3, rescale=true)...
+  Layer 0: 70.2% params dropped, rescale factor 3.33
+  Layer 1: 69.8% params dropped, rescale factor 3.31
+  ...
+  Layer 27: 70.1% params dropped, rescale factor 3.32
+Sign election: 1,823 conflicts resolved
+Merge complete. Output: ./merged_dare_ties
+Merge time: 1m 58s
+
+Tuning DARE Drop Rate​
+
+The density parameter in DARE-TIES controls drop rate (1 - density = drop rate):
+
+def tune_dare_density(adapters: list, densities: list):
+    """Find optimal DARE density balancing compression vs capability."""
+    results = []
+
+    for density in densities:
+        drop_rate = 1 - density
+
+        # Merge with this density
+        merge_with_dare_ties(adapters, density, f"./merged_dare_{density}")
+
+        # Evaluate both capabilities
+        persona_score = evaluate_persona(f"./merged_dare_{density}")
+        agentic_score = evaluate_agentic(f"./merged_dare_{density}")
+        combined = (persona_score + agentic_score) / 2
+
+        results.append({
+            "density": density,
+            "drop_rate": drop_rate,
+            "persona": persona_score,
+            "agentic": agentic_score,
+            "combined": combined
+        })
+
+        print(f"Density {density} (drop {drop_rate*100:.0f}%): "
+              f"Persona={persona_score:.2f}, Agentic={agentic_score:.2f}")
+
+    return results
+
+# Test densities
+densities = [0.1, 0.2, 0.3, 0.4, 0.5]
+results = tune_dare_density(adapters, densities)
+
+
+Output:
+
+Density 0.1 (drop 90%): Persona=0.72, Agentic=0.68
+Density 0.2 (drop 80%): Persona=0.81, Agentic=0.79
+Density 0.3 (drop 70%): Persona=0.88, Agentic=0.87
+Density 0.4 (drop 60%): Persona=0.90, Agentic=0.89
+Density 0.5 (drop 50%): Persona=0.91, Agentic=0.90
+
+
+Insight: With 70% of parameters dropped (density=0.3), we retain 88-87% capability—excellent compression with minimal loss.
+
+Strategy 3: SLERP for Two Similar Models​
+
+SLERP (Spherical Linear Interpolation) preserves weight magnitude during interpolation.
+
+When SLERP Helps​
+
+Use SLERP when:
+
+Merging exactly two models
+Models are similar (same task, different training runs)
+You want smooth interpolation without magnitude loss
+SLERP Configuration​
+# slerp_merge.yaml
+merge_method: slerp
+slices:
+  - sources:
+      - model: ./adapters/task_api_persona
+        layer_range: [0, 28]
+      - model: ./adapters/task_api_agentic
+        layer_range: [0, 28]
+parameters:
+  t: 0.5    # Interpolation factor (0 = first model, 1 = second)
+base_model: unsloth/Llama-3.2-3B-Instruct
+dtype: float16
+
+Execute SLERP Merge​
+mergekit-yaml slerp_merge.yaml ./merged_slerp --cuda
+
+
+Output:
+
+Loading base model and adapters...
+Applying SLERP merging (t=0.5)...
+  Computing spherical interpolation across 28 layers...
+  Magnitude preservation: 99.7%
+Merge complete. Output: ./merged_slerp
+Merge time: 2m 12s
+
+SLERP vs Linear Comparison​
+def compare_slerp_linear(adapters: list, t_values: list):
+    """Compare SLERP vs linear interpolation."""
+    results = {"slerp": [], "linear": []}
+
+    for t in t_values:
+        # SLERP merge
+        merge_slerp(adapters, t, f"./merged_slerp_{t}")
+        slerp_score = evaluate_combined(f"./merged_slerp_{t}")
+        results["slerp"].append(slerp_score)
+
+        # Linear merge (equivalent alpha)
+        merge_linear(adapters, t, f"./merged_linear_{t}")
+        linear_score = evaluate_combined(f"./merged_linear_{t}")
+        results["linear"].append(linear_score)
+
+        print(f"t={t}: SLERP={slerp_score:.3f}, Linear={linear_score:.3f}")
+
+    return results
+
+results = compare_slerp_linear(adapters, [0.3, 0.5, 0.7])
+
+
+Output:
+
+t=0.3: SLERP=0.867, Linear=0.851
+t=0.5: SLERP=0.891, Linear=0.878
+t=0.7: SLERP=0.872, Linear=0.859
+
+
+SLERP consistently outperforms linear by 1-2% through magnitude preservation.
+
+Comparative Evaluation​
+Test Suite Design​
+
+Evaluate each merge strategy across both capabilities:
+
+def evaluate_merged_models(model_paths: dict) -> dict:
+    """Evaluate all merged models on standard test suite."""
+
+    test_suites = {
+        "persona": [
+            {"input": "Hello!", "expected_traits": ["encouraging", "friendly"]},
+            {"input": "I'm feeling overwhelmed", "expected_traits": ["supportive", "empathetic"]},
+            {"input": "I finished all my tasks!", "expected_traits": ["celebratory", "positive"]},
+            # ... 50 persona trait tests
+        ],
+        "agentic": [
+            {"input": "Create a task", "expected": "tool_call"},
+            {"input": "List my tasks", "expected": "tool_call"},
+            {"input": "What's the status?", "expected": "tool_call"},
+            # ... 50 tool-calling tests
+        ]
+    }
+
+    results = {}
+
+    for name, path in model_paths.items():
+        model = load_model(path)
+        persona_score = evaluate_persona_suite(model, test_suites["persona"])
+        agentic_score = evaluate_agentic_suite(model, test_suites["agentic"])
+
+        results[name] = {
+            "persona": persona_score,
+            "agentic": agentic_score,
+            "combined": (persona_score + agentic_score) / 2
+        }
+
+    return results
+
+# Evaluate all strategies
+models = {
+    "linear": "./merged_linear",
+    "slerp": "./merged_slerp",
+    "ties": "./merged_ties",
+    "dare_ties": "./merged_dare_ties",
+    "persona_only": "./adapters/task_api_persona",
+    "agentic_only": "./adapters/task_api_agentic",
+}
+
+results = evaluate_merged_models(models)
+
+Results Comparison​
+def print_comparison_table(results: dict):
+    """Print formatted comparison table."""
+    print("=" * 70)
+    print(f"{'Model':<20} {'Persona':<12} {'Agentic':<12} {'Combined':<12}")
+    print("=" * 70)
+
+    # Sort by combined score
+    for name, scores in sorted(results.items(), key=lambda x: -x[1]["combined"]):
+        print(f"{name:<20} {scores['persona']:.3f}        "
+              f"{scores['agentic']:.3f}        {scores['combined']:.3f}")
+
+    print("=" * 70)
+
+print_comparison_table(results)
+
+
+Output:
+
+======================================================================
+Model                Persona      Agentic      Combined
+======================================================================
+ties                 0.891        0.903        0.897
+dare_ties            0.883        0.891        0.887
+slerp                0.879        0.883        0.881
+linear               0.862        0.871        0.867
+persona_only         0.945        0.312        0.629
+agentic_only         0.287        0.961        0.624
+======================================================================
+
+
+Key insights:
+
+TIES wins: Best combined score (0.897) with excellent balance
+DARE-TIES close second: 70% compression with only 1% quality loss
+Individual adapters fail cross-capability: Each adapter excels at its specialty but fails at the other
+All merges beat individuals: Even linear creates useful combined capability
+Strategy Selection Guide​
+
+Based on your evaluation results:
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    STRATEGY SELECTION FLOWCHART                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+                        How many adapters?
+                              │
+               ┌──────────────┼──────────────┐
+               │              │              │
+           ┌───▼───┐     ┌────▼────┐    ┌────▼────┐
+           │  TWO  │     │ THREE+  │    │   N/A   │
+           └───┬───┘     └────┬────┘    └─────────┘
+               │              │
+        Are they similar?   Use TIES or DARE-TIES
+               │              │
+     ┌─────────┼─────────┐    │
+     │         │         │    │
+┌────▼────┐ ┌──▼──┐      │    │
+│   YES   │ │ NO  │      │    │
+└────┬────┘ └──┬──┘      │    │
+     │         │         │    │
+     ▼         ▼         │    │
+   SLERP    TIES or      │    │
+            DARE-TIES    │    │
+                         │    │
+                    ┌────▼────▼────┐
+                    │  Need        │
+                    │  compression?│
+                    └──────┬───────┘
+                           │
+                 ┌─────────┼─────────┐
+                 │         │         │
+            ┌────▼────┐ ┌──▼──┐
+            │   YES   │ │ NO  │
+            └────┬────┘ └──┬──┘
+                 │         │
+                 ▼         ▼
+            DARE-TIES   TIES
+
+Quick Reference​
+Scenario	Recommended Strategy	Key Parameter
+Two distinct adapters, balanced	TIES	density=0.5
+Two distinct adapters, compression needed	DARE-TIES	density=0.3
+Two similar adapters (same task)	SLERP	t=0.5
+Three+ adapters	TIES	density=0.4-0.6
+Quick baseline test	Linear	weight=0.5
+Practical Workflow​
+Standard Merge Pipeline​
+#!/bin/bash
+# merge_pipeline.sh
+
+BASE_MODEL="unsloth/Llama-3.2-3B-Instruct"
+ADAPTER_1="./adapters/task_api_persona"
+ADAPTER_2="./adapters/task_api_agentic"
+OUTPUT="./merged_production"
+
+# Step 1: Quick linear baseline
+echo "Running linear baseline..."
+cat > linear.yaml << EOF
+merge_method: linear
+slices:
+  - sources:
+      - model: $ADAPTER_1
+        parameters:
+          weight: 0.5
+      - model: $ADAPTER_2
+        parameters:
+          weight: 0.5
+base_model: $BASE_MODEL
+dtype: float16
+EOF
+mergekit-yaml linear.yaml ./merged_linear --cuda
+
+# Step 2: TIES merge
+echo "Running TIES merge..."
+cat > ties.yaml << EOF
+merge_method: ties
+slices:
+  - sources:
+      - model: $ADAPTER_1
+      - model: $ADAPTER_2
+parameters:
+  weight: 0.5
+  density: 0.5
+base_model: $BASE_MODEL
+dtype: float16
+EOF
+mergekit-yaml ties.yaml ./merged_ties --cuda
+
+# Step 3: Evaluate both
+echo "Evaluating..."
+python evaluate_merge.py ./merged_linear ./merged_ties
+
+# Step 4: Use better result
+# (Based on evaluation, copy to production)
+
+Reflect on Your Skill​
+
+Update your model-merging skill with practical guidance:
+
+Add strategy selection flowchart: Copy the decision tree above
+Add tuning ranges: Density (0.3-0.7), t values (0.3-0.7)
+Add evaluation patterns: Both-capability testing template
+Add warning signs: When merged model underperforms both sources
+Try With AI​
+Prompt 1: Debug a Failed Merge​
+I merged persona + agentic adapters with TIES (density=0.5) but the result
+is worse than linear merge:
+
+Linear: Persona=0.86, Agentic=0.87
+TIES:   Persona=0.79, Agentic=0.81
+
+This contradicts what I expected. Help me diagnose:
+1. What could cause TIES to underperform linear?
+2. What parameters should I adjust?
+3. How do I verify my adapters are TIES-compatible?
+
+
+What you're learning: Troubleshooting—understanding when theory doesn't match practice.
+
+Prompt 2: Optimize for Memory Constraints​
+I need to merge two 8B adapters but only have 16GB RAM on my Mac.
+The merge keeps running out of memory.
+
+Current setup:
+- Base: Llama-3.2-8B
+- Adapters: 2 LoRA adapters (r=32)
+- RAM: 16GB (no GPU)
+
+What strategies can I use? Consider:
+1. MergeKit lazy loading options
+2. Layer-by-layer processing
+3. Quantized merging
+4. Alternative approaches
+
+
+What you're learning: Resource optimization—working within hardware constraints.
+
+Prompt 3: Compare Your Results​
+Here are my merge results for Task API adapters:
+
+| Strategy   | Persona | Agentic | Combined |
+|------------|---------|---------|----------|
+| Linear     | 0.84    | 0.86    | 0.85     |
+| TIES 0.5   | 0.89    | 0.91    | 0.90     |
+| TIES 0.3   | 0.86    | 0.88    | 0.87     |
+| DARE 0.3   | 0.85    | 0.87    | 0.86     |
+| SLERP      | 0.87    | 0.88    | 0.88     |
+
+Analyze these results:
+1. Is TIES 0.5 clearly the best, or is the difference within noise?
+2. Why did DARE underperform TIES at the same density?
+3. What additional experiments would you run to be confident?
+
+
+What you're learning: Statistical reasoning—interpreting results with appropriate skepticism.
+
+Safety Note​
+
+Merged models can exhibit unexpected emergent behaviors when capabilities interact. A persona that uses encouraging language combined with tool-calling might produce overly casual JSON, breaking parsers. Always evaluate merged models on representative test cases from ALL source capabilities before deployment. The interaction between merged capabilities is not always predictable from individual adapter performance.

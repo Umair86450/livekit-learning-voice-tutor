@@ -1,0 +1,408 @@
+LLM-as-Judge
+
+Automated metrics work well when you have clear right/wrong answers. But how do you evaluate "Is this response helpful?" or "Does this explanation make sense?" These subjective qualities require judgment, and a powerful language model can provide that judgment at scale.
+
+The LLM-as-Judge pattern uses a capable model (like GPT-4 or Claude) to evaluate outputs from your fine-tuned model. This lesson teaches you to implement reliable evaluation pipelines that capture nuanced quality dimensions.
+
+When to Use LLM-as-Judge​
+Scenario	Use LLM-as-Judge?	Reasoning
+JSON format validation	No	Programmatic check is deterministic and free
+Helpfulness of response	Yes	Subjective quality requires judgment
+Factual accuracy	Maybe	Cross-check against known facts when possible
+Code correctness	No	Run tests instead
+Writing quality	Yes	Style, clarity, engagement are subjective
+Safety evaluation	Yes	Nuanced harm detection benefits from reasoning
+
+Rule of thumb: Use LLM-as-Judge when:
+
+Multiple valid outputs exist
+Quality is subjective or multidimensional
+You need reasoning about why something is good/bad
+The Basic Pattern​
+import openai
+import json
+
+def llm_judge(model_output: str, expected_behavior: str, criteria: list[str]) -> dict:
+    """Evaluate model output using GPT-4 as judge."""
+
+    prompt = f"""You are an expert evaluator. Rate the following assistant response.
+
+User Request: {expected_behavior}
+Assistant Response: {model_output}
+
+Evaluate on these criteria (1-5 scale):
+{chr(10).join(f"- {c}" for c in criteria)}
+
+Respond in JSON format:
+{{
+    "scores": {{"criteria_name": score, ...}},
+    "reasoning": {{"criteria_name": "explanation", ...}},
+    "overall": score
+}}
+"""
+
+    response = openai.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0  # Deterministic for consistency
+    )
+
+    return json.loads(response.choices[0].message.content)
+
+# Example usage
+result = llm_judge(
+    model_output='{"action": "create", "title": "Review budget", "priority": "high"}',
+    expected_behavior="Create a high-priority task to review the budget",
+    criteria=["Accuracy", "Completeness", "Format correctness"]
+)
+
+
+Output:
+
+{
+    "scores": {"Accuracy": 5, "Completeness": 5, "Format correctness": 5},
+    "reasoning": {
+        "Accuracy": "Correctly identified 'create' action and 'high' priority",
+        "Completeness": "All required fields present",
+        "Format correctness": "Valid JSON matching expected schema"
+    },
+    "overall": 5
+}
+
+Designing Effective Rubrics​
+
+A rubric converts subjective judgment into consistent scores. Good rubrics have:
+
+Clear criteria definitions
+Anchor examples for each score level
+Explicit guidance on edge cases
+Rubric Template​
+TASK_API_RUBRIC = {
+    "criteria": {
+        "action_accuracy": {
+            "description": "Does the output select the correct action for the request?",
+            "anchors": {
+                5: "Perfect action selection with no ambiguity",
+                4: "Correct action, minor interpretation issue",
+                3: "Related action but not optimal",
+                2: "Wrong action that could cause harm",
+                1: "Completely unrelated action"
+            }
+        },
+        "completeness": {
+            "description": "Are all relevant fields populated appropriately?",
+            "anchors": {
+                5: "All fields correct, smart defaults for unspecified",
+                4: "Required fields correct, optional fields reasonable",
+                3: "Required fields present, optional fields missing or wrong",
+                2: "Missing required fields",
+                1: "Most fields missing or incorrect"
+            }
+        },
+        "format_quality": {
+            "description": "Is the JSON well-formed and following conventions?",
+            "anchors": {
+                5: "Perfect JSON, consistent formatting",
+                4: "Valid JSON, minor style issues",
+                3: "Valid JSON, significant style issues",
+                2: "JSON with recoverable errors",
+                1: "Invalid JSON or wrong structure"
+            }
+        }
+    }
+}
+
+Using Rubrics in Evaluation​
+def judge_with_rubric(output: str, input_text: str, rubric: dict) -> dict:
+    """Evaluate using structured rubric."""
+
+    rubric_text = ""
+    for criterion, details in rubric["criteria"].items():
+        rubric_text += f"\n### {criterion}\n"
+        rubric_text += f"Definition: {details['description']}\n"
+        rubric_text += "Scoring guide:\n"
+        for score, description in sorted(details['anchors'].items(), reverse=True):
+            rubric_text += f"  {score}: {description}\n"
+
+    prompt = f"""You are an expert evaluator for a Task API assistant.
+
+## Input
+User request: {input_text}
+
+## Output to Evaluate
+{output}
+
+## Rubric
+{rubric_text}
+
+## Your Task
+Score the output on each criterion. Provide:
+1. A score (1-5) for each criterion
+2. Brief reasoning for each score
+3. An overall weighted score
+
+Respond in JSON:
+{{
+    "scores": {{"criterion": score, ...}},
+    "reasoning": {{"criterion": "explanation", ...}},
+    "overall": float
+}}
+"""
+
+    response = openai.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    return json.loads(response.choices[0].message.content)
+
+# Example
+result = judge_with_rubric(
+    output='{"action": "create", "title": "Review budget"}',
+    input_text="Create a high-priority task to review the budget",
+    rubric=TASK_API_RUBRIC
+)
+
+
+Output:
+
+{
+    "scores": {
+        "action_accuracy": 5,
+        "completeness": 3,
+        "format_quality": 5
+    },
+    "reasoning": {
+        "action_accuracy": "Correctly selected 'create' action",
+        "completeness": "Missing 'priority' field which was explicitly requested",
+        "format_quality": "Valid, well-formed JSON"
+    },
+    "overall": 4.33
+}
+
+Common LLM Judge Biases​
+
+LLM judges have systematic biases. Knowing them helps you design mitigation strategies.
+
+Bias 1: Position Bias​
+
+LLMs tend to prefer responses shown first or last in a comparison.
+
+Detection:
+
+def test_position_bias(judge_model, response_a, response_b, prompt):
+    """Test if judge shows position bias."""
+    # Order A, B
+    result_ab = judge_pairwise(prompt, response_a, response_b)
+
+    # Order B, A
+    result_ba = judge_pairwise(prompt, response_b, response_a)
+
+    if result_ab['winner'] != result_ba['winner']:
+        return "POSITION_BIAS_DETECTED"
+    return "CONSISTENT"
+
+
+Mitigation:
+
+Run evaluation in both orders
+Average results or require consistency
+Use single-response scoring instead of pairwise
+Bias 2: Verbosity Bias​
+
+Longer responses are often rated higher, even when shorter responses are better.
+
+Detection:
+
+def analyze_verbosity_correlation(evaluations):
+    """Check if scores correlate with response length."""
+    lengths = [len(e['response']) for e in evaluations]
+    scores = [e['score'] for e in evaluations]
+
+    correlation = np.corrcoef(lengths, scores)[0, 1]
+    if correlation > 0.5:
+        return f"HIGH_VERBOSITY_BIAS: r={correlation:.2f}"
+    return f"ACCEPTABLE: r={correlation:.2f}"
+
+
+Mitigation:
+
+Explicitly state "conciseness is valued" in rubric
+Add negative scoring for unnecessary verbosity
+Normalize for length in post-processing
+Bias 3: Self-Preference Bias​
+
+GPT-4 tends to rate GPT-4 outputs higher than other models.
+
+Detection:
+
+Compare ratings when judge knows vs doesn't know output source
+Use multiple judge models and look for disagreement
+
+Mitigation:
+
+Blind evaluation (don't reveal which model produced output)
+Use diverse judge models (GPT-4, Claude, Gemini)
+Ensemble multiple judges
+Implementing Bias Mitigations​
+class RobustLLMJudge:
+    """LLM judge with bias mitigation."""
+
+    def __init__(self, judge_models: list[str] = ["gpt-4", "claude-3-opus"]):
+        self.judge_models = judge_models
+
+    def evaluate(self, output: str, input_text: str, rubric: dict) -> dict:
+        """Evaluate with multiple judges and position-swap."""
+        all_scores = []
+
+        for model in self.judge_models:
+            # Standard evaluation
+            score1 = self._single_eval(model, output, input_text, rubric)
+            all_scores.append(score1)
+
+        # Aggregate across judges
+        final_scores = {}
+        for criterion in rubric["criteria"]:
+            scores = [s["scores"][criterion] for s in all_scores]
+            final_scores[criterion] = {
+                "mean": np.mean(scores),
+                "std": np.std(scores),
+                "agreement": len(set(scores)) == 1
+            }
+
+        return {
+            "aggregated_scores": final_scores,
+            "individual_judgments": all_scores,
+            "judge_agreement": self._calculate_agreement(all_scores)
+        }
+
+    def _single_eval(self, model, output, input_text, rubric):
+        # Implementation of single evaluation
+        pass
+
+    def _calculate_agreement(self, judgments):
+        """Calculate inter-rater reliability (Cohen's kappa approximation)."""
+        pass
+
+# Usage
+judge = RobustLLMJudge()
+result = judge.evaluate(output, input_text, TASK_API_RUBRIC)
+
+
+Output:
+
+{
+    "aggregated_scores": {
+        "action_accuracy": {"mean": 4.5, "std": 0.5, "agreement": false},
+        "completeness": {"mean": 3.0, "std": 0.0, "agreement": true}
+    },
+    "judge_agreement": 0.78
+}
+
+Cost-Effective Judging​
+
+LLM-as-Judge costs money. Here is how to optimize:
+
+Strategy	Cost Reduction	Trade-off
+Use GPT-4-turbo instead of GPT-4	~3x cheaper	Slightly less reliable
+Sample subset for evaluation	Linear with sample	Statistical uncertainty
+Use smaller judge for easy cases	~10x cheaper	Miss subtle issues
+Cache repeated evaluations	Depends on hit rate	Storage overhead
+def smart_judge(outputs: list, sample_rate: float = 0.1):
+    """Cost-effective judging with sampling."""
+    # Full automated check on all
+    automated_results = [automated_check(o) for o in outputs]
+
+    # LLM judge on sample
+    sample_size = int(len(outputs) * sample_rate)
+    sample_indices = random.sample(range(len(outputs)), sample_size)
+    llm_results = [llm_judge(outputs[i]) for i in sample_indices]
+
+    return {
+        "automated": automated_results,  # 100% coverage
+        "llm_judged": llm_results,        # Sample coverage
+        "estimated_quality": aggregate(llm_results)
+    }
+
+Update Your Skill​
+
+Add to llmops-evaluator/SKILL.md:
+
+## LLM-as-Judge Patterns
+
+### When to Use
+- Subjective quality (helpfulness, clarity, appropriateness)
+- Multi-dimensional evaluation
+- Need reasoning about failures
+- Human evaluation too expensive at scale
+
+### Rubric Design Checklist
+- [ ] Clear criterion definitions
+- [ ] Anchor examples for each score level (1-5)
+- [ ] Edge case guidance
+- [ ] Conciseness preference explicit
+- [ ] Safety considerations included
+
+### Bias Mitigation
+1. Use multiple judge models (ensemble)
+2. Run pairwise comparisons in both orders
+3. Blind evaluation (hide model source)
+4. Add verbosity penalty in rubric
+5. Check inter-rater agreement
+
+### Cost Optimization
+- Sample 10-20% for expensive evaluation
+- Use automated checks as first gate
+- Cache repeated evaluations
+- Smaller judge for obvious cases
+
+Try With AI​
+Prompt 1: Design a Custom Rubric​
+I'm building a customer support bot that handles billing inquiries.
+
+Design an evaluation rubric with 4 criteria:
+1. Accuracy of billing information
+2. Tone appropriateness
+3. Resolution completeness
+4. Upsell attempt (when appropriate)
+
+For each criterion:
+- Provide a clear definition
+- Give anchor examples for scores 1, 3, and 5
+- Note edge cases to watch for
+
+
+What you are learning: Rubric design for domain-specific evaluation. Generic rubrics miss important dimensions of your specific use case. Your AI partner helps create rubrics that capture what matters for your application.
+
+Prompt 2: Identify Bias Vulnerabilities​
+I'm using GPT-4 to evaluate outputs from my Llama-3 fine-tuned model.
+
+My evaluation prompt is:
+[paste your evaluation prompt]
+
+Analyze this for potential biases:
+1. Position bias risks
+2. Verbosity bias risks
+3. Self-preference bias risks
+4. Other systematic biases
+
+Suggest specific modifications to mitigate each identified bias.
+
+
+What you are learning: Bias analysis. LLM judges have systematic biases that can distort your evaluation. Your AI partner helps identify vulnerabilities in your evaluation setup.
+
+Prompt 3: Optimize Evaluation Cost​
+My evaluation pipeline:
+- 10,000 outputs to evaluate daily
+- Using GPT-4 at $0.03/1K input + $0.06/1K output
+- Current prompt: ~500 tokens input, ~200 tokens output
+
+Calculate my daily cost and propose 3 strategies to reduce it by 50%+ while maintaining evaluation quality. Include specific implementation details.
+
+
+What you are learning: Cost engineering for evaluation. Production evaluation at scale requires balancing quality against cost. Your AI partner helps you find efficient strategies.
+
+Safety Note​
+
+LLM judges are not infallible. They can miss subtle safety issues, especially adversarial attacks designed to evade detection. Always maintain human review processes for safety-critical applications and never rely solely on automated evaluation for deployment decisions.

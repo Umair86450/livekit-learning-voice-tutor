@@ -1,0 +1,516 @@
+Production Checklist & Verification
+
+You've deployed your Task API to a cloud Kubernetes cluster. But deployed doesn't mean production-ready. A deployment can run without being resilient, observable, or secure.
+
+This lesson gives you a systematic approach: a 10-point production readiness checklist that separates "it works on my cluster" from "it's ready for real traffic."
+
+The pattern you'll learn here applies to any Kubernetes deployment—not just DigitalOcean, not just Task API. Once you internalize this checklist, you can verify any deployment on any cloud.
+
+Why Checklists Matter in Production​
+
+Airplane pilots use pre-flight checklists despite thousands of hours of experience. Surgeons use surgical checklists despite years of training. The reason? Humans forget things under pressure, and production deployments happen under pressure.
+
+A deployment might fail silently in ways that only manifest under load:
+
+Health probes missing means Kubernetes can't restart failing pods
+Resource limits missing means one pod can starve others
+HPA missing means traffic spikes cause outages instead of scale-ups
+
+The checklist catches these issues before customers do.
+
+The 10-Point Production Readiness Checklist​
+#	Check	Command	Pass Criteria
+1	Health endpoint responds	curl https://domain/health	HTTP 200
+2	Resource limits set	kubectl describe pod <pod>	Limits visible
+3	Replicas >= 2	kubectl get deploy	READY shows 2+
+4	Liveness probe configured	kubectl get deploy -o yaml	livenessProbe present
+5	Readiness probe configured	kubectl get deploy -o yaml	readinessProbe present
+6	TLS certificate valid	curl -v https://domain	Certificate OK
+7	Secrets not in env vars	kubectl describe pod	No sensitive values
+8	Pod disruption budget	kubectl get pdb	PDB exists
+9	HPA configured (if needed)	kubectl get hpa	HPA exists
+10	Cost estimate documented	Provider dashboard	Monthly cost known
+
+Let's verify each item systematically.
+
+Check 1: Health Endpoint Responds​
+
+The health endpoint is your deployment's vital sign. If it doesn't respond, nothing else matters.
+
+curl -s -o /dev/null -w "%{http_code}" https://your-domain.com/health
+
+
+Output (Pass):
+
+200
+
+
+Output (Fail):
+
+000
+
+
+A 000 response typically means DNS isn't resolving or the service isn't reachable. Check your Ingress and DNS configuration.
+
+For more detail:
+
+curl -v https://your-domain.com/health
+
+
+Output (Pass):
+
+< HTTP/2 200
+< content-type: application/json
+{"status": "healthy", "database": "connected"}
+
+
+What you're verifying: The entire path works—DNS resolves, Load Balancer routes, Ingress matches, Service forwards, Pod responds.
+
+Check 2: Resource Limits Set​
+
+Without resource limits, a single misbehaving pod can consume all node resources, crashing other workloads.
+
+kubectl describe pod -l app=task-api | grep -A 5 "Limits:"
+
+
+Output (Pass):
+
+    Limits:
+      cpu:     500m
+      memory:  512Mi
+    Requests:
+      cpu:     100m
+      memory:  256Mi
+
+
+Output (Fail):
+
+    Limits:
+      <none>
+    Requests:
+      <none>
+
+
+If you see <none>, add resource specifications to your deployment:
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+
+What you're verifying: Kubernetes knows how much CPU and memory your pods need, enabling proper scheduling and preventing resource starvation.
+
+Check 3: Replicas >= 2​
+
+A single replica means zero redundancy. If that pod crashes or its node goes down, your service is unavailable.
+
+kubectl get deploy task-api
+
+
+Output (Pass):
+
+NAME       READY   UP-TO-DATE   AVAILABLE   AGE
+task-api   2/2     2            2           1h
+
+
+Output (Fail):
+
+NAME       READY   UP-TO-DATE   AVAILABLE   AGE
+task-api   1/1     1            1           1h
+
+
+Scale up if needed:
+
+kubectl scale deploy task-api --replicas=2
+
+
+What you're verifying: Your service survives the loss of any single pod or node.
+
+Check 4: Liveness Probe Configured​
+
+Liveness probes tell Kubernetes when to restart a stuck container. Without them, a deadlocked process runs forever.
+
+kubectl get deploy task-api -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}' | jq .
+
+
+Output (Pass):
+
+{
+  "httpGet": {
+    "path": "/health",
+    "port": 8000,
+    "scheme": "HTTP"
+  },
+  "initialDelaySeconds": 10,
+  "periodSeconds": 30,
+  "timeoutSeconds": 5,
+  "failureThreshold": 3
+}
+
+
+Output (Fail):
+
+null
+
+
+If missing, add to your deployment spec:
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+
+
+What you're verifying: Kubernetes will automatically restart containers that become unresponsive.
+
+Check 5: Readiness Probe Configured​
+
+Readiness probes tell Kubernetes when a pod is ready to receive traffic. Without them, traffic routes to pods still initializing.
+
+kubectl get deploy task-api -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}' | jq .
+
+
+Output (Pass):
+
+{
+  "httpGet": {
+    "path": "/health",
+    "port": 8000,
+    "scheme": "HTTP"
+  },
+  "initialDelaySeconds": 5,
+  "periodSeconds": 10,
+  "timeoutSeconds": 3,
+  "successThreshold": 1,
+  "failureThreshold": 3
+}
+
+
+What you're verifying: Traffic only routes to pods that are fully initialized and ready to handle requests.
+
+Check 6: TLS Certificate Valid​
+
+HTTPS requires a valid, non-expired certificate. An invalid certificate breaks trust for browsers and API clients.
+
+curl -v https://your-domain.com/health 2>&1 | grep -E "SSL|certificate"
+
+
+Output (Pass):
+
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+* Server certificate:
+*  subject: CN=your-domain.com
+*  start date: Dec 30 00:00:00 2025 GMT
+*  expire date: Mar 30 23:59:59 2026 GMT
+*  issuer: C=US; O=Let's Encrypt; CN=R11
+
+
+Output (Fail):
+
+* SSL certificate problem: certificate has expired
+* Closing connection
+
+
+If using cert-manager, check certificate status:
+
+kubectl get certificate
+
+
+Output:
+
+NAME              READY   SECRET            AGE
+task-api-tls      True    task-api-tls      1h
+
+
+What you're verifying: Your HTTPS endpoint is secure and trusted by clients.
+
+Check 7: Secrets Not in Environment Variables​
+
+Sensitive values should never appear in plain text when describing pods.
+
+kubectl describe pod -l app=task-api | grep -E "(OPENAI|API_KEY|PASSWORD|SECRET)"
+
+
+Output (Pass):
+
+(no output - secrets aren't visible in describe output when using secretKeyRef)
+
+
+Output (Fail):
+
+OPENAI_API_KEY:  sk-proj-abc123def456...
+
+
+If secrets appear in plain text, refactor to use Kubernetes Secrets:
+
+env:
+  - name: OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: task-api-secrets
+        key: openai-api-key
+
+
+What you're verifying: Sensitive values aren't exposed in logs, kubectl output, or memory dumps.
+
+Check 8: Pod Disruption Budget Exists​
+
+PodDisruptionBudgets (PDBs) prevent Kubernetes from terminating too many pods during node maintenance.
+
+kubectl get pdb
+
+
+Output (Pass):
+
+NAME              MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+task-api-pdb      1               N/A               1                     1h
+
+
+Output (Fail):
+
+No resources found in default namespace.
+
+
+Create a PDB if missing:
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: task-api-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: task-api
+
+
+What you're verifying: Your service remains available during cluster upgrades and node maintenance.
+
+Check 9: HPA Configured (If Needed)​
+
+HorizontalPodAutoscaler (HPA) scales pods based on CPU or memory usage.
+
+kubectl get hpa
+
+
+Output (Pass):
+
+NAME       REFERENCE             TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+task-api   Deployment/task-api   45%/80%   2         10        2          1h
+
+
+Output (Fail for traffic-receiving services):
+
+No resources found in default namespace.
+
+
+For services expecting variable traffic, create an HPA:
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+
+What you're verifying: Your service scales automatically under load instead of becoming unresponsive.
+
+Check 10: Cost Estimate Documented​
+
+Production readiness includes knowing what you're paying.
+
+Access your cloud provider's dashboard:
+
+DigitalOcean: cloud.digitalocean.com > Billing
+Hetzner: console.hetzner.cloud > Cloud > Servers > monthly costs
+AWS: Cost Explorer
+GCP: Billing dashboard
+
+Document:
+
+Current monthly cost
+Cost per component (nodes, load balancer, storage)
+Projected cost at 2x scale
+
+What you're verifying: No surprises on your cloud bill.
+
+Common Failures and Fixes​
+Symptom	Likely Cause	Fix
+Health endpoint returns 503	Pod not ready	Check readiness probe, pod logs
+curl returns 000	DNS/Ingress misconfigured	Verify DNS propagation, Ingress rules
+Pods keep restarting	Liveness probe failing	Increase initialDelaySeconds, check app startup
+Deployment stuck at 0/2	Image pull failed	Check image name, pull secret
+HPA shows <unknown> targets	Metrics server missing	Install metrics-server on cluster
+Certificate shows "Not Ready"	cert-manager challenge failing	Check Ingress, DNS, cert-manager logs
+Debugging Pod Restarts​
+kubectl describe pod -l app=task-api | grep -A 10 "Last State:"
+
+
+Output:
+
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    1
+      Started:      Mon, 30 Dec 2025 10:00:00 +0000
+      Finished:     Mon, 30 Dec 2025 10:00:05 +0000
+
+
+Check logs for the crash reason:
+
+kubectl logs -l app=task-api --previous
+
+Debugging Image Pull Failures​
+kubectl describe pod -l app=task-api | grep -A 5 "Events:"
+
+
+Output (Fail):
+
+Events:
+  Warning  Failed     1m    kubelet  Failed to pull image "ghcr.io/myorg/task-api:v1.0.0": unauthorized
+
+
+Fix by creating or updating image pull secret:
+
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username=YOUR_USERNAME \
+  --docker-password=YOUR_PAT
+
+Running the Full Checklist​
+
+Here's a script that runs all checks:
+
+#!/bin/bash
+# production-checklist.sh
+
+DOMAIN="your-domain.com"
+DEPLOY="task-api"
+
+echo "=== Production Readiness Checklist ==="
+
+echo -n "1. Health endpoint: "
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://$DOMAIN/health)
+[ "$STATUS" == "200" ] && echo "PASS (HTTP $STATUS)" || echo "FAIL (HTTP $STATUS)"
+
+echo -n "2. Resource limits: "
+kubectl describe pod -l app=$DEPLOY | grep -q "Limits:" && echo "PASS" || echo "FAIL"
+
+echo -n "3. Replicas >= 2: "
+REPLICAS=$(kubectl get deploy $DEPLOY -o jsonpath='{.status.readyReplicas}')
+[ "$REPLICAS" -ge 2 ] && echo "PASS ($REPLICAS replicas)" || echo "FAIL ($REPLICAS replica)"
+
+echo -n "4. Liveness probe: "
+kubectl get deploy $DEPLOY -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}' | grep -q "httpGet" && echo "PASS" || echo "FAIL"
+
+echo -n "5. Readiness probe: "
+kubectl get deploy $DEPLOY -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}' | grep -q "httpGet" && echo "PASS" || echo "FAIL"
+
+echo -n "6. TLS certificate: "
+curl -v https://$DOMAIN/health 2>&1 | grep -q "SSL certificate verify ok" && echo "PASS" || echo "CHECK MANUALLY"
+
+echo -n "7. Secrets in env: "
+kubectl describe pod -l app=$DEPLOY | grep -qE "(API_KEY|PASSWORD|SECRET).*=" && echo "FAIL (secrets visible)" || echo "PASS"
+
+echo -n "8. Pod disruption budget: "
+kubectl get pdb | grep -q $DEPLOY && echo "PASS" || echo "FAIL (no PDB)"
+
+echo -n "9. HPA configured: "
+kubectl get hpa | grep -q $DEPLOY && echo "PASS" || echo "N/A (check if needed)"
+
+echo "10. Cost estimate: CHECK PROVIDER DASHBOARD"
+
+echo "=== Checklist Complete ==="
+
+
+Output:
+
+=== Production Readiness Checklist ===
+1. Health endpoint: PASS (HTTP 200)
+2. Resource limits: PASS
+3. Replicas >= 2: PASS (2 replicas)
+4. Liveness probe: PASS
+5. Readiness probe: PASS
+6. TLS certificate: PASS
+7. Secrets in env: PASS
+8. Pod disruption budget: PASS
+9. HPA configured: PASS
+10. Cost estimate: CHECK PROVIDER DASHBOARD
+=== Checklist Complete ===
+
+Try With AI​
+
+Use your AI companion to verify your production deployment collaboratively.
+
+Prompt 1: Checklist Review​
+I'm running a production checklist on my Kubernetes deployment. Here's
+the output from kubectl describe pod for my task-api:
+
+[paste your kubectl describe pod output]
+
+Review this against production best practices. What's configured correctly?
+What's missing? For anything missing, show me the exact YAML to add.
+
+
+What you're learning: Pattern recognition—AI helps you spot configuration gaps you might overlook and generates correct fixes faster than manual YAML writing.
+
+Prompt 2: Failure Diagnosis​
+My production checklist shows these failures:
+- Health endpoint returns 503
+- Pods showing 1/2 ready
+- HPA shows <unknown> for current metrics
+
+Here are my logs and events:
+[paste kubectl logs and kubectl describe pod output]
+
+Diagnose these failures in order of priority. What's the root cause of each?
+What's the fastest path to fixing all three?
+
+
+What you're learning: Systematic debugging—AI helps you prioritize issues and identify root causes when multiple things fail simultaneously.
+
+Prompt 3: Checklist Customization​
+The 10-point checklist I learned covers general production readiness.
+My Task API has specific requirements:
+- It connects to a PostgreSQL database
+- It calls OpenAI API for inference
+- It needs to handle 100 requests/second peak
+
+What additional checks should I add to my production checklist for these
+specific requirements? Create kubectl commands for each check.
+
+
+What you're learning: Checklist adaptation—production checklists should be customized for your application's specific dependencies and requirements.
+
+Safety Note​
+
+Always run verification commands on your actual deployment, not just in theory. AI can generate perfect-looking commands, but only execution against real infrastructure confirms your deployment is truly production-ready.
+
+Reflect on Your Skill​
+
+Test your multi-cloud-deployer skill:
+
+Does it include a production readiness checklist?
+Can it generate verification commands for any deployment?
+Does it know the common failures and fixes for each check?
+
+If gaps exist, update your skill with the 10-point checklist pattern and debugging procedures from this lesson. A deployment skill isn't complete without verification capability.

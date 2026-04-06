@@ -1,0 +1,503 @@
+Hello Actors - Your First Actor
+
+You understand the Actor Model from Lesson 1: actors encapsulate state and behavior, process messages one at a time, and communicate through asynchronous messages. Now it's time to build one.
+
+In this lesson, you'll create a HelloAgent actor that stores greeting messages. Each user gets their own actor instance with isolated state. When user "alice" sends greetings, they're stored separately from user "bob's" greetings. This is the foundation for building AI agents where each conversation, each task, each user session has its own stateful actor.
+
+By the end of this lesson, you'll have a working actor that:
+
+Accepts greeting messages and stores them in a history list
+Retrieves the greeting history on demand
+Limits history to the last 5 entries (memory efficiency)
+Persists state across actor deactivation and reactivation
+The Actor Creation Pattern​
+
+Building a Dapr actor requires four pieces working together:
+
+1. Actor Interface        Define WHAT methods the actor exposes
+       |
+       v
+2. Actor Implementation   Define HOW the actor behaves
+       |
+       v
+3. Actor Registration     Connect actor to FastAPI via DaprActor
+       |
+       v
+4. Actor Invocation       Call actor methods via ActorProxy
+
+
+Let's build each piece.
+
+Step 1: Define the Actor Interface​
+
+The actor interface declares what methods your actor exposes. It's a contract that clients use to invoke the actor. In Python, you define it as an abstract base class extending ActorInterface:
+
+from dapr.actor import ActorInterface, actormethod
+
+class HelloAgentInterface(ActorInterface):
+    @actormethod(name="AddGreeting")
+    async def add_greeting(self, greeting_data: dict) -> None:
+        """Add a greeting to history."""
+        ...
+
+    @actormethod(name="GetGreetingHistory")
+    async def get_greeting_history(self) -> list[dict] | None:
+        """Retrieve greeting history."""
+        ...
+
+
+Output: No output yet - this is just the interface definition. The ... (ellipsis) is valid Python syntax for abstract method bodies.
+
+Naming Convention: Snake_Case vs PascalCase​
+
+Notice the dual naming:
+
+Method name in Python uses snake_case: add_greeting
+Decorator name uses PascalCase: AddGreeting
+
+The decorator name is what external clients use when invoking the actor via HTTP or ActorProxy. The Python method name is what you use internally. This follows Dapr's convention across all SDKs.
+
+# When invoking from ActorProxy, use the decorator name:
+await proxy.AddGreeting({"message": "Hello!"})  # PascalCase
+
+# Inside the actor implementation, use the Python name:
+async def add_greeting(self, greeting_data: dict):  # snake_case
+
+Step 2: Implement the Actor​
+
+The actor implementation extends both the Actor base class and your interface:
+
+from dapr.actor import Actor
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+class HelloAgent(Actor, HelloAgentInterface):
+    def __init__(self, ctx, actor_id):
+        super().__init__(ctx, actor_id)
+        self._history_key = f"history-{actor_id.id}"
+
+    async def _on_activate(self) -> None:
+        """Called when actor is activated (first message or after GC)."""
+        logging.info(f"Activating actor for {self._history_key}")
+        try:
+            history = await self._state_manager.get_state(self._history_key)
+            if history is None:
+                logging.info(f"State not found, initializing empty history")
+                await self._state_manager.set_state(self._history_key, [])
+            else:
+                logging.info(f"Loaded existing history: {len(history)} items")
+        except Exception as e:
+            logging.warning(f"Non-critical error in _on_activate: {e}")
+            await self._state_manager.set_state(self._history_key, [])
+
+    async def add_greeting(self, greeting_data: dict) -> None:
+        """Add a greeting to history, keeping last 5."""
+        history = await self._state_manager.get_state(self._history_key)
+        current_history = history if isinstance(history, list) else []
+        current_history.append(greeting_data)
+
+        # Limit to last 5 greetings
+        if len(current_history) > 5:
+            current_history = current_history[-5:]
+
+        await self._state_manager.set_state(self._history_key, current_history)
+        logging.info(f"Added greeting for {self._history_key}: {greeting_data}")
+
+    async def get_greeting_history(self) -> list[dict] | None:
+        """Retrieve greeting history."""
+        history = await self._state_manager.get_state(self._history_key)
+        return history if isinstance(history, list) else []
+
+
+Output: No direct output - this defines the class. When the actor is activated, you'll see log messages like:
+
+INFO:root:Activating actor for history-alice
+INFO:root:State not found, initializing empty history
+
+Key Implementation Details​
+
+The _state_manager: Every actor has a built-in state manager that persists data to the configured state store. You don't manage Redis connections - you just call get_state() and set_state().
+
+The _on_activate lifecycle hook: This runs when the actor is first invoked or when it's reactivated after being garbage-collected due to idleness. Use it to initialize default state.
+
+Unique state keys: Each actor instance uses its own key (history-{actor_id}). Actor "alice" stores state under history-alice, actor "bob" under history-bob. Complete isolation.
+
+Error handling in _on_activate: The try/except ensures the actor initializes even if state retrieval has issues. A robust actor shouldn't crash on activation.
+
+Step 3: Register the Actor with FastAPI​
+
+Now connect the actor to your FastAPI application using DaprActor:
+
+from fastapi import FastAPI
+from dapr.ext.fastapi import DaprActor
+from dapr.actor import ActorProxy, ActorId
+
+app = FastAPI(
+    title="HelloAgentService",
+    description="DACA Step 1: Dapr Actor Fundamentals"
+)
+
+# Add Dapr Actor Extension
+actor = DaprActor(app)
+
+@app.on_event("startup")
+async def startup():
+    """Register actor types on application startup."""
+    await actor.register_actor(HelloAgent)
+    logging.info(f"Registered actor: {HelloAgent.__name__}")
+
+
+Output: When the application starts, you'll see:
+
+INFO:     Application startup complete.
+INFO:root:Registered actor: HelloAgent
+
+What DaprActor Does​
+
+DaprActor(app) adds several routes to your FastAPI application that Dapr uses internally:
+
+Endpoint	Purpose
+GET /healthz	Actor system health check
+GET /dapr/config	Returns registered actor types and configuration
+POST /actors/{actorType}/{actorId}/method/{methodName}	Method invocation (Dapr calls this)
+
+You don't call these endpoints directly - Dapr's sidecar does. But you can verify registration:
+
+curl http://localhost:8000/dapr/config
+
+
+Output:
+
+{
+  "actorIdleTimeout": "1h0m0s0ms0us",
+  "actorScanInterval": "0h0m30s0ms0us",
+  "drainOngoingCallTimeout": "0h1m0s0ms0us",
+  "drainRebalancedActors": true,
+  "entitiesConfig": [],
+  "entities": [
+    "HelloAgent"
+  ]
+}
+
+
+The entities array confirms HelloAgent is registered.
+
+Step 4: Invoke the Actor​
+
+Create FastAPI endpoints that invoke the actor using ActorProxy:
+
+@app.post("/greet/{actor_id}")
+async def add_greeting(actor_id: str, greeting: dict):
+    """Add a greeting to the actor's history."""
+    proxy = ActorProxy.create("HelloAgent", ActorId(actor_id), HelloAgentInterface)
+    await proxy.AddGreeting(greeting)
+    return {"status": "Greeting added", "actor_id": actor_id}
+
+@app.get("/greet/{actor_id}/history")
+async def get_greeting_history(actor_id: str):
+    """Retrieve the actor's greeting history."""
+    proxy = ActorProxy.create("HelloAgent", ActorId(actor_id), HelloAgentInterface)
+    history = await proxy.GetGreetingHistory()
+    return {"actor_id": actor_id, "history": history}
+
+
+Output: After sending greetings:
+
+curl -X POST http://localhost:8000/greet/alice \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello, World!"}'
+
+
+Response:
+
+{"status": "Greeting added", "actor_id": "alice"}
+
+
+Retrieving history:
+
+curl http://localhost:8000/greet/alice/history
+
+
+Response:
+
+{"actor_id": "alice", "history": [{"message": "Hello, World!"}]}
+
+ActorProxy Explained​
+proxy = ActorProxy.create("HelloAgent", ActorId(actor_id), HelloAgentInterface)
+
+
+This creates a client for communicating with a specific actor:
+
+"HelloAgent": The actor type (must match registered name)
+ActorId(actor_id): The unique identifier for this actor instance
+HelloAgentInterface: The interface for type-safe method calls
+
+The proxy handles all communication with the Dapr sidecar. Your HTTP request to /greet/alice becomes an internal call through Dapr to the HelloAgent actor with ID "alice".
+
+Step 5: Configure the State Store​
+
+Actors need a state store with actor support enabled. Add this metadata to your state store component:
+
+# components/statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: default
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis-master.default.svc.cluster.local:6379
+  - name: redisPassword
+    value: ""
+  - name: actorStateStore
+    value: "true"
+
+
+Output: No direct output - this is configuration. When applied, Dapr uses this state store for actor persistence.
+
+The Critical Setting: actorStateStore​
+
+The actorStateStore: "true" metadata is required for actors. Without it:
+
+Actor registration succeeds
+Actor invocation succeeds
+But state persistence fails silently
+
+If your actor state isn't persisting, check this setting first.
+
+Verifying State in Redis​
+
+You can inspect actor state directly in Redis:
+
+# Connect to Redis
+kubectl exec -it redis-master -- redis-cli
+
+# List actor keys
+KEYS *HelloAgent*
+
+
+Output:
+
+1) "daca-ai-app||HelloAgent||alice||history-alice"
+
+
+The key format is {app-id}||{actor-type}||{actor-id}||{state-key}.
+
+# Get the state value
+HGETALL "daca-ai-app||HelloAgent||alice||history-alice"
+
+
+Output:
+
+1) "data"
+2) "[{\"message\": \"Hello, World!\"}]"
+3) "version"
+4) "1"
+
+Complete Working Example​
+
+Here's the full main.py combining all pieces:
+
+import logging
+from fastapi import FastAPI
+from dapr.ext.fastapi import DaprActor
+from dapr.actor import Actor, ActorInterface, ActorProxy, ActorId, actormethod
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+# FastAPI application
+app = FastAPI(title="HelloAgentService", description="Dapr Actor Fundamentals")
+
+# Add Dapr Actor Extension
+actor = DaprActor(app)
+
+# Define the actor interface
+class HelloAgentInterface(ActorInterface):
+    @actormethod(name="AddGreeting")
+    async def add_greeting(self, greeting_data: dict) -> None:
+        ...
+
+    @actormethod(name="GetGreetingHistory")
+    async def get_greeting_history(self) -> list[dict] | None:
+        ...
+
+# Implement the actor
+class HelloAgent(Actor, HelloAgentInterface):
+    def __init__(self, ctx, actor_id):
+        super().__init__(ctx, actor_id)
+        self._history_key = f"history-{actor_id.id}"
+
+    async def _on_activate(self) -> None:
+        logging.info(f"Activating actor for {self._history_key}")
+        try:
+            history = await self._state_manager.get_state(self._history_key)
+            if history is None:
+                await self._state_manager.set_state(self._history_key, [])
+        except Exception as e:
+            logging.warning(f"Non-critical error: {e}")
+            await self._state_manager.set_state(self._history_key, [])
+
+    async def add_greeting(self, greeting_data: dict) -> None:
+        history = await self._state_manager.get_state(self._history_key)
+        current_history = history if isinstance(history, list) else []
+        current_history.append(greeting_data)
+        if len(current_history) > 5:
+            current_history = current_history[-5:]
+        await self._state_manager.set_state(self._history_key, current_history)
+        logging.info(f"Added greeting for {self._history_key}")
+
+    async def get_greeting_history(self) -> list[dict] | None:
+        history = await self._state_manager.get_state(self._history_key)
+        return history if isinstance(history, list) else []
+
+# Register the actor
+@app.on_event("startup")
+async def startup():
+    await actor.register_actor(HelloAgent)
+    logging.info(f"Registered actor: {HelloAgent.__name__}")
+
+# FastAPI endpoints to invoke the actor
+@app.post("/greet/{actor_id}")
+async def add_greeting(actor_id: str, greeting: dict):
+    proxy = ActorProxy.create("HelloAgent", ActorId(actor_id), HelloAgentInterface)
+    await proxy.AddGreeting(greeting)
+    return {"status": "Greeting added", "actor_id": actor_id}
+
+@app.get("/greet/{actor_id}/history")
+async def get_greeting_history(actor_id: str):
+    proxy = ActorProxy.create("HelloAgent", ActorId(actor_id), HelloAgentInterface)
+    history = await proxy.GetGreetingHistory()
+    return {"actor_id": actor_id, "history": history}
+
+Testing the Actor​
+
+Run the application with Dapr:
+
+# Start the application
+tilt up
+
+
+Then test with curl or the Swagger UI at http://localhost:8000/docs:
+
+# Add greetings for user alice
+curl -X POST http://localhost:8000/greet/alice \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello!"}'
+
+curl -X POST http://localhost:8000/greet/alice \
+  -H "Content-Type: application/json" \
+  -d '{"message": "How are you?"}'
+
+# Get alice's history
+curl http://localhost:8000/greet/alice/history
+
+# Add greeting for user bob (separate actor)
+curl -X POST http://localhost:8000/greet/bob \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hi Bob!"}'
+
+# Get bob's history (only his greetings)
+curl http://localhost:8000/greet/bob/history
+
+
+Output: Alice's history:
+
+{"actor_id": "alice", "history": [{"message": "Hello!"}, {"message": "How are you?"}]}
+
+
+Bob's history:
+
+{"actor_id": "bob", "history": [{"message": "Hi Bob!"}]}
+
+
+Each actor ID creates a separate actor instance with isolated state.
+
+Common Errors and Solutions​
+Error	Cause	Solution
+ACTOR_TYPE_NOT_FOUND	Actor not registered	Verify register_actor() in startup, check /dapr/config
+ACTOR_METHOD_NOT_FOUND	Method not in interface	Add @actormethod decorator to interface
+State not persisting	Missing actorStateStore	Add actorStateStore: "true" to state store component
+KeyError on state access	State doesn't exist	Use _on_activate to initialize default state
+Reflect on Your Skill​
+
+You extended your dapr-deployment skill in Lesson 0 to include actor patterns. Does it now cover the complete actor creation workflow?
+
+Test Your Skill​
+Using my dapr-deployment skill, generate a complete actor that tracks user
+preferences with get_preference and set_preference methods. Include the
+interface, implementation, registration, and invocation code.
+
+
+Does your skill produce:
+
+An interface with @actormethod decorators using proper naming?
+An implementation with _on_activate for state initialization?
+Registration with DaprActor(app) and register_actor()?
+Invocation endpoints using ActorProxy.create()?
+Identify Gaps​
+
+If the generated code is missing pieces:
+
+Interface without @actormethod decorators
+Implementation without _on_activate hook
+Missing state manager usage
+ActorProxy with wrong parameter order
+Improve Your Skill​
+My dapr-deployment skill generated incomplete actor code. Update it to include:
+- The complete actor creation pattern (interface -> implementation -> registration -> invocation)
+- Proper @actormethod decorator with name parameter
+- The _on_activate lifecycle hook with state initialization
+- ActorProxy.create() with correct parameters: type, id, interface
+
+Try With AI​
+
+Open your AI companion and work through these scenarios collaboratively.
+
+Prompt 1: Build Your First Actor​
+Help me create a HelloAgent actor that stores greeting messages. I need:
+1. An actor interface with AddGreeting and GetGreetingHistory methods
+2. An implementation that limits history to the last 5 greetings
+3. FastAPI registration with DaprActor
+4. HTTP endpoints to invoke the actor
+
+Walk me through each piece and explain the naming convention difference
+between Python method names (snake_case) and @actormethod names (PascalCase).
+
+
+What you're learning: The complete actor creation workflow from interface definition to invocation. The AI helps you understand why each piece exists and how they connect.
+
+Prompt 2: Debug a Registration Problem​
+I created my HelloAgent actor but I'm getting ACTOR_TYPE_NOT_FOUND when I
+invoke it. Here's my code:
+
+[paste your registration code]
+
+Help me debug this. What should I check in:
+1. The startup registration
+2. The /dapr/config endpoint
+3. The Dapr sidecar logs
+
+
+What you're learning: Systematic debugging of actor registration issues. The AI teaches you the diagnostic endpoints and log patterns that reveal registration problems.
+
+Prompt 3: Extend with Timestamps​
+I want to extend my HelloAgent to track timestamps with each greeting. The
+greeting data should include the message and the time it was added.
+
+But I'm concerned about JSON serialization - datetime objects don't serialize
+directly. Show me how to:
+1. Add timestamps safely using ISO format strings
+2. Verify the data serializes correctly to Redis
+3. Display timestamps in a readable format when retrieving history
+
+
+What you're learning: State serialization considerations for actors. The AI helps you understand that actor state must be JSON-serializable and shows patterns for handling complex data types.
+
+Safety Note​
+
+The @actormethod decorator name must be unique within an actor type. If you use the same decorator name for different methods, invocations will route unpredictably. Always verify your decorator names are distinct and meaningful. When working with AI to generate actor code, validate that the generated @actormethod names don't conflict with existing methods in your codebase.

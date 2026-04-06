@@ -1,0 +1,297 @@
+Retrofitting Existing Models
+
+In Lessons 4 through 7, you learned to build IDFA-compliant models from scratch: every formula using Named Ranges, every complex calculation verified in LaTeX, every AI-generated formula carrying an Intent Note, every result flowing through delegated calculation. Building from scratch is the ideal. But most financial professionals do not have the luxury of starting with a blank sheet.
+
+You inherited a model. It is 47 tabs, 2,000 formulas, and zero documentation. The person who built it left two years ago. Your manager needs modifications by Friday. This is the reality for most finance teams: and the reason "I inherited this model" is one of the most dreaded sentences in corporate finance. The model works. Probably. But nobody can explain why it works, which formulas encode which business rules, or whether the assumptions are still current. Every modification is a gamble.
+
+IDFA's retrofitting process turns this situation into a systematic workflow. You do not delete the model and start over. You do not guess at what the formulas mean. You use a five-phase process that extracts the business logic that is trapped in coordinates, converts it to Named Range formulas that read as business rules, and validates that every output matches the original: all without changing a single business decision. The inherited model becomes readable. The 40-minute estimate is realistic once you have practiced the workflow on a few models.
+
+The Five-Phase Retrofit Process​
+
+The retrofit is a conversion, not a rebuild. The distinction matters. Rebuilding means constructing a new model from your understanding of the business. Retrofitting means making the existing model's logic visible without altering it. The five phases must be executed in order.
+
+Phase 1: Full Inspection​
+
+Before touching any formula, you need a complete inventory. Ask Claude to inspect the model and list all formulas, inputs, and dependencies.
+
+You: Inspect this model: list all Named Ranges, all formulas with their cell locations, all hardcoded values, and the dependency map showing which cells reference which others.
+
+Claude: Here is the full inspection:
+
+Named Ranges: 0 defined Formulas: 47 cells containing formulas Hardcoded Values: 12 cells containing raw numbers Dependencies:   B14 → references B4, C14, F8, D3   B15 → references B14, C15   B16 → references B15, D16, F8   ...
+
+This output tells you three things: how many Named Ranges already exist (usually zero in legacy models), which cells contain formulas versus raw values, and which cells depend on which others. All three are required for the next phases.
+
+Phase 2: Input Identification​
+
+Separate the inputs from the calculations. The rule is simple.
+
+Cell Type	How to Identify	What It Becomes
+Input	Contains a raw number, no formula	Named Range with Inp_ prefix
+Calculation	Contains a formula	Named Range formula in Phase 4
+
+For each input, you need three things:
+
+What it represents: look at row headers, column headers, proximity to other values
+The proposed Named Range: following the Inp_ convention: Inp_Rev_Y1, Inp_COGS_Pct_Y1, Inp_Tax_Rate
+Analyst confirmation: confirm your interpretation with someone who knows the model before committing the name
+
+This phase is where you discover how much institutional knowledge is trapped in the model. A cell containing 0.60 in column C might be a COGS percentage, a tax rate, or a discount factor. The coordinate tells you nothing. The header (if it exists) tells you something. The analyst who built the model would know instantly; but they are gone. This is exactly the problem IDFA solves permanently: once the input is named Inp_COGS_Pct_Y1, the question never needs to be asked again.
+
+Phase 3: Dependency Ordering​
+
+Before rewriting any formula, you must determine the order. The rule is strict: never rewrite a dependent formula before its dependencies.
+
+Why order matters: If formula B15 references B14, and you rewrite B15 first using a Named Range that B14 does not yet have, the formula breaks. Rewrite B14 first (assign its Named Range) and then B15 can reference it safely.
+
+The dependency map from Phase 1 gives you the ordering. Start from the bottom:
+
+Level 0 (inputs):     Inp_Rev_Y1, Inp_COGS_Pct_Y1, Inp_Rev_Growth
+Level 1 (direct):     Revenue_Y1 = Inp_Rev_Y1
+                      COGS_Pct_Y1 = Inp_COGS_Pct_Y1
+Level 2 (derived):    Revenue_Y2 = Revenue_Y1 * (1 + Inp_Rev_Growth)
+                      COGS_Y1 = Revenue_Y1 * COGS_Pct_Y1
+Level 3 (dependent):  Gross_Profit_Y1 = Revenue_Y1 - COGS_Y1
+
+
+Rewrite Level 0 first (assign input Named Ranges), then Level 1, then Level 2, and so on. Each formula you rewrite can reference any Named Range from previous levels because those names already exist.
+
+Phase 4: Formula Rewriting​
+
+This is the core of the retrofit. For each formula, in dependency order, follow these seven steps:
+
+Read the original formula from the model
+State the business rule in plain English
+Write the IDFA equivalent using Named Ranges
+LaTeX-verify if the formula involves WACC, IRR, NPV, DCF, or any multi-step calculation
+Confirm the output matches the original value
+Apply the Named Range formula to the model
+Attach an Intent Note
+
+Here is what this looks like for a single formula.
+
+Original (coordinate-based):
+
+Cell B14: =B4-(B4*C14)
+
+
+Step 1: Read the original formula:
+
+Claude reads the formula in cell B14 from the model: =B4-(B4*C14)
+
+Step 2: State the business rule:
+
+"Gross Profit Year 1 equals Revenue Year 1 minus the product of Revenue Year 1 and COGS Percentage Year 1."
+
+Step 3: Write the IDFA equivalent:
+
+Gross_Profit_Y1 = Revenue_Y1 - (Revenue_Y1 * COGS_Pct_Y1)
+
+
+Step 4 (LaTeX-verify: This formula is a simple subtraction and multiplication. LaTeX verification is not required for formulas at this complexity level) reserve it for WACC, NPV, IRR, DCF, and other multi-step calculations.
+
+Step 5: Confirm the output matches:
+
+Claude reads Gross_Profit_Y1 from the model: $4,000,000. Original B14 value: $4,000,000 ✓
+
+Step 6: Apply the Named Range formula. The Named Range formula replaces the coordinate formula in the model.
+
+Step 7: Attach Intent Note:
+
+INTENT:      Gross Profit Y1 = Revenue Y1 minus COGS Y1
+             (COGS calculated as Revenue × COGS percentage)
+FORMULA:     GP₁ = R₁ - (R₁ × COGS%₁)
+ASSUMPTIONS: Revenue_Y1, COGS_Pct_Y1
+GENERATED:   2026-03-02 / IDFA Retrofit
+MODIFIED:    —
+
+
+Then move to the next formula in dependency order. Repeat all seven steps.
+
+THE ONE-FORMULA RULE
+
+Never retrofit by deleting the model and rebuilding it. Never rewrite multiple formulas simultaneously. Retrofit one formula at a time, validate the output after each rewrite, and only move to the next formula when the current one matches.
+
+This discipline is what makes the process safe. If validation fails after rewriting formula 7, you know exactly which formula to investigate. If you rewrote formulas 5 through 12 as a batch, the failure could be in any of them.
+
+Phase 5: Validation​
+
+After all formulas are rewritten, run the model on its original inputs. Every output cell must produce exactly the same value as the pre-retrofit model.
+
+Output Cell	Pre-Retrofit Value	Post-Retrofit Value	Match?
+Gross_Profit_Y1	$4,000,000	$4,000,000	Yes
+Gross_Profit_Y2	$4,510,000	$4,510,000	Yes
+Gross_Profit_Y3	$5,082,200	$5,082,200	Yes
+EBITDA_Y3	$3,200,000	$3,185,000	No
+
+When a discrepancy appears, it means one of two things:
+
+Original model error surfaced by the retrofit. The coordinate-based formula had a bug: perhaps a cell reference that pointed to the wrong row after a past insertion. The retrofit exposed it because the business rule, now written in Named Ranges, does not match the coordinate formula's actual calculation. Document this finding. Discuss it with the analyst or model owner before deciding whether to correct it or preserve the original behavior.
+
+Inference error in the retrofit. Your Named Range rewrite does not correctly reproduce the original formula's logic. Perhaps you misidentified which cell an input referred to, or you simplified a conditional that should not have been simplified. Correct the retrofitted formula and re-validate.
+
+The distinction matters. Original model errors are discoveries. Inference errors are mistakes. Both produce discrepancies, but the response is different.
+
+Cowork: Retrofitting a Revenue Model​
+
+Here is what the five-phase process looks like when you and Claude work through it together in Cowork on a small model. The model has five formulas calculating Revenue and Gross Profit for three years.
+
+You: I have a coordinate-based revenue model. Inspect this spreadsheet (list all formulas, all hardcoded values, and all dependencies. Then walk me through converting it to IDFA compliance. Do not change any business logic) just make the formulas readable.
+
+Claude: I'll inspect the model first.
+
+Inspection results:
+
+Hardcoded values (inputs):
+
+B4: 10,000,000 (header: "Y1 Revenue")
+C5: 0.60 (header: "COGS %")
+C6: 0.10 (header: "Growth Rate")
+
+Formulas:
+
+B5: =B4*C5 (Y1 COGS)
+B6: =B4-B5 (Y1 Gross Profit)
+C4: =B4*(1+C6) (Y2 Revenue)
+C7: =C4-(C4*C5) (Y2 Gross Profit)
+D4: =C4*(1+C6) (Y3 Revenue)
+
+I recommend these input Named Ranges:
+
+B4 → Inp_Rev_Y1 ($10,000,000: Year 1 base revenue)
+C5 → Inp_COGS_Pct (0.60: COGS as percentage of revenue)
+C6 → Inp_Rev_Growth (0.10: annual revenue growth rate)
+
+Do these interpretations look correct? I am inferring the meaning from the column headers but want your confirmation before proceeding.
+
+You: Correct. COGS percentage is the same all three years in this model (it does not improve with scale: that is a simplification). Proceed with the rewriting.
+
+Claude: Rewriting in dependency order:
+
+Level 0: Input Named Ranges assigned ✓
+
+Inp_Rev_Y1 = 10,000,000
+Inp_COGS_Pct = 0.60
+Inp_Rev_Growth = 0.10
+
+Level 1: Direct calculations
+
+Revenue_Y1 = Inp_Rev_Y1 → Reading from model: $10,000,000 ✓ (matches B4)
+COGS_Y1 = Revenue_Y1 * Inp_COGS_Pct → Reading from model: $6,000,000 ✓ (matches B5)
+
+Level 2: Derived calculations
+
+Gross_Profit_Y1 = Revenue_Y1 - COGS_Y1 → Reading from model: $4,000,000 ✓ (matches B6)
+Revenue_Y2 = Revenue_Y1 * (1 + Inp_Rev_Growth) → Reading from model: $11,000,000 ✓ (matches C4)
+
+Level 3: Further derived
+
+Gross_Profit_Y2 = Revenue_Y2 - (Revenue_Y2 * Inp_COGS_Pct) → Reading from model: $4,400,000 ✓ (matches C7)
+Revenue_Y3 = Revenue_Y2 * (1 + Inp_Rev_Growth) → Reading from model: $12,100,000 ✓ (matches D4)
+
+All 6 outputs match pre-retrofit values. Retrofit complete. Intent Notes attached to all formula cells.
+
+Notice what happened in this exchange. Claude inspected the model and proposed Named Ranges; but asked for your confirmation before proceeding. You provided domain knowledge that the COGS percentage is constant across years, which is something the coordinates alone could not reveal. Claude then rewrote each formula in strict dependency order, validating after each one. Neither of you could have done this as efficiently alone: Claude handled the systematic rewriting and validation; you provided the business context that coordinates hide.
+
+The Transparency Principle​
+
+One principle governs the entire retrofit process: do not change business logic during a retrofit.
+
+This is counterintuitive. When you make the formulas readable, you will see things you want to fix: a growth rate that seems too high, a COGS assumption that has not been updated, a tax calculation that uses last year's rate. The temptation is to fix these while you are already in the model.
+
+Resist it. The retrofit objective is transparency. You are converting coordinates to Named Ranges so that the existing logic becomes visible. If you also change the logic, you cannot validate the retrofit: any output difference could be your intended improvement or an accidental error, and you cannot distinguish between them.
+
+The workflow is:
+
+Retrofit for transparency (outputs must match)
+Review the now-readable logic with stakeholders
+Improve the logic in a separate, documented change
+
+This separation is what makes IDFA retrofits trustworthy. The first step is provably lossless. The second step is an informed decision. Mixing them produces neither.
+
+Exercise: Retrofit the Chapter 28 Practice Workbook​
+
+You will retrofit the coordinate-based practice workbook from Chapter 28. If you completed Chapter 28, you already know this model: it uses cell references like =B14*C5 throughout. Now you will convert it to IDFA compliance.
+
+Download the workbook if you do not have it:
+
+Download Practice Workbook (ch28_veeva_practice_workbook.xlsx)
+Step 1: Inspect the Model​
+
+Open the workbook in Cowork and type:
+
+Inspect this spreadsheet. List every formula and every hardcoded
+value. For each hardcoded value, tell me what it likely represents
+based on its row and column headers. For each formula, list the
+cells it references. Then organise everything into two groups:
+Inputs (raw values) and Calculations (formulas).
+
+
+Review the inspection. Does Cowork's interpretation of each input match your understanding from Chapter 28? Correct any misinterpretations before proceeding: the Named Range names depend on accurate identification.
+
+Step 2: Retrofit Three Calculations​
+
+Pick the three most important calculations (typically revenue, cost, and profit). Ask Cowork to retrofit them:
+
+Retrofit these three calculations to IDFA compliance. For each one:
+1. Create Inp_ Named Ranges for every raw value it uses
+2. Rewrite the formula using only Named Ranges — zero cell coordinates
+3. After each rewrite, confirm the output matches the original value
+
+Work in dependency order — do not rewrite a formula before its
+inputs have Named Ranges. Show me each step: original formula,
+business rule, Named Range equivalent, and whether the value matches.
+
+Step 3: Verify and Extend​
+
+After the three calculations are retrofitted, verify the full set:
+
+List all three retrofitted formulas with their original values
+and current values side by side. Do they all match exactly?
+
+Then pick one more formula from the model and retrofit it the
+same way. Confirm it matches before and after.
+
+
+If any value does not match, ask Cowork whether the discrepancy is an original model error surfaced by the retrofit or an inference error in the conversion: the response to each is different (see the lesson above).
+
+What you have done: A model that was a black box of cell references now has its three most important calculations reading as business rules. The analyst who inherits this model next will understand those formulas without clicking through cell references.
+
+Try With AI​
+
+Use these prompts in Cowork to practice the retrofit process.
+
+Prompt 1: Inspect a Model​
+Inspect this spreadsheet. List all formulas and all hardcoded values.
+For each cell that contains a raw number (no formula), tell me
+what it likely represents based on its row/column headers.
+For each cell that contains a formula, list its dependencies.
+Then organize everything into two groups: Inputs and Calculations.
+
+
+What you are learning: Phase 1 and Phase 2 of the retrofit process: the systematic separation of inputs from calculations. The agent's interpretations of what each input represents may be wrong (remember AI opacity from Lesson 1), which is why Phase 2 requires analyst confirmation before proceeding.
+
+Prompt 2: Propose Named Ranges​
+For each input you identified in the inspection, propose an
+IDFA-compliant Named Range name following the Inp_ convention.
+For each calculation, propose a descriptive Named Range that
+reads as a business variable (e.g., Revenue_Y2, Gross_Profit_Y1).
+Present your proposals in a table: Original Cell | Proposed Name | Reasoning.
+
+
+What you are learning: The naming discipline that makes IDFA formulas self-documenting. The agent proposes names based on context clues, but you must verify each one: a cell the agent labels Inp_Tax_Rate might actually be a discount factor. Your domain knowledge is what makes the names accurate.
+
+Prompt 3: Validate a Retrofit​
+After rewriting these formulas with Named Ranges, verify that
+all outputs match the original values exactly. For each output
+cell, show me: (1) the original coordinate formula and its value,
+(2) the new Named Range formula and its value, and (3) whether
+they match. If any value does not match, explain whether this is
+likely an error in the original model or an error in the retrofit.
+
+
+What you are learning: Phase 5: the validation discipline that makes retrofits trustworthy. The agent compares pre-retrofit and post-retrofit outputs systematically. When a discrepancy appears, the agent must reason about its cause rather than simply flagging it. This is where the transparency principle becomes concrete: if outputs match, the retrofit preserved the logic; if they do not, you have discovered something important.
+
+Flashcards Study Aid​
+
+Continue to Lesson 9: The IDFA Skill →

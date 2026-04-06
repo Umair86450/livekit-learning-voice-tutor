@@ -1,0 +1,340 @@
+Service Invocation
+
+Your todo-api stores tasks in Redis through Dapr's state API. But real systems don't live in isolation. When a task is created, you need to notify users. When a task is completed, you might update a billing service. Microservices talk to each other constantly.
+
+In traditional architectures, service-to-service calls require solving several problems: How does todo-api find notification-service? What if notification-service moves to a different IP? How do you secure the traffic? What happens when notification-service is temporarily down?
+
+Dapr's service invocation building block solves all of these with a single API call. You call localhost:3500/v1.0/invoke/{app-id}/method/{method}, and Dapr handles discovery, load balancing, mTLS encryption, and retries. Your code never knows where the target service actually lives or how to reach it securely.
+
+By the end of this lesson, your todo-api will call a notification-service through Dapr, with automatic service discovery and encrypted traffic.
+
+The Service Invocation API​
+
+Dapr exposes service invocation through a simple HTTP endpoint:
+
+POST http://localhost:3500/v1.0/invoke/{app-id}/method/{method-name}
+
+Component	Description
+localhost:3500	Your local Dapr sidecar
+app-id	Target service's unique identifier (from dapr.io/app-id annotation)
+method-name	The endpoint path on the target service
+
+When you call this endpoint:
+
+Your Dapr sidecar looks up app-id in the cluster's name resolution
+Establishes an mTLS connection to the target service's sidecar
+Forwards your request to the target application
+Returns the response to you
+
+No hardcoded URLs. No certificate management. No service registry configuration.
+
+How Service Discovery Works​
+
+On Kubernetes, Dapr uses the mDNS (multicast DNS) or Kubernetes DNS for service discovery. Each service announces itself using its dapr.io/app-id annotation. When todo-api wants to call notification-service:
+
+todo-api (app) → todo-api-sidecar → [Kubernetes DNS lookup: notification-service]
+                                         ↓
+notification-service (app) ← notification-service-sidecar
+
+
+The key insight: you never configure the target service's address. Dapr resolves notification-service to the correct pod automatically. If notification-service scales to 10 replicas, Dapr load-balances across them.
+
+Automatic mTLS with Sentry​
+
+Here's what happens behind the scenes that you don't have to configure:
+
+The Dapr Sentry service acts as a Certificate Authority. When each sidecar starts:
+
+Sidecar generates a private key
+Sends a certificate signing request to Sentry
+Sentry issues a certificate with a SPIFFE identity: spiffe://<trustdomain>/ns/<namespace>/<app-id>
+Sidecar uses this certificate for all service-to-service calls
+
+Every call between sidecars is encrypted with mTLS. Certificate rotation happens automatically (default: every 24 hours). You write zero TLS code.
+
+┌─────────────────┐         mTLS           ┌─────────────────┐
+│   todo-api      │◄───────────────────────►│ notification-   │
+│   sidecar       │   (encrypted traffic)  │ service sidecar │
+└─────────────────┘                        └─────────────────┘
+         ▲                                          ▲
+         │ cert                              cert   │
+         └──────────────► Sentry ◄──────────────────┘
+                         (CA)
+
+Creating a Notification Service​
+
+Let's create a simple notification service that todo-api will call:
+
+# notification_service.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI()
+
+class NotificationRequest(BaseModel):
+    message: str
+    task_id: str | None = None
+
+@app.post("/notify")
+async def notify(request: NotificationRequest):
+    """Receive notification from other services."""
+    logger.info(f"Notification received: {request.message}")
+
+    # In production: send email, push notification, Slack message, etc.
+    return {
+        "status": "delivered",
+        "message": request.message
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+Output:
+
+INFO:     Notification received: Todo created: Buy groceries
+
+
+This service runs on port 8001. Nothing Dapr-specific in the code itself.
+
+Deploying with Dapr Annotations​
+
+Both services need Dapr sidecar injection. The key annotations:
+
+# k8s/notification-service.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "notification-service"
+        dapr.io/app-port: "8001"
+    spec:
+      containers:
+        - name: notification-service
+          image: notification-service:latest
+          ports:
+            - containerPort: 8001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: default
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - port: 80
+      targetPort: 8001
+
+
+Three critical annotations:
+
+Annotation	Purpose
+dapr.io/enabled: "true"	Triggers sidecar injection
+dapr.io/app-id: "notification-service"	Service's unique name for discovery
+dapr.io/app-port: "8001"	Port your app listens on (sidecar forwards here)
+
+Apply the deployment:
+
+kubectl apply -f k8s/notification-service.yaml
+
+
+Output:
+
+deployment.apps/notification-service created
+service/notification-service created
+
+
+Verify the sidecar is injected:
+
+kubectl get pods -l app=notification-service
+
+
+Output:
+
+NAME                                   READY   STATUS    RESTARTS   AGE
+notification-service-7d9f8c6b4-xk2mn   2/2     Running   0          30s
+
+
+2/2 means two containers: your app and the Dapr sidecar.
+
+Calling from Todo-API with Python SDK​
+
+Now update todo-api to call notification-service when a task is created:
+
+# todo_api.py
+from fastapi import FastAPI, HTTPException
+from dapr.clients import DaprClient
+from pydantic import BaseModel
+import json
+import uuid
+
+app = FastAPI()
+
+class Task(BaseModel):
+    id: str | None = None
+    title: str
+    status: str = "pending"
+
+@app.post("/tasks", response_model=Task)
+async def create_task(task: Task):
+    task.id = str(uuid.uuid4())
+
+    with DaprClient() as client:
+        # Save state (from L03)
+        client.save_state(
+            store_name='statestore',
+            key=f'task-{task.id}',
+            value=task.model_dump_json()
+        )
+
+        # Notify via service invocation
+        response = client.invoke_method(
+            app_id='notification-service',
+            method_name='notify',
+            http_verb='POST',
+            data=json.dumps({
+                "message": f"Todo created: {task.title}",
+                "task_id": task.id
+            }),
+            content_type='application/json'
+        )
+
+        print(f"Notification response: {response.text()}")
+
+    return task
+
+
+Output:
+
+Notification response: {"status": "delivered", "message": "Todo created: Buy groceries"}
+
+
+The invoke_method() parameters:
+
+Parameter	Value	Description
+app_id	'notification-service'	Target service's dapr.io/app-id
+method_name	'notify'	Endpoint path on target service
+http_verb	'POST'	HTTP method
+data	JSON string	Request body
+content_type	'application/json'	Content-Type header
+Alternative: HTTP with dapr-app-id Header​
+
+If you prefer raw HTTP calls over the SDK, use the dapr-app-id header:
+
+import httpx
+import os
+
+DAPR_HTTP_PORT = os.getenv("DAPR_HTTP_PORT", "3500")
+
+async def notify_via_http(message: str, task_id: str):
+    """Call notification-service using HTTP with dapr-app-id header."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"http://localhost:{DAPR_HTTP_PORT}/notify",
+            json={"message": message, "task_id": task_id},
+            headers={"dapr-app-id": "notification-service"}
+        )
+        return response.json()
+
+
+Output:
+
+>>> await notify_via_http("Task completed", "task-123")
+{"status": "delivered", "message": "Task completed"}
+
+
+The dapr-app-id header tells your sidecar which service to route to. This is equivalent to the /v1.0/invoke/{app-id}/method/{method} endpoint pattern.
+
+Debugging Service Invocation​
+
+When invoke_method() fails, the error tells you what went wrong:
+
+Error	Cause	Fix
+ERR_DIRECT_INVOKE: app-id notification-service not found	Target service not running or wrong app-id	Check kubectl get pods, verify annotation
+connection refused	Target service's app-port incorrect	Verify dapr.io/app-port matches your app
+DEADLINE_EXCEEDED	Target service too slow	Increase timeout or check target health
+
+Enable API logging to see invocation details:
+
+annotations:
+  dapr.io/enable-api-logging: "true"
+
+
+Then check sidecar logs:
+
+kubectl logs todo-api-pod -c daprd | grep invoke
+
+
+Output:
+
+level=info msg="HTTP API Called" method=POST app_id=notification-service method=notify
+
+Reflect on Your Skill​
+
+You built a dapr-deployment skill in Lesson 0. Update it with service invocation patterns.
+
+Add to Your Skill​
+Update my dapr-deployment skill with service invocation patterns:
+1. invoke_method() Python SDK usage
+2. Required annotations: dapr.io/enabled, dapr.io/app-id, dapr.io/app-port
+3. Alternative: dapr-app-id HTTP header pattern
+4. Common errors: ERR_DIRECT_INVOKE, connection refused
+5. Debugging: enable-api-logging annotation
+
+Test Your Improved Skill​
+Using my dapr-deployment skill, generate code for a billing-service
+that todo-api calls when a task is marked complete. Include:
+- Deployment YAML with Dapr annotations
+- invoke_method() call from todo-api
+- Error handling for invocation failures
+
+Try With AI​
+Prompt 1: Deploy Both Services​
+My todo-api needs to call notification-service when a todo is created.
+Deploy both services with Dapr on Docker Desktop Kubernetes:
+1. todo-api on port 8000 with app-id "todo-api"
+2. notification-service on port 8001 with app-id "notification-service"
+3. Show me the invoke_method() call from todo-api to notification-service
+
+
+What you're learning: The complete service invocation pattern from deployment through code. You're seeing how annotations enable discovery and how one line of Python replaces pages of service mesh configuration.
+
+Prompt 2: Understand Automatic mTLS​
+How does Dapr handle mTLS between services? Do I need to configure
+certificates for todo-api to call notification-service securely?
+
+Walk me through what Sentry does when I deploy a new service.
+
+
+What you're learning: How Dapr eliminates certificate management from your concerns. Sentry acts as an automated Certificate Authority, issuing short-lived certificates to each sidecar. You get encrypted service-to-service traffic without writing TLS code or managing cert rotation.
+
+Prompt 3: Debug Wrong app-id​
+My invoke_method() call fails with:
+"ERR_DIRECT_INVOKE: app-id notification-service not found"
+
+But kubectl get pods shows notification-service running. What should
+I check? Show me how to debug step by step.
+
+
+What you're learning: Systematic debugging of service invocation. The pod running doesn't mean the Dapr sidecar is healthy or that the app-id matches. You'll learn to verify sidecar injection (2/2 Ready), check annotation spelling, and use dapr logs to trace the invocation path.
+
+Safety note: When testing service invocation between different namespaces, ensure Dapr's namespace scoping is configured correctly. By default, services can only invoke within the same namespace unless you explicitly configure cross-namespace access.

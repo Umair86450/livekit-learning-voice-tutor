@@ -1,0 +1,376 @@
+Streamable HTTP: The MCP Standard
+
+In March 2025, the Model Context Protocol team made a significant decision: deprecate the SSE transport that had served MCP since its initial release and replace it with Streamable HTTP. This wasn't a minor version bump—it was a fundamental rethinking of how MCP clients and servers communicate.
+
+If you've been following the AI tooling landscape, you know MCP is becoming the standard for connecting AI models to external capabilities. Understanding this transport evolution isn't just protocol trivia—it's essential knowledge for building production AI systems that interact with MCP servers.
+
+This lesson explains why the change happened, how Streamable HTTP works, and how to implement clients that work with modern MCP infrastructure.
+
+Why MCP Deprecated SSE​
+
+Server-Sent Events worked for MCP's initial use case: streaming responses from server to client. But as MCP adoption grew, three limitations became critical:
+
+Limitation 1: SSE is Unidirectional​
+
+SSE was designed for one thing: pushing data from server to client. That's perfect for streaming AI responses, but MCP needs more. Modern MCP interactions involve:
+
+Client sends tool request to server
+Server might need to ask client for clarification
+Client provides additional context
+Server completes the operation
+
+This back-and-forth requires bidirectional communication. With pure SSE, MCP had to maintain two separate endpoints:
+
+Client ──POST─→ MCP Server (for requests)
+Client ←─SSE──  MCP Server (for responses/notifications)
+
+
+Two endpoints means two connections, doubled complexity, and infrastructure that needs to handle both patterns.
+
+Limitation 2: Infrastructure Compatibility​
+
+Many corporate environments use HTTP proxies, load balancers, and firewalls that handle standard HTTP requests without issue but struggle with long-lived SSE connections:
+
+Infrastructure	HTTP POST	SSE Stream
+Standard proxies	Works	Often times out
+Load balancers	Distributes normally	Session affinity issues
+Firewalls	Usually allowed	May block long connections
+CDNs	Caches appropriately	Cannot cache streams
+
+When developers reported that their MCP servers worked in development but failed behind corporate infrastructure, the transport was often the culprit.
+
+Limitation 3: Complexity for Simple Use Cases​
+
+Not every MCP interaction needs streaming. A tool that looks up a database value and returns it doesn't benefit from a streaming connection—it just needs request/response. But with SSE, every interaction required establishing a stream, even for simple operations.
+
+Streamable HTTP solves this by making streaming optional:
+
+// Simple request/response - no streaming needed
+const result = await fetch(mcpEndpoint, {
+  method: "POST",
+  body: JSON.stringify(request),
+});
+const data = await result.json();
+
+// Streaming when you need it - still uses the same endpoint
+const streamResult = await fetch(mcpEndpoint, {
+  method: "POST",
+  body: JSON.stringify(request),
+});
+for await (const chunk of parseSSE(streamResult.body!)) {
+  // Handle streamed data
+}
+
+
+Same endpoint, same protocol, optional streaming. The server decides whether to stream based on the request.
+
+How Streamable HTTP Works​
+
+Streamable HTTP is elegantly simple: POST your JSON-RPC request to a single endpoint. The server responds with either:
+
+A complete JSON response (for quick operations)
+An SSE stream (for long-running or multi-message responses)
+
+The client doesn't need to know in advance which will happen—it handles whatever comes back.
+
+The Request Pattern​
+
+Every MCP request follows JSON-RPC 2.0 format:
+
+interface McpRequest {
+  jsonrpc: "2.0";
+  id: string;
+  method: string;
+  params?: unknown;
+}
+
+
+You POST this to the MCP endpoint:
+
+const response = await fetch(mcpEndpoint, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: crypto.randomUUID(),
+    method: "tools/call",
+    params: {
+      name: "search_database",
+      arguments: { query: "customer records" },
+    },
+  }),
+});
+
+Session Management with Mcp-Session-Id​
+
+Stateful MCP operations require session continuity. The server assigns a session ID in its first response; the client includes it in subsequent requests:
+
+// First request - no session yet
+const firstResponse = await fetch(mcpEndpoint, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(initRequest),
+});
+
+// Server assigns session ID in response header
+const sessionId = firstResponse.headers.get("Mcp-Session-Id");
+
+// Subsequent requests include the session ID
+const secondResponse = await fetch(mcpEndpoint, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Mcp-Session-Id": sessionId!,
+  },
+  body: JSON.stringify(nextRequest),
+});
+
+
+This pattern enables stateful conversations without the complexity of maintaining WebSocket connections.
+
+Implementing a Streamable HTTP Client​
+
+Here's a complete implementation that handles both simple responses and streamed responses:
+
+interface McpResponse {
+  jsonrpc: "2.0";
+  id: string;
+  result?: unknown;
+  error?: { code: number; message: string };
+}
+
+class McpClient {
+  private endpoint: string;
+  private sessionId: string | null = null;
+
+  constructor(endpoint: string) {
+    this.endpoint = endpoint;
+  }
+
+  async request(method: string, params?: unknown): Promise<McpResponse> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+
+    // Include session ID if we have one
+    if (this.sessionId) {
+      headers["Mcp-Session-Id"] = this.sessionId;
+    }
+
+    const response = await fetch(this.endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: crypto.randomUUID(),
+        method,
+        params,
+      }),
+    });
+
+    // Update session ID from response
+    const newSessionId = response.headers.get("Mcp-Session-Id");
+    if (newSessionId) {
+      this.sessionId = newSessionId;
+    }
+
+    // Check if response is SSE stream or regular JSON
+    const contentType = response.headers.get("Content-Type") ?? "";
+
+    if (contentType.includes("text/event-stream")) {
+      // Handle as SSE stream - collect final result
+      return await this.handleStreamedResponse(response);
+    } else {
+      // Handle as regular JSON response
+      return await response.json();
+    }
+  }
+
+  private async handleStreamedResponse(
+    response: Response
+  ): Promise<McpResponse> {
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResult: McpResponse | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (line.startsWith("data: ") && line !== "data: [DONE]") {
+          const data = JSON.parse(line.slice(6));
+          // Accumulate or process intermediate results
+          finalResult = data;
+        }
+      }
+    }
+
+    if (!finalResult) {
+      throw new Error("No result received from stream");
+    }
+    return finalResult;
+  }
+
+  async initialize(): Promise<void> {
+    const result = await this.request("initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: {
+        name: "my-mcp-client",
+        version: "1.0.0",
+      },
+    });
+
+    if (result.error) {
+      throw new Error(`Initialize failed: ${result.error.message}`);
+    }
+  }
+
+  async callTool(name: string, args: unknown): Promise<unknown> {
+    const result = await this.request("tools/call", {
+      name,
+      arguments: args,
+    });
+
+    if (result.error) {
+      throw new Error(`Tool call failed: ${result.error.message}`);
+    }
+
+    return result.result;
+  }
+}
+
+
+Output (using the client):
+
+const client = new McpClient("https://mcp.example.com/v1");
+await client.initialize();
+const result = await client.callTool("search", { query: "TypeScript" });
+console.log(result);
+// { documents: [...], count: 42 }
+
+SSE vs Streamable HTTP: Complete Comparison​
+Dimension	SSE	Streamable HTTP
+Direction	Server to Client only	Bidirectional over HTTP
+Endpoints	Separate POST + SSE endpoints	Single unified endpoint
+Connection	Long-lived stream	Request/response (stream optional)
+Infrastructure	Problematic with proxies	Standard HTTP compatibility
+Statefulness	Connection-based state	Header-based session (Mcp-Session-Id)
+Simple operations	Still requires stream setup	Plain HTTP response
+Complex operations	Natural fit	SSE streaming still available
+MCP Status	Deprecated (2024-11-05)	Current standard (2025-03-26)
+Backward Compatibility Detection​
+
+Not all MCP servers have upgraded to Streamable HTTP. When connecting to an unknown server, use this detection pattern:
+
+async function detectTransport(
+  serverUrl: string
+): Promise<"streamable-http" | "sse"> {
+  try {
+    // Try Streamable HTTP first
+    const response = await fetch(serverUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "probe",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "probe", version: "1.0" },
+        },
+      }),
+    });
+
+    if (response.ok) {
+      return "streamable-http";
+    }
+  } catch {
+    // POST failed, try SSE
+  }
+
+  // Fall back to SSE detection
+  return "sse";
+}
+
+
+This follows the MCP specification recommendation: attempt POST first, fall back to SSE for servers using the older protocol version.
+
+When to Use Each Transport​
+
+Use Streamable HTTP (current standard) when:
+
+Building new MCP clients or servers
+Deploying behind corporate infrastructure
+You need bidirectional communication
+Simple operations don't require streaming
+
+Support SSE fallback when:
+
+Connecting to servers you don't control
+Supporting legacy MCP server versions
+Maximum compatibility is required
+
+The MCP TypeScript SDK 1.10.0 (released April 17, 2025) was the first to support Streamable HTTP. If you're using an older SDK version, you'll need to upgrade.
+
+Try With AI​
+
+Use your AI companion to deepen understanding of MCP transport protocols.
+
+Prompt 1: Explore the Design Decision​
+I'm learning about MCP's switch from SSE to Streamable HTTP. The lesson
+explains infrastructure compatibility was a major reason. Help me
+understand this more concretely:
+
+1. What specific proxy/firewall behaviors break SSE connections?
+2. Why do load balancers struggle with long-lived connections?
+3. How does Streamable HTTP avoid these issues while still supporting
+   streaming when needed?
+
+Challenge my understanding—ask me to explain back what I learned.
+
+
+What you're learning: Deep understanding of infrastructure constraints that drove protocol evolution. This connects TypeScript async patterns to real deployment challenges.
+
+Prompt 2: Implement Session State Tracking​
+I've implemented a basic MCP client with session management using
+Mcp-Session-Id headers. Now I want to add resilience:
+
+1. What happens if the server restarts and our session ID becomes invalid?
+2. How should we detect session expiration?
+3. What's the reconnection strategy?
+
+Walk me through implementing session recovery. Ask me questions about
+my use case to tailor the solution.
+
+
+What you're learning: Production-ready session management patterns that handle real-world failure scenarios—not just the happy path.
+
+Prompt 3: Connect to Your Domain​
+I work with [describe your domain: chatbots / data pipelines / dev tools /
+enterprise systems]. MCP lets AI models connect to external tools
+via Streamable HTTP.
+
+Help me think through:
+1. What tools in my domain would benefit from MCP integration?
+2. Would my infrastructure handle Streamable HTTP or do I have proxy
+   concerns?
+3. What would a minimal MCP server look like for one of my tools?
+
+Ask me clarifying questions about my specific environment.
+
+
+What you're learning: Practical application of protocol knowledge to your specific context—transforming abstract concepts into actionable architecture decisions.
+
+Safety Note​
+
+When implementing MCP clients that connect to external servers, validate server certificates, handle authentication properly, and never expose session IDs in logs. MCP servers can execute arbitrary tools—only connect to servers you trust.

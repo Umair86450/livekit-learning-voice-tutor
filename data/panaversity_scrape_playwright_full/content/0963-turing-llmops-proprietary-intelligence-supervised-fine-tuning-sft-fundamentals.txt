@@ -1,0 +1,268 @@
+SFT Fundamentals
+
+Supervised Fine-Tuning (SFT) transforms a general-purpose language model into a specialized assistant that understands your domain, follows your formats, and responds in your voice. This lesson builds the mental models you need before touching any code.
+
+When you fine-tune a model, you are not just adding information. You are reshaping how the model processes and responds to inputs. Understanding this distinction is crucial for knowing when fine-tuning is worth the effort and when simpler approaches suffice.
+
+The Three Layers of LLM Customization​
+
+Before diving into fine-tuning, you need to understand where it fits in the customization hierarchy:
+
+┌─────────────────────────────────────────────────────────────┐
+│                    PRE-TRAINING                             │
+│  Train from scratch on massive text corpus (trillions tokens)│
+│  Requires: $10M+, months, massive GPU clusters              │
+│  Result: General language understanding                      │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    FINE-TUNING (SFT)                        │
+│  Adapt pre-trained model to specific tasks/domains          │
+│  Requires: $10-$1000, hours-days, single GPU                │
+│  Result: Specialized behavior patterns                       │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    PROMPTING (+ RAG)                        │
+│  Guide model behavior through instructions and context      │
+│  Requires: Cents per request, real-time                     │
+│  Result: Task-specific responses                            │
+└─────────────────────────────────────────────────────────────┘
+
+
+Each layer builds on the previous. Fine-tuning modifies the weights learned during pre-training. Prompting leverages both pre-trained knowledge and any fine-tuned behaviors.
+
+What Actually Happens During Fine-Tuning​
+
+When you fine-tune a model, you show it examples of desired behavior and adjust its internal weights to make that behavior more likely.
+
+The Core Mechanism:
+
+Input: "Create a task: Review quarterly report"
+Expected Output: "{'action': 'create', 'title': 'Review quarterly report', 'priority': 'medium'}"
+
+During training:
+1. Model sees input, generates prediction
+2. Prediction compared to expected output
+3. Error (loss) calculated
+4. Weights adjusted to reduce error
+5. Repeat thousands of times
+
+
+After training, the model has learned patterns that make it more likely to:
+
+Respond in your preferred format (JSON for Task API)
+Use your domain terminology correctly
+Follow your specific conventions
+
+What Does NOT Happen:
+
+The model does not memorize your training data verbatim
+The model does not lose its general capabilities (if done correctly)
+The model does not gain truly new factual knowledge (that requires RAG)
+The Decision Framework: When to Fine-Tune​
+
+Fine-tuning requires significant effort. Use this framework to decide if it is appropriate:
+
+Fine-Tuning Is Appropriate When:​
+Signal	Example
+Consistent format required	Every response must be valid JSON matching a schema
+Domain-specific behavior	Medical assistant that uses correct terminology without explanation
+Style/voice requirements	Customer support bot matching brand voice consistently
+Latency-sensitive	Response patterns must be instant, not prompted each time
+Cost optimization	High-volume use where per-request prompting is expensive
+Fine-Tuning Is NOT Appropriate When:​
+Signal	Better Alternative
+Need up-to-date information	Use RAG to retrieve current data
+Occasional task	Use prompting with few-shot examples
+Experimenting with behavior	Iterate with prompts first
+Limited training data (<50 examples)	Use few-shot prompting
+Task changes frequently	Keep prompts flexible
+The Decision Tree​
+Q1: Is behavior consistent and well-defined?
+  No  → Use prompting (iterate on behavior)
+  Yes → Continue
+
+Q2: Do you have 500+ quality examples?
+  No  → Use few-shot prompting or collect more data
+  Yes → Continue
+
+Q3: Is this high-volume (1000+ requests/day)?
+  No  → Calculate if fine-tuning cost < prompting cost
+  Yes → Fine-tuning likely justified
+
+Q4: Does latency matter significantly?
+  No  → Consider RAG + prompting as alternative
+  Yes → Fine-tuning likely appropriate
+
+Q5: Do you need proprietary differentiation?
+  Yes → Fine-tuning creates competitive moat
+  No  → Evaluate total cost of ownership
+
+Understanding Training Data Requirements​
+
+The quality and format of your training data determines the quality of your fine-tuned model. This is the single most important factor.
+
+Dataset Size Guidelines​
+Dataset Size	Expected Outcome	Use Case
+50-100 examples	Minimal behavior change	Proof of concept only
+100-500 examples	Noticeable style adoption	Simple format adherence
+500-1000 examples	Reliable behavior	Production-ready for narrow tasks
+1000-5000 examples	Strong domain adaptation	Complex multi-turn interactions
+5000+ examples	Deep expertise encoding	Comprehensive domain coverage
+Data Format: Instruction Tuning​
+
+Modern SFT uses instruction-following format. Each example contains:
+
+{
+  "instruction": "The task or question for the model",
+  "input": "Optional additional context",
+  "output": "The desired response"
+}
+
+
+For chat-style fine-tuning, use conversation format:
+
+{
+  "conversations": [
+    {"role": "user", "content": "Create a task to review the Q4 budget"},
+    {"role": "assistant", "content": "{'action': 'create', 'title': 'Review Q4 budget', 'priority': 'high', 'due_date': null}"}
+  ]
+}
+
+Data Quality Checklist​
+
+Your training data must be:
+
+ Consistent: Same input patterns produce same output formats
+ Correct: No errors, typos, or incorrect examples
+ Complete: Covers the range of behaviors you want
+ Clean: No conflicting examples (same input, different outputs)
+ Representative: Matches real usage distribution
+
+The 10x Rule: Expect to spend 10x more time on data preparation than on training. A well-prepared dataset of 500 examples will outperform a messy dataset of 5000.
+
+Base Model Selection​
+
+Choosing the right base model is crucial. The model determines your hardware requirements, capabilities, and deployment options.
+
+Model Size vs. Hardware Constraints​
+Model Size	Full Fine-Tune VRAM	QLoRA VRAM	Colab Free Tier?
+1B	~8GB	~2GB	Yes
+3B	~24GB	~4GB	Yes
+7B	~56GB	~8GB	Marginal
+8B	~64GB	~10GB	With optimization
+13B	~104GB	~16GB	No
+70B	~560GB	~48GB	No
+
+For Colab Free Tier (T4 with 15GB VRAM), your realistic options are:
+
+3B models: Llama 3.2-3B, Qwen2.5-3B
+7-8B models: With aggressive memory optimization
+Model Selection Framework​
+Factor	Considerations
+Task Complexity	Simple tasks (classification) → smaller models; Complex reasoning → larger models
+Instruction Following	Choose "Instruct" variants for chat/instruction tasks
+License	Llama 3: Permissive; Mistral: Apache 2.0; Check commercial use
+Community Support	Popular models have more resources and debugging help
+Quantization Support	Ensure model works with QLoRA/Unsloth
+Recommended Starting Points​
+Use Case	Recommended Model	Reasoning
+Learning/Experimentation	Llama-3.2-3B-Instruct	Fast, fits T4, good instruction following
+Production (T4)	Qwen2.5-7B-Instruct	Balance of capability and efficiency
+Production (A100)	Llama-3.1-8B-Instruct	Strong general capabilities
+Complex Reasoning	Qwen2.5-14B	Worth the extra compute
+Running Example: Task API Assistant​
+
+Throughout this chapter, you will fine-tune a model to become a Task API Assistant. This connects to the Task API you built in Chapter 70.
+
+The Goal: A model that:
+
+Understands natural language task requests
+Outputs structured JSON for the Task API
+Handles create, read, update, delete operations
+Uses appropriate defaults for missing fields
+
+Sample Training Examples:
+
+{"instruction": "Create a task to review the annual report", "output": "{\"action\": \"create\", \"title\": \"Review annual report\", \"priority\": \"medium\"}"}
+
+{"instruction": "Mark the budget review task as complete", "output": "{\"action\": \"complete\", \"title\": \"Budget review\"}"}
+
+{"instruction": "What tasks are due this week?", "output": "{\"action\": \"list\", \"filter\": \"due_this_week\"}"}
+
+Reflect on Your Skill​
+
+Update your llmops-fine-tuner skill with what you learned:
+
+## Fine-Tuning Decision Framework
+
+### When Fine-Tuning Is Worth It
+- Consistent output format required
+- High-volume use case (1000+ requests/day)
+- Domain-specific behavior needed
+- Latency-sensitive applications
+- Proprietary differentiation desired
+
+### When to Use Alternatives
+- Need current information → RAG
+- Experimenting with behavior → Prompting
+- Limited examples (<500) → Few-shot prompting
+- Rapidly changing requirements → Flexible prompts
+
+### Dataset Requirements
+- Minimum viable: 500 examples
+- Production quality: 1000+ examples
+- Spend 10x more time on data than training
+
+
+Add this section to your skill file to encode the decision framework permanently.
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Evaluate Your Use Case​
+I want to fine-tune a model for [describe your specific use case].
+Help me evaluate using this framework:
+
+1. Is the behavior consistent and well-defined?
+2. Do I have enough examples? (describe your data situation)
+3. What is my expected volume?
+4. Does latency matter for my application?
+5. Do I need proprietary differentiation?
+
+Based on my answers, recommend: fine-tuning, prompting, RAG, or a combination.
+
+
+What you are learning: Decision framework application. Your AI partner helps you think through the framework systematically for your specific situation.
+
+Prompt 2: Assess Your Training Data​
+I have [describe your current data: format, quantity, source].
+Evaluate my data readiness for fine-tuning:
+
+1. Is my format compatible with instruction tuning?
+2. Is my quantity sufficient for my goals?
+3. What quality issues might exist?
+4. What data would strengthen my dataset?
+
+Be specific about what I need to add or change.
+
+
+What you are learning: Data quality assessment. Fine-tuning success depends on data quality. Your AI partner helps identify gaps before you invest in training.
+
+Prompt 3: Select a Base Model​
+Help me choose a base model given these constraints:
+- Hardware: Colab Free Tier (T4, 15GB VRAM)
+- Task: [describe your task]
+- Volume: [expected requests per day]
+- Deployment: [where will this run - Ollama, API, cloud]
+
+Compare 2-3 suitable options with tradeoffs.
+
+
+What you are learning: Constrained optimization. You are learning to make engineering tradeoffs between capability and resources.
+
+Safety Note​
+
+As you prepare training data, remember that the model will learn from your examples. Ensure your training data does not contain biased, harmful, or incorrect information. The model will amplify patterns in your data, both good and bad.

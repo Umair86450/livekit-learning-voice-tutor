@@ -1,0 +1,1169 @@
+Browser Audio Capture & VAD
+
+In Lesson 1, you connected to phone networks through SIP and Twilio. Phone integration reaches users without smartphones or reliable internet. But many users prefer the convenience of browser-based voice---no app installation, no phone number required.
+
+Browser audio capture sounds straightforward: request microphone access, stream to server, done. Reality is messier. Browsers enforce security restrictions. Legacy audio APIs introduce unacceptable latency. Voice activity detection on the server adds round-trip delays that break conversational flow.
+
+This lesson teaches you to build production-quality browser audio capture. You will implement microphone access with getUserMedia, process audio in a separate thread with AudioWorklet for sub-3ms latency, run Silero VAD directly in the browser via WebAssembly, and choose the right transport---WebRTC or WebSocket---for your deployment context.
+
+By the end, your Task Manager voice agent will accept browser connections with latency rivaling phone networks.
+
+Web Audio API Fundamentals​
+
+The Web Audio API provides a graph-based system for audio processing in browsers. Unlike simple HTML5 audio elements, Web Audio gives you fine-grained control over audio capture, processing, and routing.
+
+The Security Context Requirement​
+
+Browsers require HTTPS for microphone access. This is not optional:
+
+Context	getUserMedia
+https://yoursite.com	Allowed
+http://yoursite.com	Blocked
+http://localhost	Allowed (development exception)
+file://path/to/file.html	Blocked
+
+If your development server uses HTTP, switch to HTTPS. Most modern frameworks support this with a flag:
+
+# Vite
+vite --https
+
+# Next.js
+next dev --experimental-https
+
+# Plain Node.js with self-signed cert
+node --tls-cert=cert.pem --tls-key=key.pem server.js
+
+The Audio Graph Model​
+
+Web Audio uses a graph of connected nodes:
+
+                          ┌─────────────────┐
+                          │  AudioContext   │
+                          │  (sample rate,  │
+                          │   state, time)  │
+                          └────────┬────────┘
+                                   │
+        ┌──────────────────────────┼──────────────────────────┐
+        │                          │                          │
+        ▼                          ▼                          ▼
+┌───────────────┐         ┌───────────────┐         ┌───────────────┐
+│ MediaStream   │         │  AudioWorklet │         │  Destination  │
+│ Source Node   │ ──────► │    Node       │ ──────► │    Node       │
+│ (microphone)  │         │  (processing) │         │  (speakers)   │
+└───────────────┘         └───────────────┘         └───────────────┘
+
+
+Each node performs a specific function. Connect them to build audio pipelines.
+
+Basic Microphone Capture​
+
+Here is the minimal implementation to capture microphone audio:
+
+async function captureMicrophone() {
+  // Create audio context
+  const audioContext = new AudioContext({
+    sampleRate: 16000  // Match Gemini/common voice model requirements
+  });
+
+  // Request microphone access
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,           // Mono
+      sampleRate: 16000,         // 16kHz for voice
+      echoCancellation: true,    // Reduce echo
+      noiseSuppression: true,    // Reduce background noise
+      autoGainControl: true      // Normalize volume
+    }
+  });
+
+  // Create source node from microphone stream
+  const sourceNode = audioContext.createMediaStreamSource(stream);
+
+  console.log(`[audio] Microphone captured at ${audioContext.sampleRate}Hz`);
+  console.log(`[audio] Audio context state: ${audioContext.state}`);
+
+  return { audioContext, sourceNode, stream };
+}
+
+// Usage
+captureMicrophone()
+  .then(({ audioContext, sourceNode }) => {
+    console.log('[audio] Ready for processing');
+  })
+  .catch(error => {
+    if (error.name === 'NotAllowedError') {
+      console.error('[audio] Microphone permission denied');
+    } else if (error.name === 'NotFoundError') {
+      console.error('[audio] No microphone found');
+    } else {
+      console.error('[audio] Error:', error);
+    }
+  });
+
+
+Output:
+
+[audio] Microphone captured at 16000Hz
+[audio] Audio context state: running
+[audio] Ready for processing
+
+Audio Constraints Deep Dive​
+
+The getUserMedia constraints control audio quality and processing:
+
+Constraint	Purpose	Recommended Value
+channelCount	Mono vs stereo	1 (mono for voice)
+sampleRate	Samples per second	16000 (voice models)
+echoCancellation	Remove speaker feedback	true
+noiseSuppression	Reduce background noise	true
+autoGainControl	Normalize volume levels	true
+
+Note that browsers may ignore sampleRate if hardware does not support it. Always verify actual rate:
+
+const actualRate = audioContext.sampleRate;
+if (actualRate !== 16000) {
+  console.warn(`[audio] Resampling needed: ${actualRate}Hz → 16000Hz`);
+}
+
+AudioWorklet for Low Latency​
+
+The legacy ScriptProcessorNode ran on the main thread, causing audio glitches when JavaScript was busy. AudioWorklet solves this by processing audio in a dedicated thread.
+
+Why AudioWorklet Matters​
+Aspect	ScriptProcessorNode	AudioWorklet
+Thread	Main thread	Dedicated audio thread
+Buffer size	256-16384 samples	128 samples
+Latency at 48kHz	5.3-341ms	2.67ms
+Main thread blocking	Yes	No
+Browser support	Deprecated	Modern standard
+
+With AudioWorklet, you achieve consistent sub-3ms processing latency regardless of main thread activity.
+
+AudioWorklet Architecture​
+
+AudioWorklet requires two files:
+
+Processor (runs in audio thread): Handles sample-by-sample processing
+Controller (runs in main thread): Creates nodes and handles communication
+┌─────────────────────────────────────────────────────────────────┐
+│                        Main Thread                               │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │  audioContext.audioWorklet.addModule('processor.js')       │ │
+│  │  new AudioWorkletNode(audioContext, 'audio-processor')     │ │
+│  │  node.port.postMessage({ type: 'config', ... })            │ │
+│  │  node.port.onmessage = (event) => handleAudio(event.data)  │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │ MessagePort
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       Audio Thread                               │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │  class AudioProcessor extends AudioWorkletProcessor {      │ │
+│  │    process(inputs, outputs, parameters) {                  │ │
+│  │      // Process 128 samples per call                       │ │
+│  │      this.port.postMessage(audioData);                     │ │
+│  │      return true;                                          │ │
+│  │    }                                                       │ │
+│  │  }                                                         │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+
+Complete AudioWorklet Implementation​
+
+File: audio-processor.js (AudioWorklet processor)
+
+/**
+ * AudioWorkletProcessor for capturing and forwarding audio samples.
+ * Runs in dedicated audio thread for minimal latency.
+ */
+class AudioCaptureProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+
+    // Configuration from main thread
+    this.bufferSize = options.processorOptions?.bufferSize || 4800;  // 300ms at 16kHz
+    this.sampleBuffer = new Float32Array(this.bufferSize);
+    this.sampleIndex = 0;
+
+    // Handle messages from main thread
+    this.port.onmessage = (event) => {
+      if (event.data.type === 'flush') {
+        this.flush();
+      }
+    };
+  }
+
+  /**
+   * Process audio samples. Called for each 128-sample block.
+   */
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (!input || !input[0]) {
+      return true;  // Keep processor alive
+    }
+
+    const samples = input[0];  // Mono channel
+
+    // Accumulate samples
+    for (let i = 0; i < samples.length; i++) {
+      this.sampleBuffer[this.sampleIndex++] = samples[i];
+
+      // Buffer full - send to main thread
+      if (this.sampleIndex >= this.bufferSize) {
+        this.sendBuffer();
+      }
+    }
+
+    return true;  // Keep processor running
+  }
+
+  /**
+   * Send accumulated buffer to main thread.
+   */
+  sendBuffer() {
+    // Convert to Int16 for efficient transport
+    const int16Buffer = new Int16Array(this.sampleIndex);
+    for (let i = 0; i < this.sampleIndex; i++) {
+      const sample = Math.max(-1, Math.min(1, this.sampleBuffer[i]));
+      int16Buffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+    }
+
+    // Transfer buffer (zero-copy)
+    this.port.postMessage(
+      { type: 'audio', samples: int16Buffer },
+      [int16Buffer.buffer]
+    );
+
+    this.sampleIndex = 0;
+  }
+
+  /**
+   * Flush remaining samples.
+   */
+  flush() {
+    if (this.sampleIndex > 0) {
+      this.sendBuffer();
+    }
+  }
+}
+
+registerProcessor('audio-capture-processor', AudioCaptureProcessor);
+
+
+Output:
+
+// When processor sends audio chunk:
+{
+  type: 'audio',
+  samples: Int16Array(4800)  // 300ms of audio at 16kHz
+}
+
+
+File: audio-capture.js (Main thread controller)
+
+/**
+ * Browser audio capture using AudioWorklet.
+ * Provides low-latency microphone capture with configurable buffering.
+ */
+class BrowserAudioCapture {
+  constructor(options = {}) {
+    this.sampleRate = options.sampleRate || 16000;
+    this.bufferMs = options.bufferMs || 300;
+    this.onAudio = options.onAudio || (() => {});
+    this.onStateChange = options.onStateChange || (() => {});
+
+    this.audioContext = null;
+    this.workletNode = null;
+    this.sourceNode = null;
+    this.stream = null;
+  }
+
+  /**
+   * Start capturing audio from microphone.
+   */
+  async start() {
+    try {
+      // Create audio context
+      this.audioContext = new AudioContext({
+        sampleRate: this.sampleRate
+      });
+
+      // Load AudioWorklet processor
+      await this.audioContext.audioWorklet.addModule('audio-processor.js');
+
+      // Request microphone
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: this.sampleRate,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      // Create source from microphone
+      this.sourceNode = this.audioContext.createMediaStreamSource(this.stream);
+
+      // Create worklet node
+      const bufferSize = Math.floor(this.sampleRate * this.bufferMs / 1000);
+      this.workletNode = new AudioWorkletNode(
+        this.audioContext,
+        'audio-capture-processor',
+        {
+          processorOptions: { bufferSize }
+        }
+      );
+
+      // Handle audio from worklet
+      this.workletNode.port.onmessage = (event) => {
+        if (event.data.type === 'audio') {
+          this.onAudio(event.data.samples);
+        }
+      };
+
+      // Connect pipeline
+      this.sourceNode.connect(this.workletNode);
+
+      console.log(`[capture] Started at ${this.audioContext.sampleRate}Hz`);
+      console.log(`[capture] Buffer: ${bufferSize} samples (${this.bufferMs}ms)`);
+      this.onStateChange('running');
+
+      return true;
+
+    } catch (error) {
+      console.error('[capture] Start failed:', error);
+      this.onStateChange('error');
+      throw error;
+    }
+  }
+
+  /**
+   * Stop capturing audio.
+   */
+  stop() {
+    // Flush remaining audio
+    if (this.workletNode) {
+      this.workletNode.port.postMessage({ type: 'flush' });
+    }
+
+    // Stop microphone
+    if (this.stream) {
+      this.stream.getTracks().forEach(track => track.stop());
+    }
+
+    // Close audio context
+    if (this.audioContext) {
+      this.audioContext.close();
+    }
+
+    console.log('[capture] Stopped');
+    this.onStateChange('stopped');
+  }
+}
+
+// Usage example
+const capture = new BrowserAudioCapture({
+  sampleRate: 16000,
+  bufferMs: 100,  // 100ms chunks
+
+  onAudio: (samples) => {
+    // samples is Int16Array
+    console.log(`[audio] Received ${samples.length} samples`);
+    // Send to voice agent...
+  },
+
+  onStateChange: (state) => {
+    console.log(`[capture] State: ${state}`);
+  }
+});
+
+// Start capture
+capture.start();
+
+// Later: stop capture
+// capture.stop();
+
+
+Output:
+
+[capture] Started at 16000Hz
+[capture] Buffer: 1600 samples (100ms)
+[audio] Received 1600 samples
+[audio] Received 1600 samples
+[audio] Received 1600 samples
+...
+
+Silero VAD in Browser​
+
+Voice Activity Detection determines when a user is speaking versus silence or background noise. Running VAD on the server adds a full round-trip of latency. Client-side VAD eliminates this delay and reduces bandwidth by only transmitting speech.
+
+Why Client-Side VAD​
+Approach	Latency Added	Bandwidth Usage
+Server-side VAD	50-200ms (network round-trip)	All audio uploaded
+Client-side VAD	<1ms (local inference)	Only speech uploaded
+
+For voice agents where responsiveness matters, the difference is substantial.
+
+Silero VAD Overview​
+
+Silero VAD is a lightweight neural network for voice activity detection:
+
+Model size: ~2MB (ONNX format)
+Inference time: <1ms per 30ms audio chunk
+Accuracy: State-of-the-art for its size class
+Languages: Language-agnostic (works on any spoken language)
+
+We run it in the browser using ONNX Runtime Web, which executes ONNX models via WebAssembly.
+
+ONNX Runtime Web Setup​
+
+First, install the required packages:
+
+npm install onnxruntime-web
+
+
+The Silero VAD model is available from their GitHub releases. Download silero_vad.onnx (~2MB).
+
+Complete VAD Integration​
+
+File: vad-processor.js (AudioWorklet with VAD)
+
+/**
+ * AudioWorklet processor with integrated Silero VAD.
+ * Detects speech client-side and only forwards speech segments.
+ */
+class VADAudioProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+
+    // VAD configuration
+    this.vadThreshold = options.processorOptions?.vadThreshold || 0.5;
+    this.sampleRate = options.processorOptions?.sampleRate || 16000;
+
+    // Silero VAD expects 512 samples at 16kHz (32ms chunks)
+    this.vadWindowSize = 512;
+    this.vadBuffer = new Float32Array(this.vadWindowSize);
+    this.vadBufferIndex = 0;
+
+    // Output buffer for speech segments
+    this.outputBuffer = [];
+    this.isSpeaking = false;
+    this.silenceFrames = 0;
+    this.maxSilenceFrames = 15;  // ~480ms of silence ends utterance
+
+    // VAD model will be loaded via message from main thread
+    this.vadSession = null;
+    this.vadState = null;  // Silero VAD hidden state
+
+    this.port.onmessage = async (event) => {
+      if (event.data.type === 'init-vad') {
+        // VAD model bytes sent from main thread
+        await this.initializeVAD(event.data.modelBytes);
+      }
+    };
+  }
+
+  async initializeVAD(modelBytes) {
+    // Note: ONNX Runtime must be loaded in worklet scope
+    // This is done via importScripts in the worklet
+    try {
+      const { InferenceSession, Tensor } = await import('onnxruntime-web');
+      this.vadSession = await InferenceSession.create(modelBytes);
+
+      // Initialize hidden state (Silero VAD uses LSTM)
+      this.vadState = {
+        h: new Tensor('float32', new Float32Array(2 * 64).fill(0), [2, 1, 64]),
+        c: new Tensor('float32', new Float32Array(2 * 64).fill(0), [2, 1, 64])
+      };
+
+      this.port.postMessage({ type: 'vad-ready' });
+    } catch (error) {
+      this.port.postMessage({ type: 'vad-error', error: error.message });
+    }
+  }
+
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (!input || !input[0]) return true;
+
+    const samples = input[0];
+
+    // Accumulate samples for VAD window
+    for (let i = 0; i < samples.length; i++) {
+      this.vadBuffer[this.vadBufferIndex++] = samples[i];
+
+      if (this.vadBufferIndex >= this.vadWindowSize) {
+        this.processVADWindow();
+        this.vadBufferIndex = 0;
+      }
+    }
+
+    return true;
+  }
+
+  async processVADWindow() {
+    if (!this.vadSession) {
+      // VAD not ready, pass through all audio
+      this.forwardAudio(this.vadBuffer);
+      return;
+    }
+
+    try {
+      const { Tensor } = await import('onnxruntime-web');
+
+      // Prepare input tensor
+      const inputTensor = new Tensor(
+        'float32',
+        this.vadBuffer,
+        [1, this.vadWindowSize]
+      );
+
+      // Run inference
+      const feeds = {
+        input: inputTensor,
+        h: this.vadState.h,
+        c: this.vadState.c,
+        sr: new Tensor('int64', BigInt64Array.from([BigInt(this.sampleRate)]), [1])
+      };
+
+      const results = await this.vadSession.run(feeds);
+
+      // Update hidden state for next call
+      this.vadState.h = results.hn;
+      this.vadState.c = results.cn;
+
+      // Get speech probability
+      const speechProb = results.output.data[0];
+
+      // State machine for speech detection
+      if (speechProb >= this.vadThreshold) {
+        if (!this.isSpeaking) {
+          this.isSpeaking = true;
+          this.port.postMessage({ type: 'speech-start' });
+        }
+        this.silenceFrames = 0;
+        this.forwardAudio(this.vadBuffer);
+      } else {
+        if (this.isSpeaking) {
+          this.silenceFrames++;
+          // Keep forwarding during grace period
+          this.forwardAudio(this.vadBuffer);
+
+          if (this.silenceFrames >= this.maxSilenceFrames) {
+            this.isSpeaking = false;
+            this.port.postMessage({ type: 'speech-end' });
+          }
+        }
+        // When not speaking, do not forward audio (bandwidth savings)
+      }
+
+    } catch (error) {
+      // On error, forward audio without VAD
+      this.forwardAudio(this.vadBuffer);
+    }
+  }
+
+  forwardAudio(samples) {
+    const int16 = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    this.port.postMessage(
+      { type: 'audio', samples: int16 },
+      [int16.buffer]
+    );
+  }
+}
+
+registerProcessor('vad-audio-processor', VADAudioProcessor);
+
+
+File: vad-capture.js (Main thread with VAD loading)
+
+/**
+ * Browser audio capture with client-side Silero VAD.
+ * Only forwards audio during detected speech.
+ */
+class VADAudioCapture {
+  constructor(options = {}) {
+    this.sampleRate = options.sampleRate || 16000;
+    this.vadThreshold = options.vadThreshold || 0.5;
+    this.vadModelUrl = options.vadModelUrl || '/models/silero_vad.onnx';
+
+    this.onSpeechStart = options.onSpeechStart || (() => {});
+    this.onSpeechEnd = options.onSpeechEnd || (() => {});
+    this.onAudio = options.onAudio || (() => {});
+
+    this.audioContext = null;
+    this.workletNode = null;
+  }
+
+  async start() {
+    // Create audio context
+    this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+
+    // Load AudioWorklet
+    await this.audioContext.audioWorklet.addModule('vad-processor.js');
+
+    // Request microphone
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: this.sampleRate,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    });
+
+    const sourceNode = this.audioContext.createMediaStreamSource(stream);
+
+    // Create worklet node
+    this.workletNode = new AudioWorkletNode(
+      this.audioContext,
+      'vad-audio-processor',
+      {
+        processorOptions: {
+          sampleRate: this.sampleRate,
+          vadThreshold: this.vadThreshold
+        }
+      }
+    );
+
+    // Handle messages from worklet
+    this.workletNode.port.onmessage = (event) => {
+      switch (event.data.type) {
+        case 'vad-ready':
+          console.log('[vad] Model loaded, detection active');
+          break;
+        case 'speech-start':
+          console.log('[vad] Speech started');
+          this.onSpeechStart();
+          break;
+        case 'speech-end':
+          console.log('[vad] Speech ended');
+          this.onSpeechEnd();
+          break;
+        case 'audio':
+          this.onAudio(event.data.samples);
+          break;
+        case 'vad-error':
+          console.error('[vad] Error:', event.data.error);
+          break;
+      }
+    };
+
+    // Connect pipeline
+    sourceNode.connect(this.workletNode);
+
+    // Load and send VAD model to worklet
+    await this.loadVADModel();
+
+    console.log('[vad] Capture started');
+  }
+
+  async loadVADModel() {
+    console.log('[vad] Loading Silero VAD model...');
+
+    const response = await fetch(this.vadModelUrl);
+    const modelBytes = await response.arrayBuffer();
+
+    console.log(`[vad] Model loaded: ${(modelBytes.byteLength / 1024 / 1024).toFixed(2)}MB`);
+
+    // Send to worklet
+    this.workletNode.port.postMessage(
+      { type: 'init-vad', modelBytes },
+      [modelBytes]
+    );
+  }
+
+  stop() {
+    if (this.audioContext) {
+      this.audioContext.close();
+    }
+    console.log('[vad] Capture stopped');
+  }
+}
+
+// Usage
+const vadCapture = new VADAudioCapture({
+  sampleRate: 16000,
+  vadThreshold: 0.5,
+  vadModelUrl: '/models/silero_vad.onnx',
+
+  onSpeechStart: () => {
+    document.getElementById('status').textContent = 'Speaking...';
+  },
+
+  onSpeechEnd: () => {
+    document.getElementById('status').textContent = 'Listening...';
+  },
+
+  onAudio: (samples) => {
+    // Only called during speech
+    sendToVoiceAgent(samples);
+  }
+});
+
+vadCapture.start();
+
+
+Output:
+
+[vad] Loading Silero VAD model...
+[vad] Model loaded: 1.87MB
+[vad] Model loaded, detection active
+[vad] Capture started
+
+[User speaks]
+[vad] Speech started
+[audio] 512 samples forwarded
+[audio] 512 samples forwarded
+[audio] 512 samples forwarded
+[User stops speaking]
+[audio] 512 samples forwarded  (grace period)
+[vad] Speech ended
+
+[User silent for 10 seconds]
+[No audio forwarded - bandwidth saved]
+
+WebRTC vs WebSocket Transport​
+
+Once you have captured and processed audio, you need to transport it to your voice agent server. Two primary options exist: WebRTC and WebSocket.
+
+Transport Comparison​
+Aspect	WebRTC	WebSocket
+Design purpose	Real-time media	General bidirectional messaging
+NAT traversal	Built-in (ICE, STUN, TURN)	Server must be directly reachable
+Encryption	DTLS (mandatory)	TLS (WSS)
+Adaptive bitrate	Yes	No
+Packet loss handling	FEC, retransmission	TCP retransmission
+Browser API	RTCPeerConnection	WebSocket
+Implementation complexity	Higher (SDP, ICE)	Lower
+Typical latency	50-150ms	50-200ms
+When to Use WebRTC​
+
+Choose WebRTC when:
+
+Users are behind restrictive NATs or firewalls
+You need adaptive bitrate for varying network conditions
+You are already using LiveKit, Daily, or similar platforms
+Browser-to-browser communication is required
+When to Use WebSocket​
+
+Choose WebSocket when:
+
+Your server is directly reachable (no NAT issues)
+You prefer simpler implementation
+You are connecting to OpenAI Realtime API or Gemini Live directly
+Predictable fixed encoding is acceptable
+WebRTC Implementation​
+
+For LiveKit-based voice agents, use the LiveKit browser SDK:
+
+import { Room, Track } from 'livekit-client';
+
+class LiveKitAudioTransport {
+  constructor(options = {}) {
+    this.serverUrl = options.serverUrl;
+    this.token = options.token;
+    this.room = null;
+  }
+
+  async connect() {
+    this.room = new Room();
+
+    await this.room.connect(this.serverUrl, this.token, {
+      autoSubscribe: true
+    });
+
+    console.log(`[livekit] Connected to room: ${this.room.name}`);
+
+    // Handle incoming audio from voice agent
+    this.room.on('trackSubscribed', (track, publication, participant) => {
+      if (track.kind === Track.Kind.Audio) {
+        const element = track.attach();
+        document.body.appendChild(element);
+        console.log('[livekit] Agent audio attached');
+      }
+    });
+
+    // Publish local microphone
+    await this.room.localParticipant.setMicrophoneEnabled(true);
+    console.log('[livekit] Microphone published');
+  }
+
+  disconnect() {
+    if (this.room) {
+      this.room.disconnect();
+    }
+  }
+}
+
+// Usage
+const transport = new LiveKitAudioTransport({
+  serverUrl: 'wss://your-livekit-server.com',
+  token: 'your-participant-token'
+});
+
+await transport.connect();
+
+
+Output:
+
+[livekit] Connected to room: task-manager-voice
+[livekit] Microphone published
+[livekit] Agent audio attached
+
+WebSocket Implementation​
+
+For direct WebSocket connections (OpenAI Realtime, Gemini Live):
+
+class WebSocketAudioTransport {
+  constructor(options = {}) {
+    this.url = options.url;
+    this.onMessage = options.onMessage || (() => {});
+    this.ws = null;
+  }
+
+  async connect() {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(this.url);
+      this.ws.binaryType = 'arraybuffer';
+
+      this.ws.onopen = () => {
+        console.log('[ws] Connected');
+        resolve();
+      };
+
+      this.ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          // Binary audio data
+          const samples = new Int16Array(event.data);
+          this.onMessage({ type: 'audio', samples });
+        } else {
+          // JSON message
+          const message = JSON.parse(event.data);
+          this.onMessage(message);
+        }
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('[ws] Error:', error);
+        reject(error);
+      };
+
+      this.ws.onclose = () => {
+        console.log('[ws] Disconnected');
+      };
+    });
+  }
+
+  sendAudio(samples) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Send Int16Array as binary
+      this.ws.send(samples.buffer);
+    }
+  }
+
+  sendMessage(message) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  disconnect() {
+    if (this.ws) {
+      this.ws.close();
+    }
+  }
+}
+
+// Usage
+const transport = new WebSocketAudioTransport({
+  url: 'wss://your-voice-agent.com/audio',
+
+  onMessage: (message) => {
+    if (message.type === 'audio') {
+      playAudio(message.samples);
+    } else if (message.type === 'transcript') {
+      console.log('[agent]', message.text);
+    }
+  }
+});
+
+await transport.connect();
+
+// Send audio from VAD capture
+vadCapture.onAudio = (samples) => {
+  transport.sendAudio(samples);
+};
+
+
+Output:
+
+[ws] Connected
+[sending audio during speech]
+[agent] What would you like to add to your task list?
+
+Decision Matrix​
+
+Use this matrix to select transport:
+
+Your Situation	Recommendation
+Using LiveKit/Daily	WebRTC (use their SDK)
+Direct to OpenAI/Gemini	WebSocket
+Corporate firewall users	WebRTC (NAT traversal)
+Simple proof of concept	WebSocket
+Variable network quality	WebRTC (adaptive bitrate)
+Fixed known network	Either works
+Connecting to Voice Agents​
+
+Now combine all components into a complete browser-to-voice-agent pipeline.
+
+Complete Integration Example​
+/**
+ * Complete browser voice client for Task Manager.
+ * Integrates: getUserMedia → AudioWorklet → VAD → Transport → Agent
+ */
+class TaskManagerVoiceClient {
+  constructor(options = {}) {
+    this.agentUrl = options.agentUrl;
+    this.sampleRate = 16000;
+
+    this.capture = null;
+    this.transport = null;
+    this.audioPlayer = null;
+
+    this.onTranscript = options.onTranscript || (() => {});
+    this.onStateChange = options.onStateChange || (() => {});
+  }
+
+  async connect() {
+    this.onStateChange('connecting');
+
+    // Create audio player for agent responses
+    this.audioPlayer = new AudioPlayer({ sampleRate: this.sampleRate });
+
+    // Connect transport
+    this.transport = new WebSocketAudioTransport({
+      url: this.agentUrl,
+
+      onMessage: (message) => {
+        if (message.type === 'audio') {
+          this.audioPlayer.play(message.samples);
+        } else if (message.type === 'transcript') {
+          this.onTranscript(message);
+        }
+      }
+    });
+
+    await this.transport.connect();
+
+    // Start VAD-enabled capture
+    this.capture = new VADAudioCapture({
+      sampleRate: this.sampleRate,
+      vadThreshold: 0.5,
+
+      onSpeechStart: () => {
+        this.transport.sendMessage({ type: 'speech_start' });
+        this.onStateChange('speaking');
+      },
+
+      onSpeechEnd: () => {
+        this.transport.sendMessage({ type: 'speech_end' });
+        this.onStateChange('listening');
+      },
+
+      onAudio: (samples) => {
+        this.transport.sendAudio(samples);
+      }
+    });
+
+    await this.capture.start();
+    this.onStateChange('connected');
+  }
+
+  disconnect() {
+    if (this.capture) this.capture.stop();
+    if (this.transport) this.transport.disconnect();
+    if (this.audioPlayer) this.audioPlayer.stop();
+    this.onStateChange('disconnected');
+  }
+}
+
+/**
+ * Simple audio player for agent responses.
+ */
+class AudioPlayer {
+  constructor(options = {}) {
+    this.sampleRate = options.sampleRate || 16000;
+    this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+    this.queue = [];
+    this.isPlaying = false;
+  }
+
+  play(samples) {
+    // Convert Int16 to Float32
+    const float32 = new Float32Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      float32[i] = samples[i] / 32768;
+    }
+
+    // Create buffer
+    const buffer = this.audioContext.createBuffer(1, float32.length, this.sampleRate);
+    buffer.getChannelData(0).set(float32);
+
+    // Queue and play
+    this.queue.push(buffer);
+    this.playNext();
+  }
+
+  playNext() {
+    if (this.isPlaying || this.queue.length === 0) return;
+
+    this.isPlaying = true;
+    const buffer = this.queue.shift();
+
+    const source = this.audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.audioContext.destination);
+
+    source.onended = () => {
+      this.isPlaying = false;
+      this.playNext();
+    };
+
+    source.start();
+  }
+
+  stop() {
+    this.queue = [];
+    this.audioContext.close();
+  }
+}
+
+// Usage in your application
+const voiceClient = new TaskManagerVoiceClient({
+  agentUrl: 'wss://api.taskmanager.com/voice',
+
+  onTranscript: ({ role, text }) => {
+    const el = document.createElement('div');
+    el.className = role === 'user' ? 'user-message' : 'agent-message';
+    el.textContent = text;
+    document.getElementById('transcript').appendChild(el);
+  },
+
+  onStateChange: (state) => {
+    document.getElementById('status').textContent = state;
+    document.getElementById('mic-button').disabled = state !== 'connected';
+  }
+});
+
+// Connect when user clicks
+document.getElementById('connect-button').onclick = () => {
+  voiceClient.connect();
+};
+
+// Disconnect when user leaves
+window.onbeforeunload = () => {
+  voiceClient.disconnect();
+};
+
+
+Output:
+
+[status] connecting
+[ws] Connected
+[vad] Model loaded, detection active
+[vad] Capture started
+[status] connected
+
+[User speaks: "Add buy groceries to my list"]
+[status] speaking
+[vad] Speech started
+[ws] Sending audio chunks...
+[vad] Speech ended
+[status] listening
+
+[Agent responds]
+[transcript] Agent: I've added 'buy groceries' to your task list.
+[audio playing through speakers]
+
+Improve Your Skill​
+
+Reflect on what you learned about browser audio:
+
+Update .claude/skills/web-audio-capture/SKILL.md:
+
+Add getUserMedia patterns: Document audio constraints for voice capture
+Add AudioWorklet templates: Include the processor and controller code
+Add VAD integration guidance: Document ONNX Runtime setup and Silero model loading
+Add transport decision tree: When to use WebRTC vs WebSocket
+
+Test your skill: Ask it to scaffold browser audio capture for a new project. Does it provide working AudioWorklet code? Does it explain VAD integration options?
+
+Try With AI​
+Prompt 1: Implement Cross-Browser Audio Capture​
+I want to implement microphone capture that works across Chrome, Firefox, and Safari.
+
+My requirements:
+- Sample rate: 16kHz (for voice models)
+- Low latency: Sub-50ms processing
+- Works on desktop and mobile browsers
+- Graceful degradation if AudioWorklet unavailable
+
+Help me:
+1. Check browser support and select appropriate API
+2. Implement AudioWorklet with ScriptProcessorNode fallback
+3. Handle Safari's audio context resume requirement
+4. Test across browsers
+
+I'll test on actual devices and report compatibility issues.
+
+
+What you are learning: Browser compatibility is messier than documentation suggests. Safari requires user gesture to start audio context. Some mobile browsers have AudioWorklet limitations. Building robust capture means handling edge cases.
+
+Prompt 2: Optimize VAD for Production​
+I have Silero VAD running in my browser, but I'm seeing issues:
+
+1. False positives when music plays in background
+2. Cuts off end of sentences sometimes
+3. Model loading takes 2+ seconds on slow connections
+
+Help me:
+1. Tune VAD threshold for my use case (task management app)
+2. Implement speech padding (keep X ms before/after detected speech)
+3. Add model caching with IndexedDB
+4. Handle model loading failures gracefully
+
+Current config: threshold 0.5, 16kHz, 512 sample windows
+
+
+What you are learning: Default VAD settings rarely work perfectly. Production deployment requires tuning thresholds, adding padding to prevent cutoffs, and optimizing model loading for real-world network conditions.
+
+Prompt 3: Choose Transport for Corporate Deployment​
+I'm deploying my Task Manager voice agent to a corporate client.
+Their network has:
+- Strict firewall (most ports blocked)
+- HTTP proxy for all traffic
+- VPN for remote workers
+- Mixed WiFi quality in offices
+
+Currently using WebSocket to my voice agent server.
+Should I switch to WebRTC? Help me:
+
+1. Analyze if WebSocket will work through their proxy
+2. Compare WebRTC NAT traversal benefits
+3. Design fallback if primary transport fails
+4. Plan testing strategy for their network
+
+I can test with their IT team next week.
+
+
+What you are learning: Enterprise networks add constraints consumer apps never face. Understanding corporate network topologies helps you design transport strategies that work in the real world.
+
+Safety considerations: Browser audio capture requires explicit user permission. Always explain why you need microphone access before requesting it. Handle permission denied gracefully---users may have legitimate reasons to refuse. When using VAD, inform users that audio is being analyzed locally. Storing or transmitting audio requires appropriate privacy disclosures and consent.

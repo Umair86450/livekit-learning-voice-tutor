@@ -1,0 +1,403 @@
+JWT Authentication
+
+Users can sign up. Now they need to log in. HTTP is stateless—every request is independent. How does the server know who's making a request?
+
+Tokens.
+
+The user logs in once, gets a token, and includes it in every subsequent request. The server validates the token to identify the user. No session storage needed.
+
+How JWT Works​
+1. User sends email/password to /token
+2. Server verifies password (using verify_password from L08)
+3. Server creates a signed JWT containing user identity
+4. User includes token in Authorization header
+5. Server validates signature, extracts user
+
+
+Key insight: JWTs are signed, not encrypted. Anyone can read the payload. But only your server can create valid signatures.
+
+Installing Dependencies​
+uv add python-jose[cryptography]
+
+python-jose - JWT encoding/decoding library
+[cryptography] - Cryptographic backend for signing
+JWT Configuration​
+
+Add to config.py:
+
+class Settings(BaseSettings):
+    # ... existing settings ...
+
+    secret_key: str  # For signing tokens
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+
+
+Add to .env:
+
+SECRET_KEY=your-secret-key-here
+
+
+Generate a secure key:
+
+openssl rand -hex 32
+
+Token Functions​
+
+Add to auth.py:
+
+from datetime import datetime, timedelta
+from typing import Optional
+from jose import jwt, JWTError
+from config import get_settings
+
+settings = get_settings()
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a signed JWT token."""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+
+
+def decode_token(token: str) -> Optional[dict]:
+    """Decode and validate a JWT token."""
+    try:
+        return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    except JWTError:
+        return None
+
+
+Test token creation:
+
+>>> from auth import create_access_token, decode_token
+>>> token = create_access_token({"sub": "alice@example.com"})
+>>> token
+'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZUBleGFtcGxlLmNvbSIsImV4cCI6MTcwNTMxODIwMH0.xxxxx'
+>>> decode_token(token)
+{'sub': 'alice@example.com', 'exp': 1705318200}
+
+
+The token has three parts (separated by dots):
+
+Header - Algorithm info ({"alg": "HS256"})
+Payload - Your data ({"sub": "alice@example.com", "exp": ...})
+Signature - Proves the token is authentic
+Login Endpoint​
+
+OAuth2 expects a specific request format. Add to main.py:
+
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlmodel import Session, select
+from datetime import timedelta
+from models import User
+from security import verify_password
+from auth import create_access_token
+from database import get_session
+from config import get_settings
+
+app = FastAPI(title="Task API")
+settings = get_settings()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+@app.post("/token")
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    session: Session = Depends(get_session)
+):
+    """Authenticate user and return JWT token."""
+    # Find user by email
+    user = session.exec(
+        select(User).where(User.email == form_data.username)
+    ).first()
+
+    # Verify credentials
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Create token
+    access_token = create_access_token(
+        data={"sub": user.email},
+        expires_delta=timedelta(minutes=settings.access_token_expire_minutes)
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+Security note: The error message is intentionally generic. "Incorrect email or password" doesn't reveal whether the email exists—preventing enumeration attacks.
+
+Test the login:
+
+curl -X POST http://localhost:8000/token \
+  -d "username=alice@example.com&password=SecurePass123"
+
+
+Output:
+
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "bearer"
+}
+
+
+Note: OAuth2 uses form data (not JSON) and the field is called username even though we're using email.
+
+Protecting Routes​
+
+Create a dependency that extracts the current user from the token:
+
+from auth import decode_token
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session)
+) -> User:
+    """Extract and validate user from JWT token."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    payload = decode_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    email: str = payload.get("sub")
+    if email is None:
+        raise credentials_exception
+
+    user = session.exec(select(User).where(User.email == email)).first()
+    if user is None:
+        raise credentials_exception
+
+    return user
+
+
+Now use it to protect routes:
+
+@app.get("/users/me")
+def read_current_user(current_user: User = Depends(get_current_user)):
+    """Return current user info."""
+    return {"id": current_user.id, "email": current_user.email}
+
+
+Test protected route:
+
+# Without token - fails
+curl http://localhost:8000/users/me
+# {"detail":"Not authenticated"}
+
+# With token - succeeds
+curl http://localhost:8000/users/me \
+  -H "Authorization: Bearer eyJhbGci..."
+# {"id": 1, "email": "alice@example.com"}
+
+Protecting Task Routes​
+
+Associate tasks with users:
+
+@app.post("/tasks", status_code=201)
+def create_task(
+    task: TaskCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a task for the current user."""
+    db_task = Task(**task.dict(), owner_id=current_user.id)
+    session.add(db_task)
+    session.commit()
+    session.refresh(db_task)
+    return db_task
+
+
+@app.get("/tasks")
+def list_tasks(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """List tasks belonging to current user."""
+    return session.exec(
+        select(Task).where(Task.owner_id == current_user.id)
+    ).all()
+
+
+Now users only see their own tasks.
+
+Swagger UI Integration​
+
+FastAPI's Swagger UI has built-in OAuth2 support:
+
+Open /docs
+Click the "Authorize" button (lock icon)
+Enter email and password
+Click "Authorize"
+All requests now include the token automatically
+
+This makes testing protected endpoints easy without manually copying tokens.
+
+Hands-On Exercise​
+
+Step 1: Install python-jose:
+
+uv add python-jose[cryptography]
+
+
+Step 2: Add JWT settings to config.py and .env
+
+Step 3: Create auth.py with token functions
+
+Step 4: Add /token endpoint to main.py
+
+Step 5: Create get_current_user dependency
+
+Step 6: Add /users/me protected route
+
+Step 7: Test the complete flow:
+
+# Create a user (from L08)
+curl -X POST http://localhost:8000/users/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email": "bob@example.com", "password": "SecurePass123"}'
+
+# Login to get token
+curl -X POST http://localhost:8000/token \
+  -d "username=bob@example.com&password=SecurePass123"
+
+# Use token to access protected route
+curl http://localhost:8000/users/me \
+  -H "Authorization: Bearer <your-token>"
+
+Common Mistakes​
+
+Mistake 1: Using JSON for /token
+
+# Wrong - OAuth2 expects form data
+curl -X POST http://localhost:8000/token \
+  -H "Content-Type: application/json" \
+  -d '{"username": "test", "password": "secret"}'
+
+# Correct - form data
+curl -X POST http://localhost:8000/token \
+  -d "username=test&password=secret"
+
+
+Mistake 2: Forgetting WWW-Authenticate header
+
+# Wrong - browsers won't prompt for credentials
+raise HTTPException(status_code=401, detail="Not authenticated")
+
+# Correct - proper header
+raise HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Not authenticated",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+
+Mistake 3: Putting sensitive data in tokens
+
+# Wrong - anyone can decode JWTs!
+create_access_token({"sub": email, "password": password})
+
+# Correct - only identifiers
+create_access_token({"sub": email})
+
+
+Mistake 4: Hardcoding the secret key
+
+# Wrong - exposed in code
+SECRET_KEY = "my-secret-key"
+
+# Correct - from environment
+settings.secret_key
+
+The Authentication Flow​
+
+Here's the complete picture:
+
+┌─────────────┐     POST /users/signup      ┌─────────────┐
+│   Client    │ ───────────────────────────►│   Server    │
+│             │     {"email", "password"}   │             │
+│             │◄─────────────────────────── │  (hashes &  │
+│             │     {"id", "email"}         │   stores)   │
+└─────────────┘                             └─────────────┘
+
+┌─────────────┐     POST /token             ┌─────────────┐
+│   Client    │ ───────────────────────────►│   Server    │
+│             │     username=&password=     │             │
+│             │◄─────────────────────────── │ (verifies & │
+│             │     {"access_token": ...}   │  signs JWT) │
+└─────────────┘                             └─────────────┘
+
+┌─────────────┐     GET /tasks              ┌─────────────┐
+│   Client    │ ───────────────────────────►│   Server    │
+│             │     Authorization: Bearer   │             │
+│             │◄─────────────────────────── │ (validates  │
+│             │     [user's tasks]          │   & serves) │
+└─────────────┘                             └─────────────┘
+
+Try With AI​
+
+Prompt 1: Token Expiration
+
+My JWT tokens expire after 30 minutes. What happens when a
+user's token expires mid-session? How should my frontend
+handle this? Should I implement refresh tokens?
+
+
+What you're learning: Token expiration is a UX and security tradeoff. Short-lived tokens are more secure but require refresh logic.
+
+Prompt 2: Custom Token Claims
+
+I want to include user roles in my JWT so I can check permissions
+without a database query. What are the tradeoffs?
+What claims should vs shouldn't go in a JWT?
+
+
+What you're learning: JWTs can carry any data, but there are size and staleness tradeoffs. Roles cached in JWTs can't be revoked instantly.
+
+Prompt 3: Testing Authentication
+
+How do I write pytest tests for my protected endpoints?
+I need to:
+1. Create a test user
+2. Get a token in the test
+3. Include it in requests
+4. Test both authenticated and unauthenticated cases
+
+
+What you're learning: Testing auth requires fixtures and patterns. Understanding these makes your test suite reliable.
+
+Reflect on Your Skill​
+
+You built a fastapi-agent skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my fastapi-agent skill, help me implement JWT authentication.
+Does my skill include token generation, validation, protected routes, and OAuth2 password flow?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include JWT token creation with python-jose?
+Did it handle OAuth2PasswordBearer and get_current_user dependency?
+Did it cover protected endpoints and token validation?
+Improve Your Skill​
+
+If you found gaps:
+
+My fastapi-agent skill is missing JWT authentication patterns.
+Update it to include token creation/validation with python-jose,
+OAuth2PasswordBearer setup, get_current_user dependency,
+and protected route implementation with Depends().

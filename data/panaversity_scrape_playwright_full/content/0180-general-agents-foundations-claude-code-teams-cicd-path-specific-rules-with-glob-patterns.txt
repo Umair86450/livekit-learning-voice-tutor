@@ -1,0 +1,352 @@
+Path-Specific Rules with Glob Patterns
+
+Your team's CLAUDE.md tells Claude how to write code. The problem: it tells Claude everything for every file. When you are editing a Terraform module, Claude's context window holds React component rules, Python testing conventions, and API design standards that are irrelevant to the current task. Every irrelevant instruction consumes tokens and dilutes the instructions that actually matter.
+
+In Lesson 1, you learned that directory-level CLAUDE.md files scope instructions to specific packages. That works when conventions are location-specific: React rules in packages/web/, Python rules in packages/api/. But some conventions cut across directories. Test files live everywhere: packages/web/tests/, packages/api/tests/, packages/infra/tests/. Configuration files appear at every level. You would need a CLAUDE.md in every directory to cover them all.
+
+Path-specific rules solve this. A single rule file with a glob pattern like **/*.test.tsx applies to every test file in the repository, regardless of where it lives. The rule loads only when Claude reads a matching file, keeping the context clean when Claude works on something else.
+
+Anatomy of a Path-Scoped Rule​
+
+A path-scoped rule is a markdown file in .claude/rules/ with YAML frontmatter containing a paths field. The paths field holds an array of glob patterns. When Claude reads a file matching any pattern, the rule loads into context.
+
+---
+paths:
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.spec.ts"
+---
+
+# Test Conventions
+
+- Use `describe` blocks to group related tests
+- Each test must have a single, clear assertion
+- Use `beforeEach` for shared setup, never duplicate across tests
+- Mock external services; never make real HTTP calls in unit tests
+- Name test files to match source: `UserService.ts` -> `UserService.test.ts`
+
+
+What happens: when Claude reads or edits a file like src/services/UserService.test.ts, this rule loads into context. When Claude works on src/services/UserService.ts (no .test. in the name), this rule stays out of context.
+
+Rules without a paths field load unconditionally at session start, exactly like project-level CLAUDE.md instructions:
+
+# Code Style (no frontmatter = always loaded)
+
+- Use 2-space indentation
+- Maximum line length: 100 characters
+- Trailing commas in multiline structures
+
+Glob Pattern Syntax​
+
+Glob patterns are simpler than regular expressions. You need three constructs for nearly every pattern:
+
+Construct	Meaning	Example
+*	Matches any characters within a single filename	*.ts matches app.ts, index.ts
+**	Matches any number of directories (recursive)	**/utils/ matches src/utils/, lib/core/utils/
+{}	Matches any of the comma-separated alternatives	*.{ts,tsx} matches app.ts, Button.tsx
+Common Pattern Library​
+
+Here are the patterns you will use most often:
+
+Pattern	What It Matches
+**/*.ts	All TypeScript files in any directory
+**/*.test.tsx	All React test files in any directory
+src/**/*	All files under the src/ directory
+src/api/**/*.ts	TypeScript files in the API subtree
+*.md	Markdown files in the project root only
+**/*.md	Markdown files in any directory
+src/components/*.tsx	React components in one specific directory (not nested)
+**/*.{ts,tsx}	All TypeScript and TSX files everywhere
+**/migrations/**/*	All files inside any migrations/ directory
+**/{Dockerfile,docker-compose*.yml}	Docker config files anywhere
+Pattern Gotchas​
+
+*.ts vs **/_.ts: The single _does not cross directory boundaries._.tsmatchesapp.tsin the project root.\*\*/_.ts matches TypeScript files in every directory. This is the most common mistake.
+
+Leading paths matter: src/**/* matches files under src/ but not lib/src/. If you want to match a directory name regardless of where it appears, use **/src/**/*.
+
+Multiple patterns combine with OR logic: when you list multiple patterns in the paths array, a file matching any of them triggers the rule.
+
+Building Four Rule Files​
+
+This is your lesson deliverable. You will create four path-scoped rule files, each targeting a different concern that cuts across directories.
+
+Rule 1: Test Conventions​
+
+Tests live in every package. One rule covers them all.
+
+Create .claude/rules/testing.md:
+
+---
+paths:
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.spec.ts"
+  - "**/*.spec.tsx"
+---
+
+# Testing Conventions
+
+- Group related tests with `describe` blocks
+- One assertion per test for clear failure messages
+- Use `beforeEach` for shared setup
+- Mock external HTTP calls; never hit real endpoints in unit tests
+- Colocate test files next to source: `Button.tsx` -> `Button.test.tsx`
+- Name test descriptions as sentences: "should return 404 when user not found"
+
+Rule 2: API Endpoint Conventions​
+
+API routes follow different conventions than UI code. Scope them to the API directory.
+
+Create .claude/rules/api-conventions.md:
+
+---
+paths:
+  - "src/api/**/*"
+  - "packages/api/**/*"
+---
+
+# API Development Rules
+
+- All endpoints must validate input with zod schemas
+- Use the standard error response format (RFC 7807 Problem Details)
+- Include OpenAPI documentation comments on every handler
+- Return appropriate HTTP status codes (201 for creation, 204 for deletion)
+- Log request IDs for traceability; never log request bodies
+
+Rule 3: React Component Conventions​
+
+UI components have their own patterns. Scope to component and page directories.
+
+Create .claude/rules/react-components.md:
+
+---
+paths:
+  - "**/*.tsx"
+  - "**/*.jsx"
+---
+
+# React Component Rules
+
+- Use functional components with hooks (no class components)
+- Props interfaces must be exported and named `{ComponentName}Props`
+- Use CSS Modules for styling; no inline styles except dynamic values
+- Components over 100 lines should be split into smaller components
+- Use `React.memo` only when profiling shows a performance issue
+
+Rule 4: Infrastructure Conventions​
+
+Terraform and Docker files need their own rules.
+
+Create .claude/rules/infrastructure.md:
+
+---
+paths:
+  - "**/*.tf"
+  - "**/*.tfvars"
+  - "**/Dockerfile"
+  - "**/docker-compose*.yml"
+---
+
+# Infrastructure Rules
+
+- All Terraform resources must have `Name` and `Environment` tags
+- Use Terraform modules for any resource group used more than once
+- Dockerfiles must pin base image versions (no `latest` tag)
+- Docker Compose services must include health checks
+- Never hardcode secrets; use environment variables or secret managers
+
+Verifying Conditional Loading​
+
+Creating the files is half the work. You need to verify they load correctly, and only when expected.
+
+Test 1: Confirm a Rule Loads for Matching Files​
+Start Claude Code in your project directory
+Ask Claude to read a test file: "Read src/services/UserService.test.ts"
+Run /memory
+Verify .claude/rules/testing.md appears in the loaded files list
+Test 2: Confirm a Rule Does NOT Load for Non-Matching Files​
+In the same session, run /memory before Claude reads any .tf files
+Verify .claude/rules/infrastructure.md does NOT appear
+Ask Claude to read a Terraform file: "Read packages/infra/main.tf"
+Run /memory again
+Now .claude/rules/infrastructure.md should appear
+Test 3: Verify Multiple Patterns​
+Ask Claude to read a .tsx component file
+Run /memory
+Both .claude/rules/react-components.md (matches **/*.tsx) and .claude/rules/testing.md (if the file also matches **/*.test.tsx) should load as appropriate
+
+This step-by-step verification builds confidence that your rules are scoped correctly. In a team setting, you would run these checks after any change to rule files.
+
+Path Rules vs Directory CLAUDE.md: When to Use Each​
+
+Both path-specific rules and directory-level CLAUDE.md files scope instructions. They solve different problems.
+
+Scenario	Use Path-Specific Rule	Use Directory CLAUDE.md
+Test conventions across all packages	**/*.test.{ts,tsx}	Requires a CLAUDE.md in every test directory
+React-only conventions in a monorepo	**/*.{tsx,jsx}	Only if all React code is in one directory
+Package-specific build commands	Not a good fit (build commands are location-specific)	packages/web/CLAUDE.md
+Database migration rules	**/migrations/**/*	Only if all migrations are in one directory
+Python conventions across the whole repo	**/*.py	Requires CLAUDE.md in every Python directory
+Infrastructure-specific naming for one package	Could work, but overly broad	packages/infra/CLAUDE.md
+
+The decision rule: if the convention follows a file type regardless of location, use a path-scoped rule. If the convention follows a directory (a specific package, module, or workspace), use a directory-level CLAUDE.md.
+
+Combining Both Approaches​
+
+The two approaches work together. A real project might have:
+
+my-project/
+├── .claude/
+│   ├── CLAUDE.md                    # Project overview, build commands
+│   └── rules/
+│       ├── code-style.md            # Always loaded (no paths)
+│       ├── testing.md               # Loads for test files
+│       ├── api-conventions.md       # Loads for API files
+│       └── react-components.md      # Loads for TSX/JSX files
+├── packages/
+│   ├── web/
+│   │   └── CLAUDE.md                # Web-specific build, deploy instructions
+│   ├── api/
+│   │   └── CLAUDE.md                # API-specific database, ORM instructions
+│   └── infra/
+│       └── CLAUDE.md                # Terraform state, provider instructions
+
+
+The project CLAUDE.md and code-style.md rule load at session start. The path-scoped rules load when Claude touches matching files. The directory CLAUDE.md files load when Claude works in that package. Every instruction enters context only when it is relevant.
+
+Token Efficiency​
+
+Why does conditional loading matter? CLAUDE.md content consumes tokens in the context window. Every token spent on irrelevant instructions is a token unavailable for your actual work. When context gets crowded with irrelevant rules, Claude may struggle to follow the instructions that matter for the current task.
+
+Path-scoped rules keep context lean. If you have 500 lines of rules across all your .claude/rules/ files but only 50 lines match the files Claude is currently editing, only those 50 lines enter context. The other 450 lines stay on disk until they are needed.
+
+EXAM CONNECTION
+
+Sample Question 6 directly tests when to use .claude/rules/ with glob patterns vs directory-level CLAUDE.md. The exam scenario describes test conventions that must apply across all directories in a monorepo. The correct answer is path-specific rules with a glob pattern like **/*.test.ts, because directory-level CLAUDE.md files would require a copy in every directory and create a maintenance burden. Remember: path rules for cross-cutting conventions by file type, directory CLAUDE.md for location-specific conventions.
+
+Sharing Rules Across Projects with Symlinks​
+
+If your team maintains multiple repositories with similar conventions, you can share rule files using symlinks. The .claude/rules/ directory supports symlinks; they are resolved and loaded normally.
+
+# Create a shared rules directory on your machine
+mkdir -p ~/shared-claude-rules
+
+# Create a shared security rule
+cat > ~/shared-claude-rules/security.md << 'EOF'
+# Security Standards (Shared)
+
+- Never commit secrets, API keys, or tokens
+- Validate all user input at system boundaries
+- Use parameterized queries for database access
+- Apply rate limiting to all public endpoints
+EOF
+
+# Symlink into each project
+ln -s ~/shared-claude-rules/security.md my-project-a/.claude/rules/security.md
+ln -s ~/shared-claude-rules/security.md my-project-b/.claude/rules/security.md
+
+
+Symlinked rules can include YAML frontmatter with paths, making shared rules path-scoped in every project they are linked into.
+
+Try With AI​
+
+Exercise 1: Pattern Matching Challenge (Predict + Verify)
+
+Create a .claude/rules/ file with this frontmatter:
+
+---
+paths:
+  - "src/**/*.{ts,tsx}"
+  - "lib/**/*.ts"
+---
+
+# TypeScript Rules
+
+- Use strict mode
+- No any types
+
+
+Start Claude Code and paste this prompt:
+
+I have a path-scoped rule that matches "src/**/*.{ts,tsx}" and "lib/**/*.ts".
+For each of these files, predict whether the rule will load:
+
+1. src/index.ts
+2. src/components/Button.tsx
+3. lib/utils/format.ts
+4. test/helpers.ts
+5. src/styles/main.css
+6. lib/core/types.tsx
+
+After predicting, read one file that should match and one that should
+not match, then run /memory to verify the rule loaded (or didn't).
+
+
+What you're learning: How to read glob patterns and predict which files they match. The key distinctions: src/**/*.{ts,tsx} matches .ts and .tsx in any subdirectory of src/, but not .css files. lib/**/*.ts matches .ts but not .tsx in lib/. Pattern 4 (test/helpers.ts) is the trickiest: it matches neither pattern because test/ is not src/ or lib/. This kind of pattern reading is exactly what the exam tests.
+
+Exercise 2: Design Rules for a Real Project (Analyze + Create)
+
+Start Claude Code and paste this prompt:
+
+I have a monorepo with this structure:
+
+my-app/
+├── apps/
+│   ├── web/          (React frontend)
+│   ├── mobile/       (React Native)
+│   └── admin/        (React admin panel)
+├── packages/
+│   ├── shared-ui/    (shared component library)
+│   ├── api-client/   (generated API types)
+│   └── config/       (shared ESLint, TSConfig)
+├── services/
+│   ├── auth/         (Go auth service)
+│   └── payments/     (Go payments service)
+└── terraform/
+    ├── staging/
+    └── production/
+
+Design four .claude/rules/ files with path patterns for:
+1. Test conventions (applies to all test files in JS/TS and Go)
+2. React component conventions (applies to all three React apps AND shared-ui)
+3. Go service conventions (applies to both Go services)
+4. Terraform conventions (applies to both staging and production)
+
+For each rule, show me the YAML frontmatter with paths and explain
+why you chose those specific patterns over directory-level CLAUDE.md files.
+
+
+Review Claude's answer. Check whether the glob patterns actually match the intended files and nothing else. Pay attention to whether Claude correctly uses ** for recursive matching vs * for single-level matching.
+
+What you're learning: The design skill of choosing glob patterns for a real monorepo. The hardest part is not the syntax; it is deciding the right level of specificity. A pattern like **/*.go matches all Go files but might catch generated files you want to exclude. A pattern like services/auth/**/*.go is precise but means adding a new service requires updating the rule. This tradeoff between coverage and precision is what you face in real projects.
+
+Exercise 3: Compare Approaches Side by Side (Evaluate + Decide)
+
+Start Claude Code and paste this prompt:
+
+I need to enforce these three conventions in my monorepo:
+
+Convention A: "All database queries must use parameterized statements"
+  - Applies to: Python files in services/api/ and services/worker/
+
+Convention B: "All test files must use the shared test fixtures from conftest.py"
+  - Applies to: test files in every package (15+ directories)
+
+Convention C: "The admin panel must never import from the payments module"
+  - Applies to: only files in apps/admin/
+
+For each convention, recommend whether I should use:
+(a) A path-specific rule in .claude/rules/
+(b) A directory-level CLAUDE.md
+
+Explain the tradeoff for each choice. Then create the files
+(whichever approach you recommend) with the correct content.
+
+
+After Claude creates the files, evaluate the recommendations. Convention A could go either way (few specific directories). Convention B clearly benefits from path rules (many directories). Convention C is location-specific, making directory CLAUDE.md the natural fit. Check whether Claude's reasoning matches yours.
+
+What you're learning: The decision framework for choosing between path rules and directory CLAUDE.md. There is no single correct answer for every case; the tradeoff depends on how many directories the convention spans, how often those directories change, and whether the convention follows file types or locations. Developing this judgment is more valuable than memorizing syntax.
+
+Flashcards Study Aid​
+Loading flashcards...

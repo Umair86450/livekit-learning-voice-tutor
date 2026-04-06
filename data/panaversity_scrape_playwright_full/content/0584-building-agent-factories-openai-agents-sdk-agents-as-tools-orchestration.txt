@@ -1,0 +1,585 @@
+Agents as Tools and Multi-Agent Orchestration
+
+Your single-agent solutions work well for focused tasks, but real-world problems rarely fit into one agent's scope. A customer inquiry might need product information, billing details, and technical support---three different knowledge domains. A content pipeline might need research, writing, and editing---three different skill sets. How do you coordinate multiple specialized agents without losing control of the workflow?
+
+The SDK offers two patterns for multi-agent coordination. The first---handoffs---transfers complete control from one agent to another. You'll learn handoffs in detail in the next lesson. But handoffs have a limitation: once control transfers, the original agent is out of the picture.
+
+What if you need a manager who gathers information from multiple specialists, synthesizes their responses, and presents a unified answer? That's where agents as tools comes in---a pattern where the orchestrator stays in control while calling specialists as needed.
+
+This lesson teaches you to build orchestrated multi-agent systems. You'll convert agents into callable tools, extract structured outputs from sub-agents, and design manager patterns that coordinate complex workflows. By the end, you'll have built a research pipeline where a manager agent calls specialized researcher and writer agents to produce comprehensive reports.
+
+The Orchestrator Pattern: Manager Stays in Control​
+
+Consider a content manager who needs to:
+
+Ask a researcher to gather facts
+Ask a writer to draft content based on those facts
+Ask a reviewer to check quality
+Synthesize all feedback into a final piece
+
+The manager needs to stay in control, receiving outputs from each specialist and making decisions about what to do next. This is the orchestrator pattern---and it requires treating agents as tools rather than handoff destinations.
+
+Converting Agents to Tools with as_tool()​
+
+The SDK provides agent.as_tool() to convert any agent into a callable tool. The orchestrator can then invoke that agent like any other function:
+
+from agents import Agent, Runner
+
+# Specialist agent for research
+research_agent = Agent(
+    name="Researcher",
+    instructions="""You are a research specialist.
+    When given a topic, provide 3-5 key facts with sources.
+    Be concise and factual."""
+)
+
+# Specialist agent for writing
+writer_agent = Agent(
+    name="Writer",
+    instructions="""You are a content writer.
+    When given facts, transform them into engaging prose.
+    Use clear, accessible language."""
+)
+
+# Manager agent that orchestrates specialists
+manager = Agent(
+    name="Content Manager",
+    instructions="""You coordinate content creation.
+    For any content request:
+    1. Use do_research to gather facts on the topic
+    2. Use write_content to transform facts into prose
+    3. Present the final content to the user""",
+    tools=[
+        research_agent.as_tool(
+            tool_name="do_research",
+            tool_description="Research a topic and return key facts"
+        ),
+        writer_agent.as_tool(
+            tool_name="write_content",
+            tool_description="Transform facts into engaging content"
+        )
+    ]
+)
+
+# Run the orchestrated workflow
+result = Runner.run_sync(
+    manager,
+    "Create a brief overview of renewable energy trends in 2025"
+)
+print(result.final_output)
+
+
+Output:
+
+# Renewable Energy Trends in 2025
+
+The renewable energy landscape is transforming rapidly. Solar power costs
+have dropped 89% since 2010, making it the cheapest electricity source in
+history. Wind energy now provides 10% of global electricity, up from 4%
+a decade ago.
+
+Battery storage capacity has tripled in the past three years, solving
+renewables' intermittency challenge. Major automakers have committed to
+100% electric vehicle production by 2030, driving additional grid demand.
+
+Investment in clean energy reached $1.7 trillion in 2024, surpassing
+fossil fuel investment for the first time. This trend is expected to
+accelerate as countries pursue net-zero commitments.
+
+
+The manager agent called do_research first, received facts from the researcher, then called write_content with those facts, and finally presented the writer's output. Throughout this process, the manager stayed in control, deciding when to call each specialist.
+
+Understanding as_tool() Parameters​
+
+The as_tool() method accepts several parameters that control how the agent appears to the orchestrator:
+
+research_tool = research_agent.as_tool(
+    tool_name="do_research",           # How the orchestrator calls this tool
+    tool_description="Research a topic and return key facts",  # Helps orchestrator decide when to use it
+    custom_output_extractor=None       # Transform the agent's output (covered next)
+)
+
+print(f"Tool name: {research_tool.name}")
+print(f"Description: {research_tool.description[:50]}...")
+
+
+Output:
+
+Tool name: do_research
+Description: Research a topic and return key facts...
+
+Parameter	Purpose	Default
+tool_name	Identifier for the tool in orchestrator's toolkit	Agent's name
+tool_description	Explains when and how to use this tool	Agent's instructions (truncated)
+custom_output_extractor	Function to transform agent output	Returns final_output as-is
+
+Good tool names are action-oriented: do_research, write_content, review_quality. They tell the orchestrator what the tool does, not what it is.
+
+Good descriptions are specific: "Research a topic and return 3-5 key facts with sources" rather than "Does research." The orchestrator uses this description to decide when to invoke the tool.
+
+Custom Output Extractors for Structured Data​
+
+Sub-agents return natural language by default, but orchestrators often need structured data. A custom_output_extractor transforms the agent's output into a format the orchestrator can use programmatically:
+
+from pydantic import BaseModel
+from typing import List
+
+class ResearchFindings(BaseModel):
+    topic: str
+    facts: List[str]
+    sources: List[str]
+    confidence: float
+
+# Research agent with structured output
+research_agent = Agent(
+    name="Researcher",
+    instructions="""You are a research specialist.
+    When given a topic, provide key facts with sources.
+    Always include a confidence score (0-1) for your findings.""",
+    output_type=ResearchFindings  # Structured output from this agent
+)
+
+def extract_research(result):
+    """Extract structured findings from research agent."""
+    # result.final_output is already a ResearchFindings object
+    # because we set output_type on the agent
+    findings = result.final_output
+    return f"TOPIC: {findings.topic}\nFACTS: {'; '.join(findings.facts)}\nCONFIDENCE: {findings.confidence}"
+
+manager = Agent(
+    name="Content Manager",
+    instructions="""You coordinate content creation.
+    The research tool returns structured findings with topic, facts, and confidence.
+    Only proceed to writing if confidence > 0.7.""",
+    tools=[
+        research_agent.as_tool(
+            tool_name="do_research",
+            tool_description="Research a topic. Returns structured findings with confidence score.",
+            custom_output_extractor=extract_research
+        ),
+        writer_agent.as_tool(
+            tool_name="write_content",
+            tool_description="Transform research into prose"
+        )
+    ]
+)
+
+
+The output extractor receives the complete RunResult from the sub-agent, giving you access to:
+
+def detailed_extractor(result):
+    """Access full result details."""
+    output = result.final_output     # Agent's response
+    agent = result.last_agent        # Which agent produced this
+    items = result.new_items         # All messages generated
+
+    # Transform as needed for orchestrator
+    return f"[{agent.name}] {output}"
+
+# Example of what the extractor receives and returns
+# (When used, it transforms: "Here are the facts..." -> "[Researcher] Here are the facts...")
+
+
+Output:
+
+[Researcher] Here are 5 key facts about renewable energy: 1. Solar costs dropped 89%...
+
+The Orchestrator Pattern in Depth​
+
+The orchestrator pattern has three components:
+
+Specialist agents: Focused experts with narrow responsibilities
+Manager agent: Coordinates specialists, makes decisions, synthesizes results
+Tool bindings: Connect specialists to manager via as_tool()
+
+Let's build a complete content pipeline with three specialists:
+
+from agents import Agent, Runner, function_tool
+from pydantic import BaseModel
+from typing import List
+
+# Pydantic models for structured communication
+class ResearchOutput(BaseModel):
+    topic: str
+    facts: List[str]
+    gaps: List[str]  # What we couldn't find
+
+class ContentDraft(BaseModel):
+    title: str
+    body: str
+    word_count: int
+
+class ReviewFeedback(BaseModel):
+    approved: bool
+    issues: List[str]
+    suggestions: List[str]
+
+# Specialist 1: Researcher
+researcher = Agent(
+    name="Researcher",
+    instructions="""You research topics thoroughly.
+    Return structured findings including facts discovered
+    and gaps in available information.
+    Be honest about uncertainty.""",
+    output_type=ResearchOutput
+)
+
+# Specialist 2: Writer
+writer = Agent(
+    name="Writer",
+    instructions="""You write engaging content from research.
+    Return structured drafts with title, body, and word count.
+    Aim for clarity and flow.""",
+    output_type=ContentDraft
+)
+
+# Specialist 3: Reviewer
+reviewer = Agent(
+    name="Reviewer",
+    instructions="""You review content for accuracy and quality.
+    Return structured feedback: approved/rejected, issues found,
+    and suggestions for improvement.""",
+    output_type=ReviewFeedback
+)
+
+# Output extractors for each specialist
+def extract_research(result):
+    r = result.final_output
+    return f"FACTS:\n" + "\n".join(f"- {f}" for f in r.facts) + \
+           f"\n\nGAPS: {', '.join(r.gaps) if r.gaps else 'None'}"
+
+def extract_draft(result):
+    d = result.final_output
+    return f"TITLE: {d.title}\n\nCONTENT ({d.word_count} words):\n{d.body}"
+
+def extract_review(result):
+    r = result.final_output
+    status = "APPROVED" if r.approved else "NEEDS REVISION"
+    return f"STATUS: {status}\nISSUES: {', '.join(r.issues) if r.issues else 'None'}\n" + \
+           f"SUGGESTIONS: {', '.join(r.suggestions) if r.suggestions else 'None'}"
+
+# Manager that orchestrates the pipeline
+content_manager = Agent(
+    name="Content Pipeline Manager",
+    instructions="""You manage a content creation pipeline.
+
+    For each content request:
+    1. Call research_topic to gather facts
+    2. If research has gaps, acknowledge them in final content
+    3. Call create_draft to write content from facts
+    4. Call review_draft to check quality
+    5. If not approved, summarize issues for the user
+    6. If approved, present the final content
+
+    Always explain your decisions at each step.""",
+    tools=[
+        researcher.as_tool(
+            tool_name="research_topic",
+            tool_description="Research a topic. Returns facts and information gaps.",
+            custom_output_extractor=extract_research
+        ),
+        writer.as_tool(
+            tool_name="create_draft",
+            tool_description="Write content from research facts. Returns titled draft with word count.",
+            custom_output_extractor=extract_draft
+        ),
+        reviewer.as_tool(
+            tool_name="review_draft",
+            tool_description="Review content quality. Returns approval status and feedback.",
+            custom_output_extractor=extract_review
+        )
+    ]
+)
+
+# Execute the pipeline
+result = Runner.run_sync(
+    content_manager,
+    "Create a 200-word overview of quantum computing applications"
+)
+print(result.final_output)
+
+
+Output:
+
+I've completed the content pipeline for your quantum computing overview.
+
+**Research Phase**: I gathered facts on quantum computing applications including
+cryptography, drug discovery, financial modeling, and climate simulation.
+No significant gaps were found.
+
+**Writing Phase**: Created a draft titled "Quantum Computing: Transforming
+Industries" at 215 words.
+
+**Review Phase**: The content was APPROVED with one suggestion to add a
+specific company example, which I've incorporated.
+
+---
+
+# Quantum Computing: Transforming Industries
+
+Quantum computing is revolutionizing how we solve complex problems...
+[Full content would appear here]
+
+---
+
+The content is ready for use. Would you like me to adjust the length or focus
+on any specific application area?
+
+
+The manager maintained control throughout, making decisions based on each specialist's output. This is the core value of the orchestrator pattern: centralized decision-making with distributed expertise.
+
+Dynamic Agent Composition with clone()​
+
+Sometimes you need agent variants---the same specialist configured differently for different contexts. The clone() method creates a copy with selective modifications:
+
+# Base researcher agent
+base_researcher = Agent(
+    name="Researcher",
+    instructions="You research topics and return key findings."
+)
+
+# Variant for academic research (adds citation tool)
+@function_tool
+def search_academic_papers(query: str) -> str:
+    """Search academic databases for papers."""
+    return f"Found 5 papers on: {query}..."
+
+academic_researcher = base_researcher.clone(
+    tools=[search_academic_papers],
+    instructions=base_researcher.instructions + "\nAlways cite academic sources."
+)
+
+# Variant for news research (adds news API tool)
+@function_tool
+def search_news(query: str, days: int = 7) -> str:
+    """Search recent news articles."""
+    return f"Found 10 articles from past {days} days on: {query}..."
+
+news_researcher = base_researcher.clone(
+    tools=[search_news],
+    instructions=base_researcher.instructions + "\nFocus on recent developments."
+)
+
+# Verify the clones have different configurations
+print(f"Academic tools: {[t.name for t in academic_researcher.tools]}")
+print(f"News tools: {[t.name for t in news_researcher.tools]}")
+
+
+Output:
+
+Academic tools: ['search_academic_papers']
+News tools: ['search_news']
+
+# Manager can use different researchers for different needs
+content_manager = Agent(
+    name="Content Manager",
+    instructions="""You create content using appropriate research.
+    Use academic_research for technical topics.
+    Use news_research for current events.""",
+    tools=[
+        academic_researcher.as_tool(
+            tool_name="academic_research",
+            tool_description="Research using academic papers and citations"
+        ),
+        news_researcher.as_tool(
+            tool_name="news_research",
+            tool_description="Research recent news and developments"
+        ),
+        writer_agent.as_tool(
+            tool_name="write_content",
+            tool_description="Transform research into prose"
+        )
+    ]
+)
+
+
+The clone() method accepts any Agent parameter:
+
+variant = base_agent.clone(
+    name="Variant Name",           # New name
+    instructions="New instructions",  # Replace instructions
+    tools=[new_tool],              # Replace tools
+    model="gpt-4o-mini",           # Different model
+    output_type=NewOutputType      # Different output structure
+)
+
+print(f"Original: {base_agent.name}, Model: {base_agent.model}")
+print(f"Variant: {variant.name}, Model: {variant.model}")
+
+
+Output:
+
+Original: Researcher, Model: gpt-4o
+Variant: Variant Name, Model: gpt-4o-mini
+
+
+Use clone() when you need:
+
+Same agent logic with different tools for different contexts
+Model variants (fast vs accurate) of the same specialist
+Instruction variations for different user types
+When to Use Agents as Tools​
+
+You've now mastered the orchestrator pattern. But when is it the right choice? The key question is: does the manager need to stay in control?
+
+Use agents as tools when:
+
+You need to combine outputs from multiple specialists
+The orchestrator must make decisions based on intermediate results
+You want a single, synthesized response
+The workflow has predictable stages (research → write → review)
+
+Examples: Research pipelines, content creation, data analysis, report generation.
+
+In the next lesson, you'll learn handoffs---a different pattern where one agent transfers complete control to another. Handoffs work better when specialists need to own the entire conversation (like routing a billing question to a billing expert). After learning both patterns, you'll be able to choose the right approach for any multi-agent scenario.
+
+Progressive Project: Support Desk Assistant​
+
+Let's add specialist sub-agents to our Support Desk. Instead of handling everything in one agent, we'll delegate research and response drafting to specialists.
+
+Adding Specialist Sub-Agents​
+
+Now it's your turn to add sub-agents to your Support Desk. Using the patterns from this lesson, create specialists that your main agent can delegate to.
+
+Step 1: Design your specialists
+
+Think about what specialized roles would help your support desk:
+
+Knowledge Researcher: Finds technical solutions and troubleshooting steps
+Response Writer: Crafts professional, empathetic customer responses
+Escalation Analyst: Determines priority and routing for complex cases
+
+Step 2: Create the Knowledge Researcher agent
+
+Using the Orchestrator Pattern section as reference:
+
+knowledge_researcher = Agent(
+    name="KnowledgeResearcher",
+    instructions="..."  # Define what this specialist does
+)
+
+
+Write instructions that tell it to:
+
+Provide common causes of problems
+Give step-by-step troubleshooting guides
+Format responses as structured steps
+
+Step 3: Create the Response Writer agent
+
+This specialist takes technical information and writes customer-friendly responses:
+
+Acknowledge customer frustration
+Explain solutions in simple terms
+Offer next steps if the solution doesn't work
+
+Step 4: Create the Escalation Analyst agent
+
+This specialist analyzes requests to determine:
+
+Priority level (low, normal, high, urgent)
+Which team should handle it
+Whether immediate escalation is needed
+
+Step 5: Convert agents to tools
+
+Use the .as_tool() method you learned in Converting Agents to Tools:
+
+knowledge_researcher.as_tool(
+    tool_name="research_knowledge",
+    tool_description="Research technical solutions for product issues"
+)
+
+
+Do the same for your other specialists.
+
+Step 6: Update your main agent as orchestrator
+
+Modify your Support Desk agent to use these specialist tools:
+
+Add all three tools to the tools=[] list
+Update instructions to describe the workflow:
+Technical issues: research first, then draft response
+Complex cases: analyze escalation first
+Always review specialist output before responding
+
+Step 7: Test with a complex customer query
+
+Try an angry customer message that requires multiple specialists:
+
+"I've been trying to sync files for 3 days and nothing works!
+This is affecting my team's productivity. We pay premium for a reason!"
+
+
+Your orchestrator should delegate to research_knowledge, then draft_response.
+
+Success Criteria​
+
+Your Support Desk now:
+
+✅ Delegates research to a knowledge specialist
+✅ Uses a writer for professional responses
+✅ Analyzes complex cases for proper routing
+✅ Coordinates multiple specialists effectively
+What's Next​
+
+Your orchestrator coordinates specialists, but what if a case needs a completely different expert? In Lesson 4, you'll add handoffs that transfer full conversation control to billing, technical, or sales teams.
+
+Try With AI​
+
+Use your AI companion to explore orchestration patterns further.
+
+Prompt 1: Design an Orchestration Architecture​
+I want to build a multi-agent system for [your use case: code review,
+content moderation, data analysis, etc.] using the orchestrator pattern.
+Help me design the architecture:
+
+1. What specialists do I need?
+2. What structured outputs should each specialist return?
+3. How should the manager coordinate these specialists?
+4. What decision logic should the manager implement?
+
+Show me the Agent definitions with output_type models and as_tool
+configurations.
+
+
+What you're learning: System design for multi-agent architectures. You're developing the skill to decompose complex problems into specialist agents and design the coordination logic that binds them together.
+
+Prompt 2: Debug Orchestration Issues​
+My orchestrator isn't calling specialists in the right order. Here's
+my manager agent:
+
+[paste your manager agent code]
+
+The manager is calling write_content before research completes.
+Help me:
+1. Diagnose why the ordering is wrong
+2. Fix the instructions to enforce sequencing
+3. Add validation to ensure research runs first
+
+
+What you're learning: Debugging agent coordination problems. You're understanding how instructions and tool descriptions influence agent behavior, and how to constrain multi-step workflows.
+
+Prompt 3: Optimize Sub-Agent Communication​
+My orchestrator works but the output extractors are messy. Here's my
+current extractor:
+
+[paste your custom_output_extractor code]
+
+Help me:
+1. Make the extracted data more useful for the manager
+2. Add error handling for missing fields
+3. Create a consistent format across all extractors
+
+
+What you're learning: Data transformation between agents. Clean inter-agent communication is essential for reliable orchestration, and you're developing patterns for structured information flow.
+
+Safety Note​
+
+Multi-agent systems multiply both capability and risk. Each agent you add is another point where things can go wrong. Always:
+
+Test each specialist independently before orchestration
+Implement timeouts for sub-agent calls (agents can loop indefinitely)
+Log all inter-agent communication for debugging
+Start with 2-3 agents and add complexity gradually
+Consider cost: each sub-agent call uses tokens and API calls

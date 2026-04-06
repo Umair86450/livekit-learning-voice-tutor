@@ -1,0 +1,576 @@
+OpenAI Realtime Fundamentals
+
+In Chapters 80 and 81, you built voice agents with LiveKit and Pipecat. Those frameworks handled WebRTC negotiation, audio encoding, and connection management. You focused on application logic.
+
+Now you go beneath the abstraction. This lesson teaches you to connect directly to OpenAI's Realtime API—the same native speech-to-speech model that powers their voice features, but with full protocol control.
+
+By the end, you will have a working voice interaction without any framework—just your code, WebRTC, and the API.
+
+Native Speech-to-Speech: A Different Model​
+
+Traditional voice agents use a cascaded pipeline:
+
+User Speaks → STT (Deepgram) → Text → LLM (GPT-4) → Text → TTS (Cartesia) → Agent Speaks
+                 ~90ms              ~200ms              ~50ms
+
+Total: ~340ms minimum latency
+
+
+Each step adds latency. Each boundary loses information. The LLM never "hears" your voice—it reads a transcription.
+
+The OpenAI Realtime API uses native speech-to-speech:
+
+User Speaks → gpt-realtime → Agent Speaks
+                ~200-300ms
+
+Total: 200-300ms end-to-end
+
+
+The model processes audio directly. No intermediate transcription. The model "hears" intonation, pacing, emphasis—and generates speech with the same richness.
+
+What Native Speech-to-Speech Changes​
+Aspect	Cascaded Pipeline	Native Speech-to-Speech
+Latency	300-500ms typical	200-300ms
+Emotional cues	Lost in transcription	Preserved in audio
+Disfluencies	"Um" transcribed literally	Model understands hesitation
+Pronunciation	TTS must guess names	Model learns from audio context
+Cost	Pay 3 services	Pay 1 service (but higher rate)
+When Each Approach Wins​
+
+Native speech-to-speech wins when:
+
+Latency is critical (real-time customer service)
+Emotional context matters (therapy bots, coaching)
+You want unified voice personality
+You are building with OpenAI anyway
+
+Cascaded pipeline wins when:
+
+You need provider flexibility (swap any component)
+You want cost optimization at scale
+You need specialized STT (medical terms, legal jargon)
+You want local processing (privacy, latency control)
+The Realtime API Protocol​
+
+The OpenAI Realtime API uses WebRTC for low-latency bidirectional audio. Here is how it works:
+
+Connection Flow​
+┌─────────────┐                          ┌─────────────────────┐
+│   Client    │                          │  OpenAI Realtime    │
+│ (Your Code) │                          │       Server        │
+└──────┬──────┘                          └──────────┬──────────┘
+       │                                            │
+       │  1. Create ephemeral token                 │
+       │  ─────────────────────────────────────────>│
+       │                                            │
+       │  2. Token returned                         │
+       │  <─────────────────────────────────────────│
+       │                                            │
+       │  3. Create RTCPeerConnection               │
+       │  ─────────────────────────────────────────>│
+       │                                            │
+       │  4. Add audio track (microphone)           │
+       │  ─────────────────────────────────────────>│
+       │                                            │
+       │  5. Create DataChannel for events          │
+       │  ─────────────────────────────────────────>│
+       │                                            │
+       │  6. Exchange SDP offer/answer              │
+       │  <────────────────────────────────────────>│
+       │                                            │
+       │  7. Exchange ICE candidates                │
+       │  <────────────────────────────────────────>│
+       │                                            │
+       │  8. Connection established                 │
+       │  ═══════════════════════════════════════   │
+       │                                            │
+       │  9. Audio flows bidirectionally            │
+       │  <════════════════════════════════════════>│
+       │                                            │
+       │  10. Events via DataChannel                │
+       │  <════════════════════════════════════════>│
+       │                                            │
+
+Key Components​
+Component	Purpose
+Ephemeral Token	Short-lived credential for WebRTC connection
+RTCPeerConnection	WebRTC connection object managing media
+Audio Track	Your microphone audio sent to the model
+DataChannel	JSON events (session config, function calls, responses)
+SDP	Session Description Protocol—describes media capabilities
+ICE	Interactive Connectivity Establishment—finds network path
+Audio Format Requirements​
+
+The Realtime API has strict audio requirements:
+
+Parameter	Requirement
+Sample Rate	24,000 Hz (24kHz)
+Bit Depth	16-bit signed integer (PCM16)
+Channels	Mono (1 channel)
+Endianness	Little-endian
+Why These Specifications?​
+
+24kHz balances quality and bandwidth. Human speech intelligibility peaks around 4kHz; 24kHz provides headroom for clarity without the overhead of 48kHz.
+
+PCM16 is uncompressed audio—no codec artifacts, predictable processing. The model works with raw samples.
+
+Mono simplifies processing. Stereo adds bandwidth without benefit for voice.
+
+Handling Audio Conversion​
+
+If your audio source uses different specifications, convert before sending:
+
+import numpy as np
+
+def convert_to_realtime_format(
+    audio: np.ndarray,
+    source_rate: int,
+    source_channels: int
+) -> bytes:
+    """Convert audio to OpenAI Realtime API format."""
+
+    # Convert to mono if stereo
+    if source_channels == 2:
+        audio = audio.mean(axis=1)
+
+    # Resample to 24kHz
+    if source_rate != 24000:
+        # Simple linear resampling (use scipy.signal.resample for production)
+        ratio = 24000 / source_rate
+        new_length = int(len(audio) * ratio)
+        audio = np.interp(
+            np.linspace(0, len(audio), new_length),
+            np.arange(len(audio)),
+            audio
+        )
+
+    # Convert to 16-bit PCM
+    audio_int16 = (audio * 32767).astype(np.int16)
+
+    # Return as little-endian bytes
+    return audio_int16.tobytes()
+
+Session Configuration​
+
+Before sending audio, configure the session with your preferences:
+
+Session Update Event​
+session_config = {
+    "type": "session.update",
+    "session": {
+        # Voice selection
+        "voice": "alloy",  # Options: alloy, echo, shimmer, etc.
+
+        # Instructions for the model
+        "instructions": """
+        You are a helpful voice assistant. Keep responses concise
+        since users are listening, not reading. Confirm actions taken.
+        """,
+
+        # Turn detection settings
+        "turn_detection": {
+            "type": "server_vad",  # Let server detect speech end
+            "threshold": 0.5,     # VAD sensitivity (0.0-1.0)
+            "prefix_padding_ms": 300,   # Audio before speech start
+            "silence_duration_ms": 500  # Silence before turn end
+        },
+
+        # Input/output audio format
+        "input_audio_format": "pcm16",
+        "output_audio_format": "pcm16",
+
+        # Modalities
+        "modalities": ["text", "audio"],
+
+        # Temperature for response generation
+        "temperature": 0.8
+    }
+}
+
+Configuration Options​
+Option	Values	Purpose
+voice	alloy, echo, shimmer, ash, ballad, coral, sage, verse	Voice personality
+turn_detection.type	server_vad, none	Who detects turn end
+turn_detection.threshold	0.0-1.0	VAD sensitivity
+silence_duration_ms	200-2000	Silence before turn ends
+modalities	["text"], ["audio"], ["text", "audio"]	Output types
+temperature	0.6-1.2	Response creativity
+Voice Selection​
+
+Each voice has distinct characteristics:
+
+Voice	Character	Best For
+alloy	Neutral, balanced	General purpose
+echo	Warm, conversational	Customer service
+shimmer	Clear, professional	Business applications
+ash	Calm, thoughtful	Educational content
+ballad	Expressive, dynamic	Creative applications
+coral	Friendly, approachable	Consumer apps
+sage	Authoritative, clear	Information delivery
+verse	Versatile, natural	General purpose
+Complete Connection Implementation​
+
+Here is a complete implementation connecting to the Realtime API:
+
+import asyncio
+import json
+import os
+import base64
+from openai import OpenAI
+
+# For WebRTC (using aiortc library)
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRecorder, MediaPlayer
+
+class RealtimeConnection:
+    """Direct connection to OpenAI Realtime API."""
+
+    def __init__(self):
+        self.client = OpenAI()
+        self.pc: RTCPeerConnection | None = None
+        self.data_channel = None
+
+    async def connect(
+        self,
+        voice: str = "alloy",
+        instructions: str = "You are a helpful voice assistant."
+    ):
+        """Establish WebRTC connection to Realtime API."""
+
+        # Step 1: Create ephemeral token
+        # (In production, do this server-side)
+        token_response = self.client.realtime.sessions.create(
+            model="gpt-4o-realtime-preview-2025-06-03",
+            voice=voice
+        )
+        ephemeral_token = token_response.client_secret.value
+
+        print(f"[realtime] Ephemeral token obtained")
+
+        # Step 2: Create RTCPeerConnection
+        self.pc = RTCPeerConnection()
+
+        # Step 3: Add audio track (microphone input)
+        # Using aiortc's MediaPlayer for microphone access
+        player = MediaPlayer(
+            "default",
+            format="pulse",  # Linux: pulse, macOS: avfoundation, Windows: dshow
+            options={"sample_rate": "24000", "channels": "1"}
+        )
+        audio_track = player.audio
+        self.pc.addTrack(audio_track)
+
+        # Step 4: Create DataChannel for events
+        self.data_channel = self.pc.createDataChannel("oai-events")
+
+        @self.data_channel.on("open")
+        def on_open():
+            print("[realtime] DataChannel opened")
+            # Send session configuration
+            self._send_session_config(instructions)
+
+        @self.data_channel.on("message")
+        def on_message(message):
+            self._handle_event(json.loads(message))
+
+        # Step 5: Handle incoming audio
+        @self.pc.on("track")
+        def on_track(track):
+            print(f"[realtime] Received track: {track.kind}")
+            if track.kind == "audio":
+                # Record or play the audio
+                asyncio.create_task(self._handle_audio_track(track))
+
+        # Step 6: Create and send offer
+        offer = await self.pc.createOffer()
+        await self.pc.setLocalDescription(offer)
+
+        # Step 7: Send offer to OpenAI and get answer
+        # This uses a REST endpoint, not WebSocket
+        answer = await self._exchange_sdp(
+            ephemeral_token,
+            self.pc.localDescription.sdp
+        )
+
+        await self.pc.setRemoteDescription(
+            RTCSessionDescription(sdp=answer, type="answer")
+        )
+
+        print("[realtime] Connection established")
+
+    def _send_session_config(self, instructions: str):
+        """Send session configuration via DataChannel."""
+        config = {
+            "type": "session.update",
+            "session": {
+                "instructions": instructions,
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 500
+                },
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16"
+            }
+        }
+        self.data_channel.send(json.dumps(config))
+        print("[realtime] Session config sent")
+
+    def _handle_event(self, event: dict):
+        """Handle events from the Realtime API."""
+        event_type = event.get("type", "unknown")
+
+        if event_type == "session.created":
+            print(f"[realtime] Session created: {event['session']['id']}")
+
+        elif event_type == "session.updated":
+            print("[realtime] Session updated")
+
+        elif event_type == "input_audio_buffer.speech_started":
+            print("[realtime] User started speaking")
+
+        elif event_type == "input_audio_buffer.speech_stopped":
+            print("[realtime] User stopped speaking")
+
+        elif event_type == "response.audio_transcript.delta":
+            # Model is speaking, show transcript
+            text = event.get("delta", "")
+            print(f"[agent] {text}", end="", flush=True)
+
+        elif event_type == "response.audio_transcript.done":
+            print()  # Newline after transcript
+
+        elif event_type == "response.done":
+            print("[realtime] Response complete")
+
+        elif event_type == "error":
+            print(f"[realtime] Error: {event.get('error', {})}")
+
+    async def _handle_audio_track(self, track):
+        """Process incoming audio from the model."""
+        # In a real implementation, you would:
+        # 1. Decode the audio frames
+        # 2. Play through speakers
+        # 3. Handle interruptions
+
+        while True:
+            try:
+                frame = await track.recv()
+                # Play audio frame through speakers
+                # (Implementation depends on your audio library)
+            except Exception as e:
+                print(f"[realtime] Audio track ended: {e}")
+                break
+
+    async def _exchange_sdp(self, token: str, offer_sdp: str) -> str:
+        """Exchange SDP with OpenAI's REST endpoint."""
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.openai.com/v1/realtime",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/sdp"
+                },
+                content=offer_sdp
+            )
+            response.raise_for_status()
+            return response.text
+
+    async def close(self):
+        """Close the connection gracefully."""
+        if self.pc:
+            await self.pc.close()
+        print("[realtime] Connection closed")
+
+
+async def main():
+    """Run a voice conversation."""
+    conn = RealtimeConnection()
+
+    try:
+        await conn.connect(
+            voice="alloy",
+            instructions="""
+            You are a voice assistant for Task Manager.
+            Help users check, create, and complete tasks.
+            Keep responses under 30 words.
+            """
+        )
+
+        print("\n[ready] Speak now. Press Ctrl+C to exit.\n")
+
+        # Keep connection alive
+        while True:
+            await asyncio.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n[exit] Shutting down...")
+    finally:
+        await conn.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+Output:
+
+[realtime] Ephemeral token obtained
+[realtime] DataChannel opened
+[realtime] Session config sent
+[realtime] Session created: sess_abc123
+[realtime] Session updated
+[realtime] Received track: audio
+
+[ready] Speak now. Press Ctrl+C to exit.
+
+[realtime] User started speaking
+[realtime] User stopped speaking
+[agent] You have 3 tasks due today: review proposal, send invoices, and team standup.
+[realtime] Response complete
+
+Event Types Reference​
+
+The Realtime API sends events through the DataChannel:
+
+Session Events​
+Event	Description
+session.created	Connection established, session ID assigned
+session.updated	Session configuration changed
+error	Something went wrong
+Audio Events​
+Event	Description
+input_audio_buffer.speech_started	VAD detected user speaking
+input_audio_buffer.speech_stopped	VAD detected user stopped
+input_audio_buffer.committed	Audio buffer sent for processing
+input_audio_buffer.cleared	Audio buffer discarded
+Response Events​
+Event	Description
+response.created	Model started generating response
+response.audio.delta	Chunk of audio response
+response.audio.done	Audio response complete
+response.audio_transcript.delta	Text of what model is saying
+response.audio_transcript.done	Transcript complete
+response.done	Full response complete
+Sending Events​
+
+You can also send events to control the session:
+
+# Commit audio buffer manually (when not using server VAD)
+{"type": "input_audio_buffer.commit"}
+
+# Clear audio buffer (cancel current input)
+{"type": "input_audio_buffer.clear"}
+
+# Create a response (useful for text input)
+{"type": "response.create"}
+
+# Cancel in-progress response
+{"type": "response.cancel"}
+
+Latency Analysis​
+
+Understanding where latency comes from helps you optimize:
+
+User finishes speaking
+    │
+    ├── Network to OpenAI: ~20-50ms
+    │
+    ├── VAD processing: ~10-20ms
+    │
+    ├── Model inference: ~100-150ms
+    │
+    ├── Audio generation: ~20-40ms
+    │
+    ├── Network from OpenAI: ~20-50ms
+    │
+    └── Local audio playback: ~10-20ms
+
+Total: ~180-330ms (typical 200-300ms)
+
+Optimization Opportunities​
+Technique	Latency Saved	Trade-off
+Lower VAD silence threshold	100-200ms	May cut off user mid-sentence
+Shorter instructions	10-30ms	Less context for model
+Simpler responses	20-50ms	Less detailed answers
+Edge location (enterprise)	20-50ms	Additional cost
+Comparison with Frameworks​
+
+Now that you have seen direct API access, consider the trade-offs:
+
+Aspect	Direct API	Framework (LiveKit/Pipecat)
+Setup complexity	High (WebRTC, audio handling)	Low (configure and run)
+Latency control	Maximum	Framework-limited
+Provider flexibility	OpenAI only	Multiple providers
+Debugging visibility	Full protocol access	Abstracted
+Production features	Build yourself	Included (scaling, monitoring)
+Code maintenance	You maintain	Community maintained
+
+Recommendation: Start with frameworks. Drop to direct API only when you hit a specific limitation.
+
+Try With AI​
+Prompt 1: Understand the Protocol​
+I'm learning OpenAI's Realtime API protocol. Help me understand:
+
+1. Why does WebRTC use SDP and ICE? What problems do they solve?
+2. What's the purpose of the DataChannel vs the audio track?
+3. If my connection drops for 3 seconds, what happens to the session?
+4. Why does OpenAI require 24kHz PCM16 specifically?
+
+Use diagrams to show the connection flow.
+
+
+What you are learning: Protocol fundamentals. Understanding WebRTC helps you debug connection issues and optimize for your network environment.
+
+Prompt 2: Debug Connection Issues​
+I implemented the Realtime API connection but I'm getting this error:
+
+"ICE connection failed: timeout"
+
+My setup:
+- Corporate network with firewall
+- Using aiortc for WebRTC
+- Works fine on home network
+
+Help me diagnose:
+1. What does ICE failure mean?
+2. What firewall ports does WebRTC need?
+3. How do I configure TURN servers for NAT traversal?
+4. Are there OpenAI-specific ICE considerations?
+
+
+What you are learning: Network debugging. Enterprise deployments often require TURN server configuration—a common production issue.
+
+Prompt 3: Compare with Framework​
+I built a voice agent two ways:
+
+1. Using LiveKit Agents (Chapter 110)
+2. Using direct OpenAI Realtime API (this lesson)
+
+Help me analyze:
+1. Where does each approach add latency?
+2. What features does LiveKit provide that I'd need to build myself?
+3. If I need to switch from OpenAI to Gemini, which is easier to change?
+4. For my Task Manager agent, which approach would you recommend and why?
+
+Consider: I need phone integration, want to minimize latency, and my team
+has 2 developers.
+
+
+What you are learning: Architectural decision-making. Knowing when to use abstractions versus direct APIs is a senior engineering skill.
+
+Safety Note​
+
+Direct API access means direct responsibility:
+
+No framework safety rails: Frameworks often include content filtering, rate limiting, and error recovery. With direct API, you implement these yourself.
+
+Cost visibility: The Realtime API is billed by token. Long conversations can accumulate cost quickly. Implement usage tracking.
+
+Audio persistence: Audio is processed by OpenAI. Understand your data handling obligations under GDPR, HIPAA, or other regulations.
+
+Interruption handling: Users expect to interrupt. Without proper implementation, your agent may ignore or mishandle interruptions.
+
+Start with test scenarios before exposing to real users. Monitor early conversations to catch issues before they scale.

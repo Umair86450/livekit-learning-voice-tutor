@@ -1,0 +1,585 @@
+Synthetic Data Generation
+
+High-quality training data is expensive to create manually. A human expert might produce 10-20 examples per hour. At that rate, a 500-example dataset takes 25-50 hours of work.
+
+Synthetic data generation flips this equation. Using GPT-4o-mini with the right prompts, you can generate 500 high-quality examples in under 30 minutes for less than $0.15.
+
+This lesson teaches you how—with a focus on quality, diversity, and cost control.
+
+Why Synthetic Data Works​
+
+Foundation models like GPT-4o-mini have seen billions of examples of instruction-following patterns. When you prompt them correctly, they can generate training examples that:
+
+Follow your format specifications (Alpaca, ShareGPT, ChatML)
+Cover diverse scenarios you specify
+Maintain consistency with your examples as templates
+Scale infinitely at marginal cost
+
+The key insight: GPT-4o-mini knows how to write training data because it was trained on similar patterns.
+
+The Cost Equation​
+
+Let's calculate the cost of generating 500 examples for Task API:
+
+Resource	Calculation	Cost
+Input tokens	~200 tokens/prompt x 500 = 100K tokens	~$0.015
+Output tokens	~150 tokens/response x 500 = 75K tokens	~$0.060
+Total	175K tokens	~$0.075
+
+With overhead for retries and validation passes, budget $0.15 for 500 examples.
+
+Compare this to:
+
+Manual creation: 25-50 hours x $50/hour = $1,250-2,500
+Crowdsourcing: $0.50-2.00 per example = $250-1,000
+
+Synthetic generation is 1000x cheaper than manual approaches.
+
+The Generation Pipeline​
+
+The pipeline has four stages:
+
+Seed Examples → Generation Prompt → Batch Generation → Quality Filter
+      │               │                    │                 │
+   10-20 high     Tell model what       Generate 500+    Remove low-
+   quality         pattern to          candidates       quality ones
+   examples        follow
+
+Stage 1: Seed Examples​
+
+Start with 10-20 human-written, high-quality examples. These establish the standard:
+
+SEED_EXAMPLES = [
+    {
+        "conversations": [
+            {"from": "human", "value": "Create a task to review the quarterly budget by Friday"},
+            {"from": "gpt", "value": "Created task: 'Review quarterly budget' | Priority: medium | Due: 2025-01-17 (Friday)"}
+        ]
+    },
+    {
+        "conversations": [
+            {"from": "human", "value": "Add a high priority task for the team meeting tomorrow"},
+            {"from": "gpt", "value": "Created task: 'Team meeting' | Priority: high | Due: 2025-01-16 (tomorrow)"}
+        ]
+    },
+    {
+        "conversations": [
+            {"from": "human", "value": "I need to remember to call mom on Sunday"},
+            {"from": "gpt", "value": "Created task: 'Call mom' | Priority: medium | Due: 2025-01-19 (Sunday)"}
+        ]
+    },
+    # ... 7-17 more examples covering different operations, priorities, error cases
+]
+
+
+Seed quality determines generation quality. Invest time here—these 10-20 examples shape all 500 generated examples.
+
+Stage 2: Generation Prompt​
+
+Design a prompt that teaches the model your pattern:
+
+GENERATION_PROMPT = """You are generating training examples for a Task API assistant.
+
+## Format
+Each example is a ShareGPT conversation between a human and an assistant.
+The assistant manages tasks: create, update, complete, delete, list.
+
+## Output Format
+The assistant response MUST follow this exact format:
+- For creates: "Created task: '[title]' | Priority: [low/medium/high] | Due: [date or 'not set']"
+- For updates: "Updated task: '[title]' | [field]: changed to [value]"
+- For completions: "Completed task: '[title]'"
+- For deletions: "Deleted task: '[title]'"
+- For errors: "Error: [clear error message]"
+
+## Examples
+{seed_examples}
+
+## Your Task
+Generate {count} NEW examples that:
+1. Cover different operations (create, update, complete, delete)
+2. Use varied phrasing (formal, casual, imperative, question-style)
+3. Include error cases (task not found, missing title, invalid date)
+4. Have different priorities and due dates
+5. Do NOT repeat the seed examples
+
+Return as JSON array of ShareGPT conversations.
+"""
+
+
+Key elements:
+
+Clear format specification (prevents inconsistency)
+Seed examples as demonstrations (few-shot learning)
+Diversity requirements (prevents repetition)
+Output format specification (enables parsing)
+Stage 3: Batch Generation​
+
+Generate in batches to manage API calls and enable parallelism:
+
+import openai
+from pydantic import BaseModel
+from typing import List
+import json
+
+class ShareGPTMessage(BaseModel):
+    from_: str  # "human" or "gpt"
+    value: str
+
+    class Config:
+        fields = {"from_": "from"}
+
+class ShareGPTExample(BaseModel):
+    conversations: List[ShareGPTMessage]
+
+class GeneratedBatch(BaseModel):
+    examples: List[ShareGPTExample]
+
+
+def generate_batch(
+    client: openai.OpenAI,
+    seed_examples: list,
+    count: int = 50
+) -> List[dict]:
+    """Generate a batch of synthetic examples."""
+
+    # Format seed examples for prompt
+    seed_text = json.dumps(seed_examples[:5], indent=2)  # Use 5 seeds
+
+    prompt = GENERATION_PROMPT.format(
+        seed_examples=seed_text,
+        count=count
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You generate training data in JSON format."},
+            {"role": "user", "content": prompt}
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.9,  # Higher for diversity
+        max_tokens=4000
+    )
+
+    # Parse response
+    result = json.loads(response.choices[0].message.content)
+
+    # Extract examples (handle different response structures)
+    if "examples" in result:
+        return result["examples"]
+    elif isinstance(result, list):
+        return result
+    else:
+        return []
+
+
+def generate_dataset(
+    client: openai.OpenAI,
+    seed_examples: list,
+    target_count: int = 500,
+    batch_size: int = 50
+) -> List[dict]:
+    """Generate full dataset in batches."""
+    all_examples = []
+    batches_needed = (target_count // batch_size) + 1
+
+    for i in range(batches_needed):
+        print(f"Generating batch {i+1}/{batches_needed}...")
+
+        batch = generate_batch(client, seed_examples, batch_size)
+        all_examples.extend(batch)
+
+        # Stop if we have enough
+        if len(all_examples) >= target_count:
+            break
+
+    return all_examples[:target_count]
+
+
+Output:
+
+Generating batch 1/10...
+Generating batch 2/10...
+...
+Generating batch 10/10...
+Generated 500 examples.
+
+Stage 4: Quality Filter​
+
+Not all generated examples are good. Filter before training:
+
+def validate_example(example: dict) -> tuple[bool, str]:
+    """Validate a single example. Returns (is_valid, reason)."""
+
+    # Check structure
+    if "conversations" not in example:
+        return False, "Missing conversations key"
+
+    convs = example["conversations"]
+
+    # Check alternation
+    for i, msg in enumerate(convs):
+        expected_role = "human" if i % 2 == 0 else "gpt"
+        actual_role = msg.get("from", "")
+        if actual_role != expected_role:
+            return False, f"Turn {i} should be {expected_role}, got {actual_role}"
+
+    # Check non-empty
+    for msg in convs:
+        if not msg.get("value", "").strip():
+            return False, "Empty message content"
+
+    # Check format compliance (for gpt responses)
+    for msg in convs:
+        if msg.get("from") == "gpt":
+            response = msg["value"]
+            # Must contain one of our action patterns
+            patterns = ["Created task:", "Updated task:", "Completed task:",
+                       "Deleted task:", "Error:", "tasks found"]
+            if not any(p in response for p in patterns):
+                return False, f"Response doesn't follow format: {response[:50]}..."
+
+    return True, "Valid"
+
+
+def filter_dataset(examples: List[dict]) -> List[dict]:
+    """Filter out invalid examples."""
+    valid = []
+    invalid_reasons = {}
+
+    for ex in examples:
+        is_valid, reason = validate_example(ex)
+        if is_valid:
+            valid.append(ex)
+        else:
+            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
+
+    print(f"Valid: {len(valid)}/{len(examples)}")
+    print(f"Invalid reasons: {invalid_reasons}")
+
+    return valid
+
+
+Output:
+
+Valid: 487/500
+Invalid reasons: {'Response doesn\'t follow format': 8, 'Turn 1 should be gpt, got human': 5}
+
+Improving Diversity​
+
+Generated examples tend toward repetition. Combat this with:
+
+Strategy 1: Rotate Seed Examples​
+
+Don't use the same seeds every batch:
+
+def generate_with_rotation(
+    client: openai.OpenAI,
+    all_seeds: list,
+    target_count: int = 500,
+    seeds_per_batch: int = 5
+) -> List[dict]:
+    """Generate with rotating seed examples for diversity."""
+    all_examples = []
+    batch_num = 0
+
+    while len(all_examples) < target_count:
+        # Rotate which seeds we use
+        start_idx = (batch_num * seeds_per_batch) % len(all_seeds)
+        batch_seeds = all_seeds[start_idx:start_idx + seeds_per_batch]
+
+        # Wrap around if needed
+        if len(batch_seeds) < seeds_per_batch:
+            batch_seeds += all_seeds[:seeds_per_batch - len(batch_seeds)]
+
+        batch = generate_batch(client, batch_seeds, 50)
+        all_examples.extend(batch)
+        batch_num += 1
+
+    return all_examples[:target_count]
+
+Strategy 2: Explicit Diversity Requirements​
+
+Add diversity constraints to your prompt:
+
+DIVERSITY_ADDITIONS = """
+For THIS batch, focus on:
+- Operation: {operation}  # rotate: create, update, complete, delete
+- Phrasing style: {style}  # rotate: formal, casual, imperative, question
+- Error cases: {include_errors}  # True for some batches
+
+Make sure examples are distinctly different from each other.
+"""
+
+Strategy 3: Temperature Variation​
+
+Higher temperature = more diversity (but potentially lower quality):
+
+# Low temperature for precise examples
+create_response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    temperature=0.7,  # More controlled
+    # ...
+)
+
+# Higher temperature for creative variations
+variation_response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    temperature=1.0,  # More diverse
+    # ...
+)
+
+Strategy 4: Evol-Instruct (Progressive Complexity)​
+
+Evol-Instruct is a technique from Microsoft Research that progressively evolves simple examples into more complex ones. Instead of generating all examples at the same difficulty level, you start simple and iteratively increase complexity:
+
+COMPLEXITY_LEVELS = [
+    "simple",      # "Create a task for tomorrow"
+    "moderate",    # "Create a high priority task due next Friday at 3pm"
+    "complex",     # "Create recurring weekly task, skip holidays, notify team"
+    "edge_case"    # "Create task with emoji title, @ mentions, and markdown"
+]
+
+EVOL_INSTRUCT_PROMPT = """Take this simple example and make it MORE COMPLEX:
+
+Original: {simple_example}
+
+Complexity target: {level}
+
+Rules for {level}:
+- simple → moderate: Add specific times, priorities, or constraints
+- moderate → complex: Add multiple conditions, dependencies, or edge cases
+- complex → edge_case: Add unusual but valid scenarios (unicode, special chars, limits)
+
+Return the evolved example in the same format.
+"""
+
+def evol_instruct_pipeline(
+    client: openai.OpenAI,
+    seed_examples: list,
+    target_per_level: int = 125
+) -> List[dict]:
+    """Generate progressively complex examples using Evol-Instruct."""
+    all_examples = []
+
+    for level in COMPLEXITY_LEVELS:
+        # Start from seeds for simple, evolve from previous level otherwise
+        if level == "simple":
+            base_examples = seed_examples
+        else:
+            # Take examples from previous level as starting points
+            base_examples = all_examples[-target_per_level:]
+
+        evolved = []
+        for example in base_examples[:target_per_level]:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{
+                    "role": "user",
+                    "content": EVOL_INSTRUCT_PROMPT.format(
+                        simple_example=json.dumps(example),
+                        level=level
+                    )
+                }],
+                temperature=0.8
+            )
+            evolved.append(json.loads(response.choices[0].message.content))
+
+        all_examples.extend(evolved)
+
+    return all_examples  # 500 examples across 4 complexity levels
+
+
+Why Evol-Instruct works:
+
+Models learn to handle progressively harder inputs
+Natural curriculum: simple → complex during training
+Catches edge cases you wouldn't think to write manually
+Same cost as random generation, better coverage
+
+The 500-example breakdown with Evol-Instruct:
+
+Level	Count	Example Type
+Simple	125	Basic single-operation commands
+Moderate	125	Commands with constraints and specifics
+Complex	125	Multi-step or conditional operations
+Edge Case	125	Unicode, limits, unusual but valid inputs
+
+This stratified approach produces a more robust fine-tuned model than random sampling.
+
+The Collaboration Pattern​
+
+This is where AI collaboration shines. You and AI work together:
+
+Your role (spec author):
+
+Define the format specification
+Curate high-quality seed examples
+Set diversity requirements
+Review and filter outputs
+
+AI's role (generator):
+
+Generate variations at scale
+Follow format specifications
+Produce diverse phrasing
+Maintain consistency
+
+The model suggests variations you wouldn't think of. You filter for quality. Together, you produce a dataset neither could create alone.
+
+Here's an example of what emerges:
+
+Your seed example:
+
+{"from": "human", "value": "Create a task to review the budget"}
+
+
+AI's generated variations:
+
+{"from": "human", "value": "Add 'review budget' to my to-do list"}
+{"from": "human", "value": "I need to review the budget sometime this week"}
+{"from": "human", "value": "Can you create a task for budget review?"}
+{"from": "human", "value": "New task: budget review"}
+{"from": "human", "value": "Remind me to look at the budget numbers"}
+
+
+You didn't think of "to-do list" phrasing or "remind me" framing. The model did. This diversity makes your fine-tuned model more robust.
+
+Complete Generation Script​
+
+Here's a production-ready script:
+
+#!/usr/bin/env python3
+"""
+Synthetic data generation for Task API fine-tuning.
+Cost: ~$0.15 for 500 examples with GPT-4o-mini.
+"""
+
+import json
+import os
+from pathlib import Path
+from openai import OpenAI
+
+# Configuration
+TARGET_COUNT = 500
+BATCH_SIZE = 50
+OUTPUT_FILE = "task_api_training.jsonl"
+
+# Initialize client
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# Seed examples (your high-quality templates)
+SEED_EXAMPLES = [
+    {
+        "conversations": [
+            {"from": "human", "value": "Create a task to review the quarterly budget by Friday"},
+            {"from": "gpt", "value": "Created task: 'Review quarterly budget' | Priority: medium | Due: 2025-01-17 (Friday)"}
+        ]
+    },
+    # Add 9-19 more seed examples...
+]
+
+
+def generate_and_save():
+    """Generate dataset and save to JSONL."""
+    print(f"Generating {TARGET_COUNT} examples...")
+
+    # Generate
+    examples = generate_dataset(client, SEED_EXAMPLES, TARGET_COUNT, BATCH_SIZE)
+
+    # Filter
+    valid_examples = filter_dataset(examples)
+
+    # Save
+    with open(OUTPUT_FILE, "w") as f:
+        for ex in valid_examples:
+            f.write(json.dumps(ex) + "\n")
+
+    print(f"Saved {len(valid_examples)} examples to {OUTPUT_FILE}")
+
+    # Report cost estimate
+    # Rough: 200 input + 150 output = 350 tokens per example
+    estimated_tokens = len(valid_examples) * 350
+    estimated_cost = (estimated_tokens / 1_000_000) * 0.60  # ~$0.60 per 1M tokens avg
+    print(f"Estimated cost: ${estimated_cost:.3f}")
+
+
+if __name__ == "__main__":
+    generate_and_save()
+
+
+Output:
+
+Generating 500 examples...
+Generating batch 1/10...
+Generating batch 2/10...
+...
+Valid: 487/500
+Invalid reasons: {'Response doesn\'t follow format': 8, 'Turn 1 should be gpt, got human': 5}
+Saved 487 examples to task_api_training.jsonl
+Estimated cost: $0.102
+
+Quality vs. Cost Tradeoffs​
+
+Different strategies have different tradeoffs:
+
+Strategy	Quality	Cost	Speed
+GPT-4o (full)	Highest	~$0.75/500	Medium
+GPT-4o-mini	High	~$0.15/500	Fast
+Few-shot (5 seeds)	Good	Baseline	Fast
+Many-shot (15 seeds)	Better	+10%	Slower
+With validation pass	Best	+50%	Slower
+
+Recommendation: Start with GPT-4o-mini + 10 seeds + validation filter. Only upgrade to GPT-4o if quality is insufficient.
+
+Try With AI​
+Prompt 1: Design Your Seed Examples​
+I'm creating a training dataset for a Task API assistant. Help me design
+15 high-quality seed examples that cover:
+
+1. All operations (create, update, complete, delete, list)
+2. All priority levels (low, medium, high)
+3. Various due date formats (specific dates, relative dates, no date)
+4. Error cases (task not found, invalid input, missing required fields)
+5. Different phrasing styles (formal, casual, imperative, question)
+
+For each example, explain why it's a good seed (what pattern it teaches).
+Format as ShareGPT conversations.
+
+
+What you're learning: Seed example design. These 15 examples determine the quality of your entire dataset. AI suggests variations; you evaluate which teach the right patterns.
+
+Prompt 2: Improve the Generation Prompt​
+Here's my current generation prompt:
+[paste the GENERATION_PROMPT from this lesson]
+
+Review it and suggest improvements for:
+1. Reducing format inconsistencies in generated examples
+2. Increasing diversity without sacrificing quality
+3. Better coverage of edge cases
+
+Show me the improved prompt and explain each change.
+
+
+What you're learning: Prompt engineering for data generation. Small prompt changes have large effects on output quality.
+
+Prompt 3: Build Your Generation Pipeline​
+Help me build a complete synthetic data generation pipeline for my Task API dataset.
+
+Requirements:
+- Use GPT-4o-mini for cost efficiency
+- Generate 500 examples in ShareGPT format
+- Include validation and filtering
+- Track costs during generation
+- Save to JSONL with proper escaping
+
+I have the OpenAI Python SDK installed. Show me the complete script
+with proper error handling and logging.
+
+
+What you're learning: End-to-end pipeline construction. You'll modify this script for your specific domain.
+
+Safety Note​
+
+Synthetic data inherits biases from the generating model. GPT-4o-mini may produce examples that are subtly wrong for your domain. Always have a domain expert review a sample of generated data before training. The filter catches format errors, but not semantic errors (e.g., wrong priority for a given task type).

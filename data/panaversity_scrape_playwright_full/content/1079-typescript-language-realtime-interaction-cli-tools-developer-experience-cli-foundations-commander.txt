@@ -1,0 +1,538 @@
+CLI Foundations with Commander.js
+
+Your AI agent backend is running. Your TypeScript SDK provides type-safe access. Now you need the interface that developers actually use: a command-line tool. Something they can run from their terminal, pipe into scripts, integrate with automation. CLIs are how developers interact with tools—from git to npm to kubectl.
+
+Building professional CLIs requires more than parsing process.argv. You need structured option handling, automatic help generation, subcommand routing, and graceful error messages. Commander.js provides all of this, and it's the foundation used by tools like create-react-app, vue-cli, and thousands of npm packages.
+
+This lesson teaches you to build CLI applications with Commander.js. By the end, you'll create an ai-chat CLI with subcommands, options, and arguments—the foundation for a publishable tool that connects to your AI backend.
+
+Why Commander.js?​
+
+CLI frameworks solve problems you don't want to solve manually:
+
+Problem	Manual Solution	Commander.js
+Parsing --model gpt-4	Split strings, handle edge cases	.option("-m, --model <name>")
+Generating help text	Write and maintain manually	Automatic from definitions
+Handling --help flag	Check for flag, print text, exit	Built-in, always correct
+Subcommands (cli chat, cli config)	Complex conditional routing	.command("chat")
+Validation errors	Check each input, format messages	Automatic with clear messages
+
+Commander.js is the most widely used CLI framework for Node.js, with built-in TypeScript support. Version 14+ requires Node.js 20+, matching our modern TypeScript stack.
+
+Basic Command Structure​
+
+Start with the minimal CLI:
+
+import { Command } from "commander";
+
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("CLI for AI chat interactions")
+  .version("1.0.0");
+
+program.parse();
+
+
+Output (running npx tsx cli.ts --help):
+
+Usage: ai-chat [options]
+
+CLI for AI chat interactions
+
+Options:
+  -V, --version  output the version number
+  -h, --help     display help for command
+
+
+Commander automatically adds --version and --help. The help text comes from your .name() and .description() calls. This is professional output from five lines of code.
+
+The Program Object​
+
+Command is the core class. Each instance represents a command (or subcommand). The pattern is:
+
+program
+  .name("tool-name")        // Name shown in help
+  .description("What it does")  // Description in help
+  .version("1.0.0")         // Enables --version flag
+  .option(...)              // Define options
+  .argument(...)            // Define positional arguments
+  .action(...)              // Handler function
+  .parse();                 // Parse process.argv
+
+
+Methods chain fluently. Order matters for help text display.
+
+Options: Flags and Values​
+
+Options are the --model gpt-4 style arguments. Commander supports short flags, long names, values, and defaults.
+
+Option Patterns​
+program
+  // Boolean flag: -s or --stream
+  .option("-s, --stream", "Stream responses token by token")
+
+  // Value with default: -m <model> or --model <model>
+  .option("-m, --model <model>", "AI model to use", "gpt-4o")
+
+  // Required value: -t <temp> or --temperature <temp>
+  .requiredOption("-t, --temperature <temp>", "Sampling temperature")
+
+  // Optional value: --format [type]
+  .option("--format [type]", "Output format", "text");
+
+
+Key patterns:
+
+Syntax	Meaning
+-s, --stream	Boolean flag (true if present)
+--model <name>	Required value (error if flag used without value)
+--format [type]	Optional value (can use flag alone)
+"default"	Third argument is default value
+Accessing Option Values​
+
+Options are available in the action handler via options parameter:
+
+program
+  .option("-m, --model <model>", "AI model to use", "gpt-4o")
+  .option("-s, --stream", "Stream responses", false)
+  .option("-t, --temperature <temp>", "Sampling temperature", "0.7")
+  .action((options) => {
+    console.log("Model:", options.model);
+    console.log("Stream:", options.stream);
+    console.log("Temperature:", options.temperature);
+  });
+
+program.parse();
+
+
+Output (running npx tsx cli.ts --model claude-3 --stream):
+
+Model: claude-3
+Stream: true
+Temperature: 0.7
+
+Type Coercion​
+
+Option values are strings by default. Parse them explicitly:
+
+program
+  .option("-t, --temperature <temp>", "Sampling temperature", parseFloat, 0.7)
+  .option("-n, --max-tokens <count>", "Maximum tokens", parseInt, 1000)
+  .action((options) => {
+    // options.temperature is number, not string
+    console.log("Temperature:", options.temperature, typeof options.temperature);
+    console.log("Max tokens:", options.maxTokens, typeof options.maxTokens);
+  });
+
+
+The fourth argument to .option() is a parsing function. Commander passes the string value through it.
+
+Output (running npx tsx cli.ts -t 0.5 -n 2000):
+
+Temperature: 0.5 number
+Max tokens: 2000 number
+
+Arguments: Positional Values​
+
+Arguments are positional—they don't have flags. The prompt in ai-chat "Hello, AI" is an argument.
+
+Defining Arguments​
+program
+  .command("chat")
+  .description("Start a chat with AI")
+  .argument("<prompt>", "The prompt to send")
+  .argument("[context...]", "Optional context files")
+  .option("-m, --model <model>", "AI model", "gpt-4o")
+  .action((prompt, context, options) => {
+    console.log("Prompt:", prompt);
+    console.log("Context files:", context);
+    console.log("Model:", options.model);
+  });
+
+program.parse();
+
+
+Argument syntax:
+
+Syntax	Meaning
+<prompt>	Required argument
+[prompt]	Optional argument
+<files...>	Required variadic (one or more)
+[files...]	Optional variadic (zero or more)
+
+Output (running npx tsx cli.ts chat "What is TypeScript?" readme.md notes.txt):
+
+Prompt: What is TypeScript?
+Context files: [ 'readme.md', 'notes.txt' ]
+Model: gpt-4o
+
+Action Handler Signature​
+
+Arguments come before options in the action handler:
+
+.action((arg1, arg2, argN, options, command) => {
+  // arg1, arg2, argN: positional arguments in order
+  // options: parsed options object
+  // command: the Command instance (rarely needed)
+});
+
+
+For variadic arguments, the array contains all values:
+
+.argument("<files...>", "Files to process")
+.action((files, options) => {
+  // files is string[]
+  files.forEach(file => console.log("Processing:", file));
+});
+
+Subcommands: Organizing Complex CLIs​
+
+Real CLIs have multiple commands: git commit, git push, docker build, docker run. Commander handles this with .command().
+
+Defining Subcommands​
+import { Command } from "commander";
+
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("CLI for AI chat interactions")
+  .version("1.0.0");
+
+// Subcommand: chat
+program
+  .command("chat")
+  .description("Start a chat with AI")
+  .option("-m, --model <model>", "AI model to use", "gpt-4o")
+  .option("-s, --stream", "Stream responses", true)
+  .argument("<prompt>", "The prompt to send")
+  .action(async (prompt, options) => {
+    console.log(`Sending to ${options.model}: ${prompt}`);
+    if (options.stream) {
+      console.log("Streaming enabled...");
+    }
+  });
+
+// Subcommand: config
+program
+  .command("config")
+  .description("Manage configuration")
+  .option("--list", "List all configuration")
+  .option("--set <key=value>", "Set configuration value")
+  .action((options) => {
+    if (options.list) {
+      console.log("Current configuration:");
+      console.log("  model: gpt-4o");
+      console.log("  temperature: 0.7");
+    }
+    if (options.set) {
+      const [key, value] = options.set.split("=");
+      console.log(`Setting ${key} = ${value}`);
+    }
+  });
+
+// Subcommand: history
+program
+  .command("history")
+  .description("View chat history")
+  .option("-n, --count <number>", "Number of entries", "10")
+  .option("--clear", "Clear history")
+  .action((options) => {
+    if (options.clear) {
+      console.log("History cleared.");
+      return;
+    }
+    console.log(`Last ${options.count} conversations:`);
+  });
+
+program.parse();
+
+
+Output (running npx tsx cli.ts --help):
+
+Usage: ai-chat [options] [command]
+
+CLI for AI chat interactions
+
+Options:
+  -V, --version   output the version number
+  -h, --help      display help for command
+
+Commands:
+  chat <prompt>   Start a chat with AI
+  config          Manage configuration
+  history         View chat history
+  help [command]  display help for command
+
+
+Each subcommand has its own help:
+
+Output (running npx tsx cli.ts chat --help):
+
+Usage: ai-chat chat [options] <prompt>
+
+Start a chat with AI
+
+Arguments:
+  prompt             The prompt to send
+
+Options:
+  -m, --model <model>  AI model to use (default: "gpt-4o")
+  -s, --stream         Stream responses (default: true)
+  -h, --help           display help for command
+
+Async Action Handlers​
+
+AI operations are async. Commander handles promises in actions:
+
+program
+  .command("chat")
+  .argument("<prompt>")
+  .action(async (prompt, options) => {
+    console.log("Connecting to AI...");
+
+    // Simulate async AI call
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    console.log(`Response: Hello! You said: "${prompt}"`);
+  });
+
+
+Commander waits for the promise to resolve before exiting.
+
+Complete Example: AI Chat CLI​
+
+Here's a complete CLI structure for an AI chat tool:
+
+import { Command } from "commander";
+
+interface ChatOptions {
+  model: string;
+  stream: boolean;
+  temperature: number;
+}
+
+interface ConfigOptions {
+  list?: boolean;
+  set?: string;
+  get?: string;
+}
+
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("CLI for AI chat interactions")
+  .version("1.0.0");
+
+// Chat command - main functionality
+program
+  .command("chat")
+  .description("Start a chat with AI")
+  .argument("<prompt>", "The prompt to send")
+  .option("-m, --model <model>", "AI model to use", "gpt-4o")
+  .option("-s, --stream", "Stream responses token by token", true)
+  .option(
+    "-t, --temperature <temp>",
+    "Sampling temperature (0-2)",
+    parseFloat,
+    0.7
+  )
+  .action(async (prompt: string, options: ChatOptions) => {
+    console.log(`\nModel: ${options.model}`);
+    console.log(`Temperature: ${options.temperature}`);
+    console.log(`Streaming: ${options.stream}`);
+    console.log(`\nPrompt: ${prompt}\n`);
+
+    // In real implementation, call your AI backend here
+    console.log("Response: This is where the AI response would appear.");
+  });
+
+// Config command - manage settings
+program
+  .command("config")
+  .description("Manage CLI configuration")
+  .option("--list", "List all configuration values")
+  .option("--set <key=value>", "Set a configuration value")
+  .option("--get <key>", "Get a configuration value")
+  .action((options: ConfigOptions) => {
+    if (options.list) {
+      console.log("\nConfiguration:");
+      console.log("  model = gpt-4o");
+      console.log("  temperature = 0.7");
+      console.log("  stream = true");
+      return;
+    }
+
+    if (options.get) {
+      console.log(`${options.get} = <value>`);
+      return;
+    }
+
+    if (options.set) {
+      const [key, value] = options.set.split("=");
+      console.log(`Set ${key} = ${value}`);
+      return;
+    }
+
+    // No option provided - show help
+    console.log("Use --list, --set, or --get. See --help for details.");
+  });
+
+// History command - view past conversations
+program
+  .command("history")
+  .description("View and manage chat history")
+  .option("-n, --count <number>", "Number of entries to show", parseInt, 10)
+  .option("--clear", "Clear all history")
+  .option("--export <file>", "Export history to file")
+  .action((options) => {
+    if (options.clear) {
+      console.log("Chat history cleared.");
+      return;
+    }
+
+    if (options.export) {
+      console.log(`Exporting history to ${options.export}...`);
+      return;
+    }
+
+    console.log(`\nLast ${options.count} conversations:\n`);
+    console.log("1. [2024-01-15] What is TypeScript?");
+    console.log("2. [2024-01-15] Explain async/await");
+    console.log("3. [2024-01-14] How do generics work?");
+  });
+
+// Default action when no command provided
+program
+  .argument("[prompt]", "Quick chat prompt")
+  .action((prompt) => {
+    if (prompt) {
+      // Direct prompt without subcommand
+      console.log(`Quick chat: ${prompt}`);
+    } else {
+      program.help();
+    }
+  });
+
+program.parse();
+
+
+This structure provides:
+
+chat: Main AI interaction with model/stream/temperature options
+config: Settings management with list/set/get operations
+history: Conversation history with count/clear/export options
+Default: Quick prompt or help display
+Error Handling​
+
+Commander handles common errors automatically:
+
+program
+  .command("chat")
+  .requiredOption("-m, --model <model>", "AI model is required")
+  .argument("<prompt>", "Prompt is required")
+  .action((prompt, options) => {
+    console.log(`Using ${options.model}: ${prompt}`);
+  });
+
+
+Output (running npx tsx cli.ts chat without arguments):
+
+error: missing required argument 'prompt'
+
+
+Output (running npx tsx cli.ts chat "Hello" without --model):
+
+error: required option '-m, --model <model>' not specified
+
+
+For custom validation, throw errors in the action:
+
+.action((prompt, options) => {
+  if (options.temperature < 0 || options.temperature > 2) {
+    console.error("Error: Temperature must be between 0 and 2");
+    process.exit(1);
+  }
+  // Continue with valid input
+});
+
+Project Setup​
+
+To create a CLI project with Commander.js:
+
+# Initialize project
+mkdir ai-chat-cli && cd ai-chat-cli
+pnpm init
+
+# Install dependencies
+pnpm add commander
+pnpm add -D typescript tsx @types/node
+
+# Create tsconfig.json
+echo '{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "dist"
+  },
+  "include": ["src/**/*"]
+}' > tsconfig.json
+
+# Create CLI entry point
+mkdir src
+touch src/cli.ts
+
+
+Run during development with npx tsx src/cli.ts. Build for distribution with tsc.
+
+Try With AI​
+Prompt 1: Extend the CLI with New Options​
+Take the ai-chat CLI structure from this lesson and add these features:
+
+1. A --json flag to the chat command that outputs responses as JSON
+2. A --context <file> option to include file contents in the prompt
+3. A models subcommand that lists available AI models
+
+Show me the complete updated code with TypeScript types.
+
+
+What you're learning: How to extend CLI architecture with new options and subcommands while maintaining type safety and consistent patterns.
+
+Prompt 2: Add Input Validation​
+I need to validate options in my Commander.js CLI before the action runs.
+Create a validation layer that:
+
+1. Checks temperature is between 0 and 2
+2. Validates model is one of: gpt-4o, gpt-3.5, claude-3
+3. Ensures prompt is not empty or just whitespace
+
+Show error messages that match Commander.js style.
+How should I structure this for reusability across commands?
+
+
+What you're learning: How to implement input validation that integrates cleanly with Commander's error handling and provides professional user feedback.
+
+Prompt 3: Design a CLI for Your Domain​
+I'm building a CLI for [describe your AI application or domain].
+
+Help me design the command structure:
+1. What subcommands should I have?
+2. What options make sense for each?
+3. Which options should be global vs command-specific?
+
+Show me the Commander.js skeleton with just the structure
+(commands, options, arguments) without implementation details.
+
+
+What you're learning: How to architect CLI structure based on user workflows and domain requirements, applying the patterns from this lesson to your specific context.
+
+Safety Note​
+
+When building CLIs that connect to AI services, never hardcode API keys in source code. Use environment variables (process.env.OPENAI_API_KEY) or configuration files that are excluded from version control. The next lesson covers secure credential handling for CLI tools.

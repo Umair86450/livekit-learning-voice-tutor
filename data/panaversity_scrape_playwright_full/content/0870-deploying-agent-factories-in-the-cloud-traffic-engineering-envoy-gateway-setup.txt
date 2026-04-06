@@ -1,0 +1,617 @@
+Envoy Gateway Setup
+
+The previous lesson taught you Gateway API as a specification—the resources, the three-tier model, the role separation. But specifications do not route traffic. You need a controller that watches Gateway API resources and configures actual proxies to handle requests.
+
+Envoy Gateway is that controller. Built specifically for Gateway API (not retrofitted from an older project), it uses Envoy Proxy as its data plane—the same battle-tested proxy that powers Istio, AWS App Mesh, and countless production deployments. When you create a Gateway resource, Envoy Gateway deploys Envoy proxies configured to match your specification.
+
+This lesson installs Envoy Gateway in your Kubernetes cluster. By the end, you will have a working GatewayClass, understand how requests flow from your Gateway definition to actual traffic handling, and create your first Gateway resource.
+
+Understanding Envoy Gateway Architecture​
+
+Before installing anything, you need to understand what Envoy Gateway deploys and how the pieces interact. The architecture has two distinct planes.
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          CONTROL PLANE                                       │
+│                   (envoy-gateway-system namespace)                           │
+│  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐  │
+│  │   Envoy Gateway     │  │    Gateway          │  │       Infra         │  │
+│  │    Controller       │  │   Translator        │  │      Manager        │  │
+│  │                     │  │                     │  │                     │  │
+│  │ - Watches Gateway   │  │ - Converts Gateway  │  │ - Deploys Envoy     │  │
+│  │   API resources     │  │   API to xDS        │  │   proxy pods        │  │
+│  │ - Reconciles state  │  │ - Computes routes   │  │ - Manages Services  │  │
+│  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘  │
+│            │                        │                        │              │
+│            ▼                        ▼                        ▼              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                          xDS Server                                  │   │
+│  │   Streams configuration to data plane via gRPC (xDS protocol)        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ xDS (gRPC streaming)
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DATA PLANE                                         │
+│                    (dynamically created namespace)                           │
+│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                 │
+│  │ Envoy Proxy  │     │ Envoy Proxy  │     │ Envoy Proxy  │                 │
+│  │   Pod (1)    │     │   Pod (2)    │     │   Pod (n)    │                 │
+│  │              │     │              │     │              │                 │
+│  │ - Handles    │     │ - Handles    │     │ - Handles    │                 │
+│  │   traffic    │     │   traffic    │     │   traffic    │                 │
+│  │ - Receives   │     │ - Receives   │     │ - Receives   │                 │
+│  │   config via │     │   config via │     │   config via │                 │
+│  │   xDS        │     │   xDS        │     │   xDS        │                 │
+│  └──────────────┘     └──────────────┘     └──────────────┘                 │
+│         ▲                    ▲                    ▲                          │
+│         │                    │                    │                          │
+│         └────────────────────┼────────────────────┘                          │
+│                              │                                               │
+│                    LoadBalancer / NodePort                                   │
+│                      (external traffic)                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+The Control Plane​
+
+The control plane runs in the envoy-gateway-system namespace. It consists of a single deployment that performs three functions:
+
+Component	Purpose
+Gateway Controller	Watches Kubernetes for Gateway API resources (GatewayClass, Gateway, HTTPRoute)
+Gateway Translator	Converts Gateway API resources into Envoy xDS configuration
+Infra Manager	Creates and manages Envoy proxy Deployments and Services
+
+The control plane does not handle traffic. It manages configuration.
+
+The Data Plane​
+
+When you create a Gateway resource, the Infra Manager deploys Envoy proxy pods. These proxies receive configuration from the control plane via the xDS protocol—a gRPC-based streaming API that Envoy uses for dynamic configuration.
+
+The beauty of xDS: configuration changes happen without restarting proxies. Update an HTTPRoute, and within seconds the control plane pushes new routing configuration to all Envoy instances via xDS streams.
+
+The xDS Protocol​
+
+xDS (x Discovery Service) is how Envoy receives configuration:
+
+API	What It Configures
+LDS (Listener)	Which ports to listen on
+RDS (Route)	How to route requests
+CDS (Cluster)	Backend services to route to
+EDS (Endpoint)	Pod IPs for each service
+SDS (Secret)	TLS certificates
+
+You do not interact with xDS directly. You write Gateway API resources; Envoy Gateway translates them to xDS and streams updates to proxies.
+
+Installing Gateway API CRDs​
+
+Gateway API CRDs define the resource types (GatewayClass, Gateway, HTTPRoute) that Kubernetes will recognize. Install them before Envoy Gateway.
+
+Install the standard Gateway API CRDs:
+
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+
+
+Output:
+
+customresourcedefinition.apiextensions.k8s.io/gatewayclasses.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/referencegrants.gateway.networking.k8s.io created
+
+
+Verify the CRDs are installed:
+
+kubectl get crds | grep gateway.networking.k8s.io
+
+
+Output:
+
+gatewayclasses.gateway.networking.k8s.io    2025-12-30T10:00:00Z
+gateways.gateway.networking.k8s.io          2025-12-30T10:00:00Z
+httproutes.gateway.networking.k8s.io        2025-12-30T10:00:00Z
+referencegrants.gateway.networking.k8s.io   2025-12-30T10:00:00Z
+
+
+The standard-install.yaml includes the core resources that reached General Availability (GA) in Gateway API v1.0:
+
+CRD	Status	Purpose
+GatewayClass	GA	Defines controller implementation
+Gateway	GA	Traffic entry point
+HTTPRoute	GA	HTTP routing rules
+ReferenceGrant	GA	Cross-namespace access
+
+Experimental resources (GRPCRoute, TCPRoute, etc.) require a separate installation if needed.
+
+Installing Envoy Gateway via Helm​
+
+Envoy Gateway is distributed as a Helm chart from Docker Hub. The chart installs the control plane and creates the GatewayClass automatically.
+
+Install Envoy Gateway v1.6.1:
+
+helm install eg oci://docker.io/envoyproxy/gateway-helm \
+  --version v1.6.1 \
+  -n envoy-gateway-system \
+  --create-namespace
+
+
+Output:
+
+Pulled: docker.io/envoyproxy/gateway-helm:v1.6.1
+Digest: sha256:abc123...
+NAME: eg
+LAST DEPLOYED: Mon Dec 30 10:05:00 2025
+NAMESPACE: envoy-gateway-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+
+
+The --create-namespace flag creates envoy-gateway-system if it does not exist.
+
+Wait for the controller to become available:
+
+kubectl wait --timeout=5m -n envoy-gateway-system \
+  deployment/envoy-gateway --for=condition=Available
+
+
+Output:
+
+deployment.apps/envoy-gateway condition met
+
+
+Check the running pods:
+
+kubectl get pods -n envoy-gateway-system
+
+
+Output:
+
+NAME                             READY   STATUS    RESTARTS   AGE
+envoy-gateway-5f7d6b8c9f-xk2lj   1/1     Running   0          2m
+
+
+A single pod runs the control plane. This is the component that watches Gateway API resources and manages the data plane.
+
+Verifying the GatewayClass​
+
+Envoy Gateway automatically creates a GatewayClass named eg (short for "Envoy Gateway"). This class tells Kubernetes that Envoy Gateway will handle any Gateway referencing it.
+
+Check the GatewayClass:
+
+kubectl get gatewayclass
+
+
+Output:
+
+NAME   CONTROLLER                                      ACCEPTED   AGE
+eg     gateway.envoyproxy.io/gatewayclass-controller   True       2m
+
+
+The ACCEPTED: True status means the controller acknowledged this class. If you see False or no status, the controller is not running correctly.
+
+View the GatewayClass details:
+
+kubectl get gatewayclass eg -o yaml
+
+
+Output:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+status:
+  conditions:
+  - lastTransitionTime: "2025-12-30T10:05:00Z"
+    message: GatewayClass is accepted
+    reason: Accepted
+    status: "True"
+    type: Accepted
+
+
+The controllerName field is the key. Any Gateway referencing gatewayClassName: eg will be handled by the controller with this name.
+
+Creating Your First Gateway​
+
+Now create a Gateway that uses the eg GatewayClass. This Gateway will listen for HTTP traffic on port 80.
+
+Create task-api-gateway.yaml:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: task-api-gateway
+  namespace: default
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+
+
+Apply the Gateway:
+
+kubectl apply -f task-api-gateway.yaml
+
+
+Output:
+
+gateway.gateway.networking.k8s.io/task-api-gateway created
+
+
+Check the Gateway status:
+
+kubectl get gateway task-api-gateway
+
+
+Output:
+
+NAME               CLASS   ADDRESS        PROGRAMMED   AGE
+task-api-gateway   eg      10.96.123.45   True         30s
+
+
+The PROGRAMMED: True status means Envoy Gateway successfully created the data plane resources.
+
+View detailed status:
+
+kubectl describe gateway task-api-gateway
+
+
+Output:
+
+Name:         task-api-gateway
+Namespace:    default
+Labels:       <none>
+API Version:  gateway.networking.k8s.io/v1
+Kind:         Gateway
+Spec:
+  Gateway Class Name:  eg
+  Listeners:
+    Allowed Routes:
+      Namespaces:
+        From:  Same
+    Name:      http
+    Port:      80
+    Protocol:  HTTP
+Status:
+  Addresses:
+    Type:   IPAddress
+    Value:  10.96.123.45
+  Conditions:
+    Last Transition Time:  2025-12-30T10:10:00Z
+    Message:               Gateway is accepted
+    Reason:                Accepted
+    Status:                True
+    Type:                  Accepted
+    Last Transition Time:  2025-12-30T10:10:05Z
+    Message:               Gateway is programmed
+    Reason:                Programmed
+    Status:                True
+    Type:                  Programmed
+  Listeners:
+    Attached Routes:  0
+    Conditions:
+      Last Transition Time:  2025-12-30T10:10:05Z
+      Message:               Listener is programmed
+      Reason:                Programmed
+      Status:                True
+      Type:                  Programmed
+    Name:                    http
+    Supported Kinds:
+      Group:  gateway.networking.k8s.io
+      Kind:   HTTPRoute
+
+
+The status shows:
+
+Accepted: Controller acknowledged the Gateway
+Programmed: Data plane (Envoy proxies) deployed successfully
+Addresses: Where traffic enters (IP assigned)
+Listeners: Status of each listener and attached routes
+What Envoy Gateway Created​
+
+When you created the Gateway, the Infra Manager deployed data plane resources. Examine them:
+
+Check for Envoy proxy pods:
+
+kubectl get pods -l gateway.envoyproxy.io/owning-gateway-name=task-api-gateway
+
+
+Output:
+
+NAME                                         READY   STATUS    RESTARTS   AGE
+envoy-default-task-api-gateway-abc123-xyz    1/1     Running   0          1m
+
+
+Envoy Gateway creates a Deployment for each Gateway. The pod runs the Envoy proxy that handles traffic.
+
+Check the Service:
+
+kubectl get svc -l gateway.envoyproxy.io/owning-gateway-name=task-api-gateway
+
+
+Output:
+
+NAME                                TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)        AGE
+envoy-default-task-api-gateway      LoadBalancer   10.96.123.45   <pending>     80:31234/TCP   1m
+
+
+The Service type is LoadBalancer by default. On Docker Desktop, the external IP may show <pending> until you access it via port-forward or the LoadBalancer assigns an IP.
+
+Understanding EnvoyProxy CRD (Optional Customization)​
+
+The default Envoy deployment works for development. For production, you may need to customize resource limits, replicas, or add pod anti-affinity. Envoy Gateway provides the EnvoyProxy CRD for this.
+
+Create envoy-proxy-config.yaml:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: production-proxy
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: 3
+        container:
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+        pod:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchLabels:
+                      gateway.envoyproxy.io/owning-gateway-name: task-api-gateway
+                  topologyKey: kubernetes.io/hostname
+
+
+Reference the EnvoyProxy from GatewayClass:
+
+To use this configuration, create production-gatewayclass.yaml:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg-production
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: production-proxy
+    namespace: envoy-gateway-system
+
+
+Gateways using gatewayClassName: eg-production will deploy 3 Envoy replicas with production resource limits and anti-affinity rules spreading pods across nodes.
+
+Common Troubleshooting​
+Gateway shows ACCEPTED but not PROGRAMMED​
+
+The control plane accepted the Gateway but failed to deploy the data plane.
+
+Check controller logs:
+
+kubectl logs -n envoy-gateway-system deployment/envoy-gateway
+
+
+Output (example error):
+
+ERROR   Failed to create Deployment   {"gateway": "default/task-api-gateway", "error": "insufficient resources"}
+
+
+Common causes:
+
+Insufficient cluster resources (CPU, memory)
+Image pull errors (check container registry access)
+Service account permissions
+GatewayClass shows ACCEPTED: False​
+
+The controller is not running or not watching this GatewayClass.
+
+Verify the controller is running:
+
+kubectl get pods -n envoy-gateway-system
+
+
+Verify the controller name matches:
+
+kubectl get gatewayclass eg -o jsonpath='{.spec.controllerName}'
+
+
+Output:
+
+gateway.envoyproxy.io/gatewayclass-controller
+
+
+This must match the controller Envoy Gateway advertises.
+
+No external IP assigned​
+
+On Docker Desktop or clusters without a LoadBalancer controller, external IPs stay <pending>.
+
+Use port-forward for local access:
+
+kubectl port-forward svc/envoy-default-task-api-gateway 8080:80
+
+
+Now access http://localhost:8080.
+
+Exercises​
+Exercise 1: Install Gateway API CRDs​
+
+Install the standard Gateway API CRDs and verify:
+
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+kubectl get crds | grep gateway.networking.k8s.io
+
+
+Expected: Four CRDs listed (gatewayclasses, gateways, httproutes, referencegrants)
+
+Exercise 2: Install Envoy Gateway via Helm​
+
+Install Envoy Gateway and verify the controller is running:
+
+helm install eg oci://docker.io/envoyproxy/gateway-helm \
+  --version v1.6.1 \
+  -n envoy-gateway-system \
+  --create-namespace
+
+kubectl wait --timeout=5m -n envoy-gateway-system \
+  deployment/envoy-gateway --for=condition=Available
+
+kubectl get pods -n envoy-gateway-system
+
+
+Expected: envoy-gateway pod in Running state
+
+Exercise 3: Verify GatewayClass​
+
+Check that the eg GatewayClass was created automatically:
+
+kubectl get gatewayclass
+kubectl get gatewayclass eg -o jsonpath='{.status.conditions[0].status}'
+
+
+Expected: eg class with True for Accepted condition
+
+Exercise 4: Create Gateway and Check Status​
+
+Create a Gateway and verify it becomes PROGRAMMED:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: exercise-gateway
+  namespace: default
+spec:
+  gatewayClassName: eg
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+EOF
+
+kubectl get gateway exercise-gateway
+
+
+Expected: Gateway shows PROGRAMMED: True
+
+Exercise 5: Examine Data Plane Resources​
+
+Find the Envoy proxy pods and Service created for your Gateway:
+
+kubectl get pods -l gateway.envoyproxy.io/owning-gateway-name=exercise-gateway
+kubectl get svc -l gateway.envoyproxy.io/owning-gateway-name=exercise-gateway
+
+
+Expected: One Envoy pod running, one LoadBalancer Service
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about Envoy Gateway:
+
+Add Installation Commands​
+
+Your skill should now include Envoy Gateway installation:
+
+# Gateway API CRDs
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+
+# Envoy Gateway controller
+helm install eg oci://docker.io/envoyproxy/gateway-helm \
+  --version v1.6.1 \
+  -n envoy-gateway-system \
+  --create-namespace
+
+
+What verification steps are essential?
+
+Check GatewayClass exists: kubectl get gatewayclass eg
+Check controller is running: kubectl get pods -n envoy-gateway-system
+Check Gateway becomes PROGRAMMED after creation
+Add Troubleshooting Guidance​
+
+Your skill should include common issues:
+
+Symptom	Check	Likely Cause
+GatewayClass not ACCEPTED	Controller logs	Controller not running
+Gateway not PROGRAMMED	Controller logs	Resource limits, image pull
+No external IP	Service type	No LoadBalancer controller
+Consider EnvoyProxy Customization​
+
+For production deployments, your skill should ask:
+
+How many replicas do you need?
+What resource limits are appropriate?
+Should pods spread across nodes?
+
+If the answer is "production," generate an EnvoyProxy CRD with the custom GatewayClass.
+
+Try With AI​
+Explore Architecture Internals​
+
+Ask your traffic-engineer skill to explain the architecture:
+
+Using my traffic-engineer skill, explain how Envoy Gateway's xDS protocol works.
+
+When I create a Gateway resource, what happens step by step?
+How does configuration flow from the Gateway YAML to actual traffic handling?
+
+
+What you're learning: The internal mechanics of Envoy Gateway. AI can explain the sequence: Gateway Controller watches -> Translator converts to xDS -> xDS Server streams to Envoy proxies. Compare this to the architecture diagram in this lesson.
+
+Evaluate the Explanation​
+
+Review what AI provided. Check:
+
+Did it mention the control plane vs data plane distinction?
+Did it explain xDS streaming (not file-based configuration)?
+Did it describe the specific xDS APIs (LDS, RDS, CDS, EDS)?
+
+If anything is missing or incorrect, tell AI what you learned in this lesson and ask it to refine its explanation.
+
+Customize for Production​
+
+Tell AI about your production requirements:
+
+I need to customize Envoy proxy resource limits for production.
+My requirements:
+- 3 replicas for high availability
+- 500m/512Mi requests, 2/2Gi limits
+- Pods should spread across different nodes
+
+Generate the EnvoyProxy CRD and explain how to reference it from a GatewayClass.
+
+
+What you're learning: Working with AI to generate Kubernetes resources. AI should produce an EnvoyProxy with replicas: 3, resource limits, and pod anti-affinity. Verify the YAML matches what you learned in the EnvoyProxy section.
+
+Review and Refine​
+
+If AI's EnvoyProxy YAML differs from the lesson, work through the differences:
+
+Is the API version correct (gateway.envoyproxy.io/v1alpha1)?
+Does it include the parametersRef in the GatewayClass?
+Are the pod affinity rules structured correctly?
+
+This iteration—AI suggests, you validate, AI refines—is how production configurations emerge.
+
+Safety Note​
+
+When installing Envoy Gateway in shared or production clusters, coordinate with your platform team. The GatewayClass and CRDs are cluster-scoped resources. Multiple installations of Gateway API CRDs can conflict if versions differ. Always check for existing installations with kubectl get crds | grep gateway before applying new CRDs.

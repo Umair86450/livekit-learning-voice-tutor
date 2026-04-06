@@ -1,0 +1,556 @@
+Building Retrieval Chains
+
+You have a vector store. You can find similar documents. But similarity isn't understanding.
+
+When a user asks "How do I mark a task as complete?", they don't want a list of documents. They want an answer. This is where retrieval chains transform raw vector similarity into intelligent responses.
+
+The pattern is straightforward: retrieve relevant documents, format them as context, and let an LLM generate a grounded answer. LangChain's Expression Language (LCEL) makes this composition elegant and powerful.
+
+The Retrieval Chain Flow​
+
+Every retrieval chain follows this data flow:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    RETRIEVAL CHAIN FLOW                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   USER QUERY                                                    │
+│       │                                                         │
+│       ▼                                                         │
+│   ┌──────────┐    Top-k docs    ┌──────────────┐               │
+│   │ Retriever │ ──────────────► │ Format Docs  │               │
+│   └──────────┘                  └──────────────┘               │
+│       │                              │                          │
+│       │ (vector search)              │ (concatenate)            │
+│       ▼                              ▼                          │
+│   ┌──────────┐                 ┌──────────────┐                │
+│   │  Qdrant  │                 │    Context   │                │
+│   └──────────┘                 │    String    │                │
+│                                └──────────────┘                │
+│                                      │                          │
+│                                      ▼                          │
+│                              ┌──────────────┐                  │
+│                              │    Prompt    │                  │
+│                              │   Template   │                  │
+│                              └──────────────┘                  │
+│                                      │                          │
+│                                      ▼                          │
+│                              ┌──────────────┐                  │
+│                              │     LLM      │                  │
+│                              └──────────────┘                  │
+│                                      │                          │
+│                                      ▼                          │
+│                              ┌──────────────┐                  │
+│                              │   Answer     │                  │
+│                              └──────────────┘                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Each component has a single responsibility. The retriever finds relevant documents. The formatter structures them for the LLM. The prompt frames the question. The LLM synthesizes an answer. This modularity means you can swap any component without rewriting the chain.
+
+The Retriever Pattern​
+
+A retriever abstracts document search into a simple interface. Instead of calling similarity_search directly, you get an object that works seamlessly in chains.
+
+from langchain_qdrant import QdrantVectorStore
+from langchain_openai import OpenAIEmbeddings
+
+# Assume vector_store exists from previous lesson
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vector_store = QdrantVectorStore.from_existing_collection(
+    embedding=embeddings,
+    collection_name="task_docs",
+    url="http://localhost:6333",
+)
+
+# Convert to retriever with search configuration
+retriever = vector_store.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 4}  # Return top 4 documents
+)
+
+# Use directly
+docs = retriever.invoke("How do I create a task?")
+print(f"Retrieved {len(docs)} documents")
+for doc in docs:
+    print(f"- {doc.page_content[:100]}...")
+
+
+Output:
+
+Retrieved 4 documents
+- Task creation requires a title and optional description. Use POST /tasks with a JSON body contain...
+- The Task model accepts title (required), description (optional), and priority (default: medium)...
+- Creating tasks programmatically: Call the create_task function with TaskCreate schema validatio...
+- Example task creation: {"title": "Deploy API", "description": "Deploy to production server"}...
+
+
+The search_kwargs parameter controls how many documents to retrieve. Start with 4 and adjust based on your context window and answer quality.
+
+Search Types​
+
+LangChain retrievers support different search strategies:
+
+Search Type	When to Use	Trade-off
+similarity	Default choice, most similar docs	May return redundant content
+mmr	Need diverse perspectives	Slower, balances relevance/diversity
+similarity_score_threshold	Want only highly relevant docs	May return fewer than k docs
+# MMR retriever for diverse results
+retriever_mmr = vector_store.as_retriever(
+    search_type="mmr",
+    search_kwargs={
+        "k": 4,           # Final number of docs
+        "fetch_k": 20,    # Fetch more, then select diverse subset
+        "lambda_mult": 0.5,  # Balance relevance (1) vs diversity (0)
+    }
+)
+
+Formatting Documents for Context​
+
+Raw documents need structure before feeding into an LLM. The format_docs function concatenates retrieved documents into a single context string.
+
+def format_docs(docs):
+    """Convert retrieved documents to a context string."""
+    return "\n\n".join(doc.page_content for doc in docs)
+
+# Test the formatter
+docs = retriever.invoke("task completion")
+context = format_docs(docs)
+print(context[:500])
+
+
+Output:
+
+Task completion requires updating the status field to 'completed'. Use PATCH /tasks/{task_id} with {"status": "completed"} in the request body.
+
+The complete_task function handles completion logic: validates task exists, updates status, records completion timestamp, and triggers any configured webhooks.
+
+Tasks can only be marked complete if they exist and have status 'pending' or 'in_progress'. Attempting to complete an already-completed task returns 400 Bad Request.
+
+Important: Task completion is i...
+
+
+For richer context, include metadata:
+
+def format_docs_with_source(docs):
+    """Include source information in context."""
+    formatted = []
+    for i, doc in enumerate(docs, 1):
+        source = doc.metadata.get("source", "unknown")
+        formatted.append(f"[Source {i}: {source}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(formatted)
+
+
+Output:
+
+[Source 1: api_endpoints.md]
+Task completion requires updating the status field to 'completed'. Use PATCH /tasks/{task_id}...
+
+---
+
+[Source 2: functions.md]
+The complete_task function handles completion logic: validates task exists, updates status...
+
+Building a Simple QA Chain​
+
+Now combine retriever, formatter, prompt, and LLM into a complete chain:
+
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+# LLM for answer generation
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+# Prompt that frames the question with context
+prompt = ChatPromptTemplate.from_template("""
+Answer the question based only on the following context:
+
+{context}
+
+Question: {question}
+
+Provide a concise, accurate answer. If the context doesn't contain enough information, say so.
+""")
+
+# The complete chain using LCEL
+chain = (
+    {"context": retriever | format_docs, "question": lambda x: x}
+    | prompt
+    | llm
+)
+
+# Invoke the chain
+response = chain.invoke("How do I mark a task as complete?")
+print(response.content)
+
+
+Output:
+
+To mark a task as complete, use PATCH /tasks/{task_id} with the request body {"status": "completed"}.
+
+The task must exist and have a status of 'pending' or 'in_progress'. Attempting to complete an already-completed task returns a 400 Bad Request error.
+
+The completion operation validates the task, updates the status, records a completion timestamp, and triggers any configured webhooks.
+
+
+The answer synthesizes information from multiple documents into a coherent response grounded in the retrieved context.
+
+Understanding the LCEL Pipe Syntax​
+
+The chain uses LangChain Expression Language (LCEL). Let's break it down:
+
+# This creates a RunnableParallel that processes inputs
+{
+    "context": retriever | format_docs,  # Pipe retriever output through formatter
+    "question": lambda x: x               # Pass question through unchanged
+}
+# Output: {"context": "formatted docs...", "question": "user question"}
+
+| prompt   # Template fills {context} and {question}
+# Output: ChatPromptValue with formatted message
+
+| llm      # LLM generates response
+# Output: AIMessage with answer
+
+
+The | operator chains components together. Data flows left to right. The dictionary creates parallel branches that merge before the next step.
+
+Chain Variations​
+Adding Output Parsing​
+
+Parse the LLM response into a structured format:
+
+from langchain_core.output_parsers import StrOutputParser
+
+chain_with_parser = (
+    {"context": retriever | format_docs, "question": lambda x: x}
+    | prompt
+    | llm
+    | StrOutputParser()  # Extract just the text content
+)
+
+answer = chain_with_parser.invoke("What fields does a task have?")
+print(answer)  # String, not AIMessage
+
+
+Output:
+
+A task has the following fields:
+- title (required): The name of the task
+- description (optional): Additional details about the task
+- priority (default: medium): Can be low, medium, or high
+- status: pending, in_progress, or completed
+- created_at: Timestamp when task was created
+- completed_at: Timestamp when task was completed (if applicable)
+
+Streaming Responses​
+
+For long answers, stream tokens as they generate:
+
+async def stream_answer(question: str):
+    """Stream the answer token by token."""
+    async for chunk in chain_with_parser.astream(question):
+        print(chunk, end="", flush=True)
+    print()  # Newline at end
+
+# Usage
+import asyncio
+asyncio.run(stream_answer("Explain the task lifecycle"))
+
+
+Output (tokens appear progressively):
+
+A task moves through this lifecycle:
+1. Created (pending) - Task exists but work hasn't started
+2. In Progress - Work has begun
+3. Completed - Task finished successfully
+...
+
+Debugging: Inspect Chain Components​
+
+When answers seem wrong, inspect each step:
+
+# Step 1: Check what documents are retrieved
+question = "How do I delete a task?"
+docs = retriever.invoke(question)
+print("=== RETRIEVED DOCUMENTS ===")
+for i, doc in enumerate(docs):
+    print(f"\n--- Doc {i+1} ---")
+    print(doc.page_content[:200])
+    print(f"Metadata: {doc.metadata}")
+
+# Step 2: Check formatted context
+context = format_docs(docs)
+print("\n=== FORMATTED CONTEXT ===")
+print(context[:500])
+
+# Step 3: Check the prompt
+filled_prompt = prompt.invoke({"context": context, "question": question})
+print("\n=== FILLED PROMPT ===")
+print(filled_prompt.to_string()[:500])
+
+
+Output:
+
+=== RETRIEVED DOCUMENTS ===
+
+--- Doc 1 ---
+DELETE /tasks/{task_id} removes a task permanently. Returns 204 No Content on success. Returns 404 Not Found if task doesn't exist.
+Metadata: {'source': 'api_endpoints.md', 'section': 'DELETE'}
+
+--- Doc 2 ---
+The delete_task function validates the task exists, removes it from the database, and returns...
+Metadata: {'source': 'functions.md', 'section': 'deletion'}
+
+=== FORMATTED CONTEXT ===
+DELETE /tasks/{task_id} removes a task permanently. Returns 204 No Content on success...
+
+=== FILLED PROMPT ===
+Answer the question based only on the following context:
+
+DELETE /tasks/{task_id} removes a task permanently...
+
+Question: How do I delete a task?
+...
+
+
+This trace reveals issues: Are the right documents retrieved? Is context properly formatted? Does the prompt make sense?
+
+Common Mistakes to Avoid​
+Mistake 1: Forgetting to Format Documents​
+# WRONG: Documents aren't strings
+chain_broken = (
+    {"context": retriever, "question": lambda x: x}  # retriever returns List[Document]
+    | prompt  # Prompt expects string for {context}
+    | llm
+)
+# Error: Prompt template can't format list of documents
+
+
+Fix: Always pipe retriever through a formatter:
+
+# CORRECT: Format documents to string
+chain_working = (
+    {"context": retriever | format_docs, "question": lambda x: x}
+    | prompt
+    | llm
+)
+
+Mistake 2: Too Few or Too Many Documents​
+# Too few: May miss relevant information
+retriever_minimal = vector_store.as_retriever(search_kwargs={"k": 1})
+
+# Too many: Overwhelms context, confuses LLM, wastes tokens
+retriever_excessive = vector_store.as_retriever(search_kwargs={"k": 50})
+
+
+Guideline: Start with k=4, adjust based on:
+
+Answer quality (missing info? increase k)
+Token costs (too expensive? decrease k)
+Response coherence (confused answers? decrease k)
+Mistake 3: Ignoring the Question in Context​
+# WRONG: Question lost
+bad_chain = (
+    {"context": retriever | format_docs}  # Where's the question?
+    | prompt  # Prompt needs {question}!
+    | llm
+)
+
+
+Fix: Always pass the question through:
+
+# CORRECT: Question flows to prompt
+good_chain = (
+    {"context": retriever | format_docs, "question": lambda x: x}
+    | prompt
+    | llm
+)
+
+Putting It Together: Task API QA Chain​
+
+Here's a complete implementation for your Task API documentation:
+
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
+
+# Initialize components
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vector_store = QdrantVectorStore.from_existing_collection(
+    embedding=embeddings,
+    collection_name="task_api_docs",
+    url="http://localhost:6333",
+)
+
+retriever = vector_store.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 4, "fetch_k": 10}
+)
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+prompt = ChatPromptTemplate.from_template("""
+You are a helpful assistant for the Task API. Answer questions based only on the provided documentation.
+
+Documentation:
+{context}
+
+Question: {question}
+
+Provide a clear, accurate answer. Include relevant code examples when helpful.
+If the documentation doesn't cover this topic, say so.
+""")
+
+# Build the chain
+qa_chain = (
+    {"context": retriever | format_docs, "question": lambda x: x}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+# Test it
+questions = [
+    "How do I create a task?",
+    "What's the difference between pending and in_progress?",
+    "How do I filter tasks by priority?",
+]
+
+for q in questions:
+    print(f"\n**Q: {q}**")
+    print(qa_chain.invoke(q))
+    print("-" * 50)
+
+
+Output:
+
+**Q: How do I create a task?**
+To create a task, send a POST request to /tasks with a JSON body:
+
+{
+    "title": "Your task title",
+    "description": "Optional description",
+    "priority": "medium"
+}
+
+The title field is required. Description is optional. Priority defaults to
+"medium" if not specified (can be "low", "medium", or "high").
+
+The API returns the created task with its assigned ID and timestamps.
+--------------------------------------------------
+
+**Q: What's the difference between pending and in_progress?**
+The difference is:
+
+- pending: Task has been created but work hasn't started yet. This is the
+  initial status for all new tasks.
+- in_progress: Work has begun on the task but isn't complete yet.
+
+You can update a task's status using PATCH /tasks/{task_id} with
+{"status": "in_progress"}.
+--------------------------------------------------
+
+**Q: How do I filter tasks by priority?**
+Use the priority query parameter on the GET /tasks endpoint:
+
+GET /tasks?priority=high
+
+This returns only tasks with the specified priority level. You can combine
+with other filters:
+
+GET /tasks?priority=high&status=pending
+
+Valid priority values are: low, medium, high.
+--------------------------------------------------
+
+
+You now have an intelligent Q&A system over your Task API documentation. Users ask natural language questions; the chain retrieves relevant context and synthesizes accurate answers.
+
+Reflect on Your Skill​
+
+You built a rag-deployment skill in Lesson 0. Now test whether it handles retrieval chains.
+
+Test Your Skill​
+
+Ask your skill:
+
+I have a Qdrant vector store with Task API documentation. Help me build a
+retrieval chain that answers user questions about the API. I want to use
+MMR for diversity and include source citations in responses.
+
+Identify Gaps​
+
+After reviewing the response:
+
+Does it show the as_retriever() pattern with search configuration?
+Does it include a document formatting function?
+Does it demonstrate LCEL chain composition?
+Does it explain how to debug chain issues?
+Improve Your Skill​
+
+If any gaps exist, update your skill:
+
+Update my rag-deployment skill with retrieval chain patterns:
+1. Retriever creation with search_type and search_kwargs
+2. format_docs and format_docs_with_source functions
+3. LCEL chain composition with parallel branches
+4. Debugging techniques for tracing data through chains
+5. Common mistakes (forgetting formatter, wrong k values)
+
+
+Your skill should now help you build retrieval chains that transform similarity search into intelligent, grounded answers.
+
+Try With AI​
+Prompt 1: Customize Your Prompt Template​
+Help me improve this RAG prompt template for the Task API. I want the
+assistant to:
+1. Suggest related tasks when answering
+2. Include code examples in Python and curl
+3. Warn about common mistakes
+
+Current template:
+"""
+Answer based on the context: {context}
+Question: {question}
+"""
+
+Show me an improved template and explain why each section helps.
+
+
+What you're learning: Prompt engineering for RAG systems. The quality of answers depends heavily on how you frame the question and structure the context.
+
+Prompt 2: Build a Conversational Chain​
+I want my QA chain to remember previous questions in the conversation.
+For example:
+- User: "How do I create a task?"
+- Assistant: [answers]
+- User: "What about with high priority?"
+- Assistant: [should understand this relates to task creation]
+
+Help me extend my chain with conversation memory. Use LangChain patterns.
+
+
+What you're learning: Stateful chains maintain context across multiple questions, enabling natural multi-turn conversations.
+
+Prompt 3: Handle No-Answer Cases​
+Sometimes my retrieval chain makes up answers when the documentation
+doesn't cover a topic. For example, asking about "task archiving" returns
+plausible but fabricated information.
+
+Help me:
+1. Detect when retrieved documents aren't relevant
+2. Return "I don't have information about that" gracefully
+3. Suggest what topics the documentation DOES cover
+
+Show code for implementing this guardrail.
+
+
+What you're learning: Grounding and hallucination prevention. Production RAG systems need safeguards when context doesn't support an answer.
+
+Safety Note: Retrieval chains can expose sensitive information from indexed documents. Before deploying, audit what's in your vector store and consider access controls for who can query it.

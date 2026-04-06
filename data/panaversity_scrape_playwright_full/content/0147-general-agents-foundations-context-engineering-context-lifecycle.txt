@@ -1,0 +1,603 @@
+Context Lifecycle: Knowing When to Reset vs Compress
+
+You've learned why context matters (Lesson 1), how the attention budget works (Lesson 2), and why position affects recall (Lesson 3). You've audited your CLAUDE.md for signal vs noise (Lesson 4) and explored getting tacit knowledge in and out (Lesson 5).
+
+Now comes the operational question: What do you actually DO when context becomes a problem?
+
+Whether you're a lawyer deep into contract review, a marketer building a campaign, a researcher synthesizing literature, or a developer debugging code,the principles are identical. Context fills up. Quality degrades. You need to decide: reset or compress?
+
+You've seen /clear and /compact in Chapter 14. You know they exist. But knowing commands isn't the same as knowing strategy. Should you clear now or compact? Should you preserve this tangent or let it go? Is 65% utilization fine or concerning?
+
+This lesson gives you the decision frameworks for context lifecycle management,when to reset, when to compress, how to customize compaction, and how to persist work across sessions.
+
+The Context Zones Framework​
+
+In Lesson 2, you learned that quality holds steady until roughly 70% utilization, then drops. But "monitor until 70%" isn't actionable. You need zones with specific actions.
+
+CONTEXT ZONES FRAMEWORK
+───────────────────────────────────────────────────────────────────
+│ GREEN   │ YELLOW  │ ORANGE  │  RED    │ BLACK   │
+│  0-50%  │ 50-70%  │ 70-85%  │ 85-95%  │  95%+   │
+│ ░░░░░░░ │ ▒▒▒▒▒▒▒ │ ▓▓▓▓▓▓▓ │ ███████ │ ██████× │
+│  Work   │ Monitor │ Compact │Emergency│  Reset  │
+│ freely  │ prepare │   NOW   │ compact │ required│
+───────────────────────────────────────────────────────────────────
+
+Zone	Utilization	State	Action Required
+Green	0-50%	Plenty of room	Work freely
+Yellow	50-70%	Approaching threshold	Monitor, prepare compaction
+Orange	70-85%	Quality degradation starting	/compact NOW
+Red	85-95%	Critical capacity	Emergency /compact
+Black	95%+	Near limit	/clear required
+
+Why these thresholds?
+
+50%: Research shows this is roughly where you should start paying attention. Context is accumulating faster than you might realize.
+70%: The cliff. Quality starts degrading here. Compacting at 70% preserves most of your work while maintaining quality.
+85%: Emergency territory. Compaction becomes increasingly difficult as you approach the limit,there's less room for the compacted summary.
+95%: Too late for graceful compaction. The overhead of compaction itself might push you over. Reset is safer.
+
+Checking your zone:
+
+/context
+
+
+Output:
+
+Context: 87,432 / 200,000 tokens (44%)
+Cost this session: $0.36
+
+
+44% = Green zone. Work freely.
+
+Context: 147,891 / 200,000 tokens (74%)
+Cost this session: $1.24
+
+
+74% = Orange zone. Compact NOW.
+
+The /clear vs /compact Decision​
+
+Both commands reduce context. They're not interchangeable. The wrong choice costs you either work (clearing when you should compact) or quality (compacting poisoned context).
+
+Use /clear when:
+
+Condition	Why /clear is right
+Task is complete	Nothing to preserve. Fresh start for next task.
+Context is poisoned	Outdated decisions, wrong directions, or accumulated confusion. Compaction preserves the poison.
+Switching to unrelated work	The context from task A actively hurts task B. Better to start clean.
+In Black zone (95%+)	No room for compaction overhead. Reset is the only option.
+Session is 3+ days old	Conversation has become too convoluted. Resuming causes more confusion than starting fresh.
+
+Use /compact when:
+
+Condition	Why /compact is right
+Same task continues	You need the decisions made, the files identified, the direction established.
+Need to preserve decisions	Important architectural choices or constraints discovered during session.
+Context is large but relevant	The size is the problem, not the content. Compression helps, deletion hurts.
+Compaction faster than re-explaining	If it would take 10 minutes to re-establish context vs 30 seconds to compact.
+
+The Decision Tree:
+
+Is context > 70%?
+├─ NO → Continue working, monitor at 50%+
+└─ YES → Needs action
+         │
+         Is task complete?
+         ├─ YES → /clear
+         └─ NO → Is context poisoned (outdated, confused, wrong direction)?
+                 ├─ YES → /clear and re-establish
+                 └─ NO → /compact with custom instructions
+
+
+Context Poisoning Examples:
+
+Context poisoning happens in every professional domain. Here's what it looks like:
+
+Legal Professional: You started analyzing Contract A for liability clauses. Midway through, the client pivoted to reviewing Contract B instead. Now your context is full of Contract A analysis, clause references, and risk assessments that actively confuse work on Contract B.
+
+Compacting this preserves the confusion. Clear instead.
+
+Marketing Professional: You've been iterating on campaign messaging for an hour. You tried three positioning angles before finding one that works. The context is full of those rejected angles.
+
+Compacting this might preserve "we tried lifestyle messaging and it didn't resonate" (useful) but also preserves the detailed exploration of that angle (noise). Clear might be cleaner.
+
+Research Professional: You've been synthesizing literature on your topic for 2 hours. You've identified 15 key themes, established methodological criteria, and noted 8 seminal papers. Context hit 75%.
+
+Compact this. You want those decisions preserved.
+
+Business Analyst: You started mapping Process A. Stakeholder feedback redirected you to Process B. Your context contains detailed flowcharts and edge cases for the wrong process.
+
+Compacting this preserves the wrong mental model. Clear instead.
+
+Developer: You've been working on the same feature for 2 hours. You've made 15 good decisions about architecture, identified 8 relevant files, and established constraints. Context hit 75%.
+
+Compact this. You want those decisions preserved.
+
+What /compact Actually Does​
+
+When you run /compact, Claude:
+
+Summarizes the conversation history into a condensed form
+Preserves critical information: decisions made, files changed, current task state
+Discards: verbose explanations, exploration tangents, superseded plans
+Reduces token count while maintaining continuity
+
+The result is a new session that "remembers" the important parts but has room for more work.
+
+Without custom instructions, compaction uses Claude's judgment about what's important. This is often good but sometimes misses domain-specific priorities.
+
+With custom instructions, you guide what gets preserved.
+
+Custom Compaction Instructions​
+
+The power move is telling Claude exactly what to preserve. Here are examples across professional domains:
+
+Legal:
+
+/compact Preserve: the liability clause analysis, our assessment of indemnification risks, and the list of flagged sections. Discard: the general discussion about contract law principles we explored in messages 10-15.
+
+
+Marketing:
+
+/compact Preserve: the final positioning statement, the three audience segments we defined, and the messaging hierarchy. Discard: the brainstorming about rejected taglines and the competitor analysis tangent.
+
+
+Research:
+
+/compact Preserve: the literature synthesis structure, the 8 key sources identified, and the methodological criteria. Discard: the detailed summaries of papers we decided weren't relevant.
+
+
+Consulting:
+
+/compact Preserve: the client requirements matrix, our recommendation framework, and the implementation timeline. Discard: the discussion about pricing models we rejected.
+
+
+Development:
+
+/compact Preserve: the list of modified files, the authentication architecture we chose, the decision to use JWT instead of sessions. Discard: the discussion about database options we rejected.
+
+
+Structure for custom compaction:
+
+/compact [Preserve: X, Y, Z] [Discard: A, B, C] [Focus: current task description]
+
+
+Configurable in CLAUDE.md:
+
+You can encode your default compaction priorities. Here's a domain-neutral template:
+
+## Context Management
+
+When compacting, always preserve:
+
+- All key decisions made this session with rationale
+- The current task definition and acceptance criteria
+- Any constraints or requirements discovered
+- The list of documents/files referenced or modified
+- Client/stakeholder preferences noted
+
+When compacting, feel free to discard:
+
+- Exploration of options we rejected
+- Tangents that led to dead ends
+- Verbose explanations of content I can re-read
+- Background research that informed but isn't directly needed
+
+
+This becomes your default compaction behavior. Claude will follow these priorities unless you override with specific instructions.
+
+Session Persistence Commands​
+
+Context lifecycle isn't just within sessions,it's across them. Sometimes you close the terminal and need to return.
+
+Command	Function	Use When
+claude --continue	Resume most recent session	You closed the terminal and want to pick up
+claude --resume	Pick from list of recent sessions	You have multiple projects, need to choose
+/resume	Switch to different conversation (in-session)	You're in one session but need another context
+
+--continue example:
+
+# You closed terminal last night mid-task
+claude --continue
+
+
+Output (varies by your work):
+
+Resuming session from 2026-01-28 23:45
+Last context: Reviewing vendor contract terms, 67% utilization
+──────────────────────────────────────────────────────────────
+Ready to continue where you left off.
+
+
+--resume example:
+
+claude --resume
+
+
+Output (example showing multi-project work):
+
+Recent sessions:
+1. [2026-01-28 23:45] contract-review - 67% - "Reviewing vendor contract terms..."
+2. [2026-01-28 14:20] campaign-q2 - 45% - "Planning Q2 marketing campaign..."
+3. [2026-01-27 10:15] literature-review - 23% - "Synthesizing research on..."
+
+Select session (1-3) or 'n' for new:
+
+
+/resume (in-session) example:
+
+/resume
+
+
+Output:
+
+Available sessions to switch to:
+1. campaign-q2 (45%) - paused 2026-01-28
+2. literature-review (23%) - paused 2026-01-27
+
+Switch to session number, or 'cancel':
+
+The 3-Day Rule​
+
+Conversations have a viability window. After roughly 3-4 days, a session typically becomes un-resumable,too many tangents, too much accumulated drift, too many implicit assumptions that no longer hold.
+
+Signs a session has expired:
+
+You can't remember what you were doing
+The context references files or decisions that have changed
+Resuming takes longer than starting fresh would
+Claude seems confused about the current state
+
+The rule: If a session is more than 3 days old, start fresh instead of resuming. Use the old session as reference (read the summary) but don't continue in it.
+
+Exception: Sessions with excellent progress files (Lesson 7) can last longer because the state is externalized, not trapped in conversation history.
+
+The Save Checkpoint Pattern​
+
+The safest context lifecycle pattern combines compaction with externalizing your progress. For developers, this means Git commits. For other professionals, it means saving documents, notes, or deliverables.
+
+1. Work in Green/Yellow zone
+2. Make meaningful progress
+3. Save checkpoint (commit code, save document, export notes)
+4. Check /context
+5. If Orange+: /compact
+6. Continue from checkpoint
+
+
+Why checkpoints matter:
+
+Checkpoints externalize progress (it's saved externally, not just in context)
+If compaction loses something important, the work is still saved
+You can /clear without losing work because work is checkpointed
+Recovery is always possible
+
+The pattern across domains:
+
+Legal Professional:
+
+[Work for 30 minutes reviewing contract]
+[Complete analysis of liability section]
+
+Save: contract-review-notes.md with liability findings
+
+/context
+→ Context: 142,000 / 200,000 (71%)
+
+/compact Preserve the liability assessment and flagged clauses. The analysis is saved, can reference notes directly now.
+
+[Continue with reduced context, saved checkpoint]
+
+
+Marketing Professional:
+
+[Work for 25 minutes on campaign]
+[Complete audience segmentation]
+
+Save: campaign-strategy.md with audience definitions
+
+/context
+→ Context: 138,000 / 200,000 (69%)
+
+/compact Preserve the three audience segments and positioning direction. Segmentation is saved.
+
+[Continue with reduced context, saved checkpoint]
+
+
+Researcher:
+
+[Work for 40 minutes synthesizing sources]
+[Complete thematic analysis of first 8 papers]
+
+Save: literature-synthesis.md with themes and citations
+
+/context
+→ Context: 145,000 / 200,000 (73%)
+
+/compact Preserve the 5 themes identified and methodology criteria. Synthesis is saved.
+
+[Continue with reduced context, saved checkpoint]
+
+
+Developer:
+
+[Work for 20 minutes]
+[Complete a logical unit]
+
+$ git add src/auth/
+$ git commit -m "Add token validation middleware"
+
+/context
+→ Context: 142,000 / 200,000 (71%)
+
+/compact Preserve the auth implementation decisions and current task (adding refresh tokens). The token validation is committed, can reference code directly now.
+
+[Continue with reduced context, committed checkpoint]
+
+
+This is Principle 5 (Persisting State in Files) applied to context lifecycle. The checkpoint IS the externalized progress. Context can be cleared or compacted because the real progress is saved outside the conversation.
+
+Lab: Context Zone Monitoring​
+
+Objective: Build awareness of context utilization patterns in your actual workflow.
+
+Choose Your Professional Context:
+
+Pick the scenario that matches your work:
+
+Professional Context	Example Task	Duration
+Legal	Contract review with clause analysis	45-60 min
+Marketing	Campaign brief development	30-45 min
+Research	Literature synthesis for a topic	45-60 min
+Consulting	Client deliverable preparation	30-45 min
+Development	Feature implementation	30-60 min
+
+What you'll need:
+
+A Claude Code session with real work to do
+A task from your domain that will take 30-60 minutes
+A simple logging mechanism (text file or spreadsheet)
+
+Protocol:
+
+Step 1: Create Your Monitoring Log
+
+Create a simple log file:
+
+# Context Zone Monitoring Log
+
+## Session: [Date] [Task Description]
+
+## Domain: [Legal / Marketing / Research / Consulting / Development]
+
+
+|
+ Message # 
+|
+ Tokens 
+|
+ Utilization 
+|
+ Zone 
+|
+ Action Taken 
+|
+
+
+|
+---------
+|
+------
+|
+-----------
+|
+----
+|
+------------
+|
+
+
+|
+ 0         
+|
+ ?      
+|
+ ?           
+|
+ ?    
+|
+ Starting     
+|
+
+
+
+Step 2: Establish Baseline
+
+Start a fresh session and check initial utilization:
+
+/context
+
+
+Output:
+
+Context: 12,456 / 200,000 tokens (6%)
+
+
+Log it: Message 0, 12,456 tokens, 6%, Green, Starting
+
+Step 3: Work and Monitor
+
+Every 10 messages (or every 5-10 minutes), run /context and log:
+
+Current token count
+Utilization percentage
+Zone (Green/Yellow/Orange/Red/Black)
+Any action you took
+
+Sample log progressions by domain:
+
+Legal Professional (Contract Review):
+
+Message #	Tokens	Utilization	Zone	Action Taken
+0	12,456	6%	Green	Starting
+10	45,892	23%	Green	Loaded contract document
+20	78,234	39%	Green	Analyzed liability clauses
+30	108,456	54%	Yellow	Started monitoring more closely
+40	138,567	69%	Yellow	Saved clause analysis to notes
+45	152,923	76%	Orange	/compact (preserved risk assessment)
+46	48,678	24%	Green	Post-compaction, back to Green
+
+Marketing Professional (Campaign Brief):
+
+Message #	Tokens	Utilization	Zone	Action Taken
+0	12,456	6%	Green	Starting
+10	38,892	19%	Green	Explored audience segments
+20	72,234	36%	Green	Developed messaging options
+30	105,456	53%	Yellow	Monitoring, saved segment definitions
+40	142,567	71%	Orange	/compact (preserved positioning)
+41	52,678	26%	Green	Post-compaction, back to Green
+
+Researcher (Literature Synthesis):
+
+Message #	Tokens	Utilization	Zone	Action Taken
+0	12,456	6%	Green	Starting
+10	52,892	26%	Green	Loaded first batch of papers
+20	89,234	45%	Green	Identified key themes
+30	118,456	59%	Yellow	Saved thematic notes, monitoring
+35	148,923	74%	Orange	/compact (preserved themes, methodology)
+36	45,678	23%	Green	Post-compaction, back to Green
+
+Step 4: Identify Your Pattern
+
+After the session, analyze your log:
+
+Average tokens per 10 messages: How fast does your context grow?
+Time to Yellow zone: How long can you work before needing to monitor?
+Optimal compaction point: Where did compaction work best?
+Post-compaction utilization: How much room did compaction buy you?
+
+Step 5: Calculate Your Compaction Cadence
+
+Based on your growth rate, calculate:
+
+Messages to Orange zone = (140,000 - starting_tokens) / tokens_per_10_messages * 10
+
+Example: (140,000 - 12,456) / 8,000 * 10 = 159 messages to Orange
+
+
+This is your compaction cadence,roughly how many messages before you need to compact.
+
+Deliverable: A completed monitoring log showing your typical context growth pattern, with calculated compaction cadence for your workflow.
+
+Expected Finding: Most professionals discover they hit Yellow zone faster than expected. The first time you see context jump 20% from loading a single large document or generating a detailed analysis, you'll understand why monitoring matters.
+
+What You Learned​
+
+This lesson gave you the operational framework for context lifecycle management,applicable whether you're reviewing contracts, building campaigns, synthesizing research, or writing code:
+
+Context Zones provide actionable thresholds: Green (work freely), Yellow (monitor), Orange (compact now), Red (emergency), Black (reset required).
+
+/clear vs /compact have distinct use cases: clear when task is complete or context is poisoned; compact when you need to preserve decisions and continue.
+
+Custom compaction instructions let you guide what survives: preserve key decisions, discard rejected explorations. The specific content varies by domain,liability assessments for legal, audience segments for marketing, thematic analysis for research, architecture decisions for development.
+
+Session persistence (--continue, --resume, /resume) lets you work across terminal sessions, but sessions expire after roughly 3 days.
+
+The save checkpoint pattern combines external saves with compaction,externalize progress (notes, documents, commits) before reducing context.
+
+The next lesson (Long-Horizon Work) builds on this foundation. You'll learn how to structure work that spans multiple sessions, using progress files and session architecture to maintain continuity beyond what context alone can provide.
+
+Try With AI​
+Prompt 1: Zone Assessment Practice​
+Run /context and tell me:
+1. What zone am I in (Green/Yellow/Orange/Red/Black)?
+2. Based on our conversation so far, what's in context that's:
+   - Essential to preserve if we compact
+   - Safe to discard
+   - Potentially poisoning (outdated or conflicting)
+
+Help me understand my current context state.
+
+
+What you're learning: Context awareness in practice. Before you can make good /clear vs /compact decisions, you need to accurately assess your current state. This prompt practices zone identification and context triage,the foundation of lifecycle management.
+
+Prompt 2: Compaction Decision Scenario​
+
+Choose the scenario that matches your domain:
+
+For Legal Professionals:
+
+I'm at 73% context utilization. Here's my situation:
+- I've been reviewing a vendor contract for 45 minutes
+- I made decisions about acceptable liability limits, identified problematic indemnification clauses, and flagged three sections for negotiation
+- There was a 10-minute tangent about a different contract type we decided doesn't apply
+- I haven't saved my analysis notes yet
+
+Should I /clear or /compact? If /compact, what custom instructions should I give?
+Walk me through your reasoning.
+
+
+For Marketing Professionals:
+
+I'm at 73% context utilization. Here's my situation:
+- I've been developing a Q2 campaign brief for 45 minutes
+- I made decisions about target audience segments, core messaging, and channel priorities
+- There was a 10-minute tangent about a promotion strategy we decided doesn't fit the budget
+- I haven't saved the campaign strategy document yet
+
+Should I /clear or /compact? If /compact, what custom instructions should I give?
+Walk me through your reasoning.
+
+
+For Researchers:
+
+I'm at 73% context utilization. Here's my situation:
+- I've been synthesizing literature on my research topic for 45 minutes
+- I identified 5 key themes, established inclusion/exclusion criteria, and noted methodological gaps
+- There was a 10-minute tangent about a related but ultimately off-topic subtopic
+- I haven't saved my synthesis notes yet
+
+Should I /clear or /compact? If /compact, what custom instructions should I give?
+Walk me through your reasoning.
+
+
+For Consultants:
+
+I'm at 73% context utilization. Here's my situation:
+- I've been preparing a client recommendations document for 45 minutes
+- I made decisions about priority recommendations, implementation sequence, and risk mitigation
+- There was a 10-minute tangent about an approach we decided doesn't fit the client's constraints
+- I haven't saved the deliverable draft yet
+
+Should I /clear or /compact? If /compact, what custom instructions should I give?
+Walk me through your reasoning.
+
+
+For Developers:
+
+I'm at 73% context utilization. Here's my situation:
+- I've been working on implementing a REST API for 45 minutes
+- I made decisions about endpoint structure, authentication approach, and error handling
+- There was a 10-minute tangent about database options we rejected
+- I haven't committed anything yet
+
+Should I /clear or /compact? If /compact, what custom instructions should I give?
+Walk me through your reasoning.
+
+
+What you're learning: Decision framework application. This prompt gives you practice with the /clear vs /compact decision tree using a realistic scenario from your domain. Claude's reasoning will model the analysis process you should internalize.
+
+Prompt 3: Custom Compaction Design​
+I need to /compact but I want to make sure critical context survives.
+
+From our conversation, identify:
+1. The 3 most important decisions or discoveries to preserve
+2. The 2 largest "noise" sections that can be safely discarded
+3. Write the exact /compact command with custom instructions I should use
+
+Then explain what I might lose even with good compaction instructions, so I know what to document externally before compacting.
+
+
+What you're learning: Compaction instruction crafting. Effective compaction requires understanding both what you want to keep AND what will inevitably be lost. This prompt practices creating precise compaction instructions while acknowledging the tradeoffs,preparing you to use external documentation (progress files, saved notes, commits) as backup.
+
+Flashcards Study Aid​

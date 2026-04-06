@@ -1,0 +1,469 @@
+tsx for Development
+
+You've built a CLI with Commander.js and added interactive features with ora and chalk. But there's friction in your development loop: every code change requires stopping the process, recompiling TypeScript, and running again. That compile step adds up to hundreds of interruptions per day.
+
+What if you could run TypeScript directly, like Python? What if your CLI script could execute immediately when you type its name, without node or npx? What if file changes triggered automatic re-execution?
+
+This is what tsx provides: zero-config TypeScript execution that eliminates the build step from development. Your iteration loop drops from "edit, compile, run" to just "edit, run." When building CLI tools, this acceleration compounds into hours saved per week.
+
+The Problem with Traditional TypeScript Development​
+
+The standard TypeScript workflow creates friction:
+
+# Traditional workflow (3 steps per iteration)
+tsc src/cli.ts --outDir dist    # Step 1: Compile
+node dist/cli.js chat "Hello"   # Step 2: Run
+# ... see error, edit file ...
+tsc src/cli.ts --outDir dist    # Step 3: Recompile
+node dist/cli.js chat "Hello"   # Step 4: Run again
+
+
+Output:
+
+src/cli.ts(15,5): error TS2345: Argument of type 'string' is not assignable...
+
+
+Every small change requires recompilation. For CLI development where you're constantly testing command variations, this adds significant overhead.
+
+ts-node improved this by running TypeScript directly:
+
+npx ts-node src/cli.ts chat "Hello"
+
+
+But ts-node has drawbacks: slower startup (it type-checks before running), complex configuration for ESM modules, and compatibility issues with modern Node.js features.
+
+tsx: Zero-Config TypeScript Execution​
+
+tsx is a faster alternative that uses esbuild for near-instant TypeScript transformation:
+
+# Install tsx
+npm install -D tsx
+
+# Run TypeScript directly
+npx tsx src/cli.ts chat "Hello"
+
+
+Output:
+
+Thinking...
+Hello! How can I help you today?
+
+
+No compilation step. No configuration. Just run.
+
+Speed Comparison​
+Tool	Cold Start	Hot Start	Type Checking
+ts-node	~800ms	~400ms	Yes (slower)
+tsx	~100ms	~50ms	No (faster)
+Compiled JS	~50ms	~30ms	Pre-compiled
+
+tsx achieves near-native speed by skipping type checking at runtime. Your IDE handles type checking continuously; tsx focuses on execution speed.
+
+Basic Usage Patterns​
+# Run a single file
+npx tsx src/cli.ts
+
+# Pass arguments
+npx tsx src/cli.ts chat "Explain async/await"
+
+# Run with environment variables
+API_KEY=sk-xxx npx tsx src/cli.ts config show
+
+
+Output:
+
+# Each command executes immediately without compilation
+
+ESM and CommonJS Support​
+
+tsx handles both module systems automatically:
+
+// Works with ESM imports
+import { Command } from "commander";
+import chalk from "chalk";
+
+// Works with CommonJS requires
+const fs = require("fs");
+
+
+Output:
+
+# Both import styles work without configuration
+
+
+No "type": "module" gymnastics. No .mjs extensions. tsx figures out what you need.
+
+Shebang Scripts: Executable TypeScript​
+
+A shebang (pronounced "sha-bang") makes scripts directly executable. Instead of npx tsx script.ts, you type ./script.ts or just script after adding it to your PATH.
+
+Creating a Shebang Script​
+
+Add this line as the very first line of your TypeScript file:
+
+#!/usr/bin/env tsx
+import { Command } from "commander";
+
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("Chat with AI from your terminal")
+  .argument("<prompt>", "Your message to the AI")
+  .action(async (prompt: string) => {
+    console.log(`You said: ${prompt}`);
+    // AI logic here
+  });
+
+program.parse();
+
+
+Output:
+
+# This file can now be executed directly
+
+Making It Executable​
+# Make the script executable
+chmod +x src/cli.ts
+
+# Run directly (no npx needed)
+./src/cli.ts "Hello, AI!"
+
+
+Output:
+
+You said: Hello, AI!
+
+
+The shebang #!/usr/bin/env tsx tells the operating system to use tsx as the interpreter. /usr/bin/env finds tsx in your PATH, making the script portable across different installations.
+
+Shebang Syntax Breakdown​
+Part	Purpose
+#!	Shebang marker (tells OS this is an interpreted script)
+/usr/bin/env	Utility that finds commands in PATH
+tsx	The interpreter to use
+
+This pattern works because tsx is installed globally or in your project's node_modules/.bin.
+
+Common Shebang Patterns​
+#!/usr/bin/env tsx
+// Standard: uses tsx from PATH
+
+#!/usr/bin/env -S npx tsx
+// Alternative: explicitly use npx (works if tsx isn't globally installed)
+
+#!/usr/bin/env node
+// For compiled JavaScript (not TypeScript)
+
+
+Output:
+
+# Different shebangs for different deployment scenarios
+
+Watch Mode for Rapid Iteration​
+
+Watch mode automatically re-runs your script when files change. This is invaluable for CLI development.
+
+Basic Watch Mode​
+# Watch a single file
+npx tsx watch src/cli.ts chat "Test message"
+
+
+Output:
+
+Thinking...
+Hello! I received your test message.
+
+[watch] Rerunning...
+Thinking...
+Updated response after your code change!
+
+
+Edit src/cli.ts, save, and tsx immediately re-executes with your changes. No manual restart needed.
+
+Watch with Multiple Arguments​
+# Watch while passing complex arguments
+npx tsx watch src/cli.ts chat --model gpt-4 --stream "Explain monads"
+
+
+Output:
+
+[watch] Watching for file changes...
+Streaming response: Monads are a design pattern...
+
+[watch] File changed: src/cli.ts
+[watch] Rerunning...
+Streaming response: Let me explain monads differently...
+
+Effective Watch Mode Workflow​
+
+A typical development session:
+
+# Terminal 1: Watch mode running
+npx tsx watch src/cli.ts chat "Test prompt"
+
+# Terminal 2: Edit files
+# Every save triggers re-execution in Terminal 1
+
+
+This workflow mirrors Python development: edit, save, see results. No mental context switch for "now I need to recompile."
+
+Watch Mode vs nodemon​
+
+You might know nodemon for watching Node.js files. tsx watch is simpler for TypeScript:
+
+Feature	nodemon + ts-node	tsx watch
+Setup	Requires configuration	Zero config
+Speed	Slower (type checking)	Fast (esbuild)
+ESM support	Complex setup	Automatic
+npm link: Test Your CLI Globally​
+
+Before publishing to npm, you want to test your CLI as if it were globally installed. npm link creates a symlink from your development directory to your global npm folder.
+
+Setting Up package.json​
+
+First, configure your CLI's entry point:
+
+{
+  "name": "@yourname/ai-chat",
+  "version": "1.0.0",
+  "bin": {
+    "ai-chat": "./src/cli.ts"
+  },
+  "type": "module"
+}
+
+
+Output:
+
+// The "bin" field maps command names to script files
+
+Creating the Global Link​
+# In your project directory
+npm link
+
+# Now use your CLI from anywhere
+ai-chat "Hello from anywhere!"
+
+
+Output:
+
+added 1 package, and audited 2 packages in 1s
+You said: Hello from anywhere!
+
+
+npm link does two things:
+
+Creates a symlink in your global npm folder pointing to your project
+Makes the command available in your terminal's PATH
+The Link Workflow​
+# Step 1: Link your package globally
+cd ~/projects/ai-chat-cli
+npm link
+
+# Step 2: Use it from any directory
+cd ~/Documents
+ai-chat "Works from here!"
+
+cd /tmp
+ai-chat "Works from here too!"
+
+
+Output:
+
+Works from here!
+Works from here too!
+
+Unlinking When Done​
+# Remove the global link
+npm unlink -g @yourname/ai-chat
+
+
+Output:
+
+removed 1 package in 0.5s
+
+Link + Watch for Full Development Experience​
+
+Combine npm link with watch mode for the complete CLI development workflow:
+
+# Terminal 1: Link and watch
+npm link
+npx tsx watch src/cli.ts --help
+
+# Terminal 2: Test the global command
+ai-chat chat "Test message"
+# Edit src/cli.ts, watch restarts, test again immediately
+
+
+Changes in your source code reflect immediately in the globally-linked command. No need to rebuild or re-link.
+
+tsx vs ts-node: When to Choose Each​
+
+Both tools run TypeScript directly, but they optimize for different scenarios.
+
+Choose tsx When:​
+Scenario	Why tsx
+CLI development	Fastest iteration cycle
+Scripts and automation	Zero config, just works
+ESM projects	Handles module systems automatically
+Development only	Type checking happens in IDE
+Choose ts-node When:​
+Scenario	Why ts-node
+Production execution	More battle-tested
+Strict type checking	Catches errors before execution
+Complex TypeScript config	More configuration options
+Debugging with source maps	Better debugger integration
+Practical Decision Guide​
+// For this chapter's CLI development: tsx
+npx tsx src/cli.ts chat "Hello"
+
+// For production deployment: compile to JavaScript
+npm run build  # tsc compiles to dist/
+node dist/cli.js chat "Hello"
+
+
+Output:
+
+# tsx for development speed
+# Compiled JS for production reliability
+
+
+Your package.json reflects this dual approach:
+
+{
+  "scripts": {
+    "dev": "tsx watch src/cli.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js"
+  }
+}
+
+Putting It Together: Development Workflow​
+
+Here's the complete tsx-powered CLI development workflow:
+
+Initial Setup​
+# Create project
+mkdir ai-chat-cli && cd ai-chat-cli
+npm init -y
+npm install -D tsx typescript @types/node
+npm install commander ora chalk
+
+# Create CLI entry point
+touch src/cli.ts
+chmod +x src/cli.ts
+
+CLI Skeleton​
+#!/usr/bin/env tsx
+import { Command } from "commander";
+import ora from "ora";
+import chalk from "chalk";
+
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("AI chat from your terminal")
+  .version("1.0.0");
+
+program
+  .command("chat")
+  .description("Send a message to AI")
+  .argument("<prompt>", "Your message")
+  .option("-m, --model <model>", "Model to use", "gpt-4")
+  .option("-s, --stream", "Stream response", false)
+  .action(async (prompt: string, options) => {
+    const spinner = ora("Thinking...").start();
+
+    // Simulate AI response
+    await new Promise(r => setTimeout(r, 1000));
+    spinner.stop();
+
+    console.log(chalk.green("AI: ") + `You asked about: ${prompt}`);
+    console.log(chalk.dim(`Model: ${options.model}, Stream: ${options.stream}`));
+  });
+
+program.parse();
+
+
+Output:
+
+./src/cli.ts chat "Hello" --model claude-3 --stream
+# Thinking... (spinner)
+# AI: You asked about: Hello
+# Model: claude-3, Stream: true
+
+Development Loop​
+# Link for global access
+npm link
+
+# Watch for changes
+npx tsx watch src/cli.ts chat "Test"
+
+# Make changes, watch auto-restarts
+# Test from another terminal: ai-chat chat "Hello"
+
+Verify Everything Works​
+# Direct execution
+npx tsx src/cli.ts chat "Direct test"
+
+# Shebang execution
+./src/cli.ts chat "Shebang test"
+
+# Global command (after npm link)
+ai-chat chat "Global test"
+
+
+Output:
+
+AI: You asked about: Direct test
+AI: You asked about: Shebang test
+AI: You asked about: Global test
+
+Try With AI​
+Prompt 1: Set Up Your tsx Environment​
+I'm building a CLI tool in TypeScript. Help me set up tsx for development.
+I need:
+1. A package.json with tsx as a dev dependency
+2. Scripts for dev (watch mode), build (compile), and start (run compiled)
+3. A basic CLI entry point with Commander.js
+
+Show me the files I need and explain each script's purpose.
+
+
+What you're learning: How to configure a TypeScript project with tsx for development and tsc for production. The separation between development tools (fast, no type check) and production builds (compiled, optimized) is a pattern you'll use throughout your AI engineering career.
+
+Prompt 2: Debug a Shebang Issue​
+My TypeScript CLI with shebang isn't working. When I run ./src/cli.ts, I get:
+"command not found: tsx"
+
+But npx tsx src/cli.ts works fine.
+
+My shebang line is: #!/usr/bin/env tsx
+
+Help me debug this. What are the possible causes and how do I fix each one?
+
+
+What you're learning: Troubleshooting PATH issues and understanding how shells find executables. This debugging skill transfers to any command-line tool development, not just TypeScript CLIs.
+
+Prompt 3: Compare Your Options​
+I'm confused about when to use different TypeScript execution methods.
+Compare these for me:
+
+1. npx tsx src/cli.ts
+2. npx ts-node src/cli.ts
+3. tsc && node dist/cli.js
+4. Using shebang with #!/usr/bin/env tsx
+
+For each one, tell me:
+- Speed (startup time)
+- When to use it
+- Downsides or gotchas
+
+I'm building a CLI that I'll eventually publish to npm. What's my best workflow?
+
+
+What you're learning: Tool selection based on requirements. Production engineering requires choosing the right tool for each phase of development. This decision-making process applies to all technology choices in AI system development.
+
+Safety note: When using npm link, remember it creates a global symlink that affects your entire system. Always unlink (npm unlink -g packagename) when you're done testing to avoid confusion with other projects. If something stops working unexpectedly, check if you have orphaned global links from previous projects.

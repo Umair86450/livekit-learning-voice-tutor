@@ -1,0 +1,776 @@
+Phone Integration with SIP & Twilio
+
+Your voice agent from Chapter 110 works perfectly over the web. Users connect through browsers, audio flows through LiveKit rooms, and conversations happen in real time. But what about the billions of people who want to call a phone number?
+
+Phone integration transforms your voice agent from a web application into a universal service. A customer support agent that answers +1-800-HELP-NOW. A scheduling assistant reachable from any landline. An appointment reminder that calls patients on their mobile phones. The PSTN (Public Switched Telephone Network) has existed for over a century, and your AI agent can now participate in it.
+
+This lesson teaches you how to connect voice agents to phone networks. You will understand the SIP protocol that powers modern telephony, implement inbound and outbound calls through Twilio, and learn when Telnyx offers a more cost-effective alternative. By the end, you will have a voice agent that can both answer incoming calls and proactively reach out to users.
+
+SIP Protocol Fundamentals​
+
+Before diving into provider integrations, you need to understand how voice calls actually work in modern telephony.
+
+What is SIP?​
+
+Session Initiation Protocol (SIP) is the standard protocol for initiating, maintaining, and terminating voice and video sessions. When you make a phone call, SIP handles the signaling that sets up the connection between callers.
+
+Think of SIP as the postal system for phone calls. SIP does not carry the actual voice audio. Instead, it carries messages like "I want to call this number," "The call is ringing," "The caller answered," and "The call ended." The actual audio travels through a separate channel (RTP - Real-time Transport Protocol).
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        SIP Call Flow                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Caller                    SIP Server                Agent      │
+│      │                          │                        │       │
+│      │─────── INVITE ──────────►│                        │       │
+│      │   "I want to call +1..."│                        │       │
+│      │                          │──────── INVITE ───────►│       │
+│      │                          │     "Incoming call..." │       │
+│      │                          │                        │       │
+│      │◄──────── 180 ────────────│◄─────── 180 ──────────│       │
+│      │      "Ringing..."        │     "Ringing..."       │       │
+│      │                          │                        │       │
+│      │◄──────── 200 ────────────│◄─────── 200 ──────────│       │
+│      │      "Connected!"        │     "Connected!"       │       │
+│      │                          │                        │       │
+│      │◄════════════════════ RTP Audio Stream ══════════►│       │
+│      │         (actual voice conversation)               │       │
+│      │                          │                        │       │
+│      │─────── BYE ─────────────►│                        │       │
+│      │      "Call ended"        │──────── BYE ──────────►│       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+SIP vs HTTP Webhooks​
+
+When integrating telephony with voice agents, you have two main approaches:
+
+Approach	How It Works	Latency	Complexity
+Native SIP	Direct SIP trunk connection to your infrastructure	Lower (50-100ms less)	Higher
+HTTP Webhooks	Provider calls your HTTP endpoint for call events	Higher	Lower
+
+Native SIP means your infrastructure speaks SIP directly. LiveKit can receive SIP calls without any middleware, connecting callers directly to rooms. This approach minimizes latency because there is no HTTP round-trip for call setup.
+
+# LiveKit SIP Trunk Configuration
+# Direct connection from SIP provider to LiveKit room
+
+sip_trunk_config = {
+    "trunk_id": "task-manager-trunk",
+    "inbound_addresses": ["sip.provider.com"],
+    "outbound_address": "sip.provider.com",
+    "auth_username": "your-username",
+    "auth_password": "your-password",
+}
+
+
+Output:
+
+SIP trunk registered: task-manager-trunk
+Inbound calls from sip.provider.com -> LiveKit room
+Ready to receive calls
+
+
+HTTP Webhooks mean the provider (Twilio, Telnyx) handles SIP on their infrastructure. When a call arrives, they send an HTTP request to your webhook URL. You respond with instructions (connect to room, play message, transfer call).
+
+# Twilio Webhook Approach
+# Provider handles SIP, you handle HTTP
+
+from fastapi import FastAPI, Request
+from twilio.twiml.voice_response import VoiceResponse
+
+app = FastAPI()
+
+@app.post("/voice/incoming")
+async def handle_incoming_call(request: Request):
+    """Twilio calls this endpoint when someone dials your number."""
+    response = VoiceResponse()
+    response.say("Connecting you to an agent...")
+    response.dial().conference("agent-room")
+    return str(response)
+
+
+Output:
+
+POST /voice/incoming
+From: +15551234567
+To: +18005551234
+CallSid: CA1234567890abcdef
+
+Response: TwiML connecting to conference room
+
+When to Use Each Approach​
+Use Native SIP When...	Use HTTP Webhooks When...
+Latency is critical (< 200ms setup)	Simpler setup preferred
+High call volume (1000+ calls/day)	Lower call volume
+You control infrastructure	Using managed platforms
+Need custom call routing	Standard call flows work
+
+For most voice agent projects, HTTP webhooks provide the right balance of simplicity and capability. Native SIP becomes valuable when you need minimal latency or handle high volumes.
+
+LiveKit Native SIP Support​
+
+LiveKit provides native SIP support for direct telephony integration. This means calls can connect directly to LiveKit rooms without going through a separate PBX or call handler.
+
+SIP Trunk Configuration​
+
+A SIP trunk is a virtual connection between your infrastructure and a telephony provider. Think of it as a dedicated phone line that can handle multiple simultaneous calls.
+
+from livekit.api import LiveKitAPI, SIPTrunkInfo
+
+async def configure_sip_trunk():
+    """Configure LiveKit to receive SIP calls."""
+    api = LiveKitAPI()
+
+    trunk = SIPTrunkInfo(
+        name="task-manager-voice",
+        numbers=["+18005551234"],  # Your phone numbers
+        inbound_addresses=["sip.twilio.com"],  # Provider SIP address
+        outbound_address="sip.twilio.com",
+        outbound_username="your-account-sid",
+        outbound_password="your-auth-token",
+    )
+
+    result = await api.sip.create_sip_trunk(trunk)
+    print(f"Created trunk: {result.trunk_id}")
+    return result
+
+
+Output:
+
+Creating SIP trunk...
+Trunk ID: TR_abc123def456
+Numbers: ['+18005551234']
+Status: Active
+Ready for inbound calls
+
+Dispatch Rules​
+
+When a call arrives, LiveKit needs to know which room to connect it to. Dispatch rules define this routing logic:
+
+from livekit.api import SIPDispatchRule, SIPDispatchRuleInfo
+
+async def configure_dispatch():
+    """Route incoming calls to appropriate rooms."""
+    api = LiveKitAPI()
+
+    rule = SIPDispatchRuleInfo(
+        name="task-manager-dispatch",
+        trunk_ids=["TR_abc123def456"],
+        rule=SIPDispatchRule(
+            # Create a new room for each call
+            dispatch_rule_individual=SIPDispatchRule.Individual(
+                room_prefix="call-",  # Rooms named call-{timestamp}
+                pin="",  # No PIN required
+            )
+        ),
+    )
+
+    result = await api.sip.create_sip_dispatch_rule(rule)
+    print(f"Dispatch rule created: {result.rule_id}")
+    return result
+
+
+Output:
+
+Dispatch rule created: DR_xyz789
+Routing: +18005551234 -> call-* rooms
+New rooms created per call
+
+Handling Incoming SIP Calls​
+
+Once configured, your voice agent receives SIP calls like any other room participant:
+
+from livekit.agents import cli, JobContext, AutoSubscribe, WorkerOptions
+
+async def entrypoint(ctx: JobContext):
+    """Handle incoming voice call."""
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
+    # Check if this is a SIP call
+    room_name = ctx.room.name
+    if room_name.startswith("call-"):
+        print(f"SIP call connected: {room_name}")
+
+    # Wait for the caller
+    participant = await ctx.wait_for_participant()
+
+    # participant.attributes may contain caller info
+    caller_number = participant.attributes.get("sip.callerNumber", "Unknown")
+    print(f"Caller: {caller_number}")
+
+    # Start voice agent session (same as web-based calls)
+    # ... agent configuration from Chapter 110
+
+
+Output:
+
+[agent] SIP call connected: call-1704234567
+[agent] Caller: +15551234567
+[agent] Starting voice agent session...
+[stt] User speaking detected
+[stt] "Hi, I need help with my account"
+
+
+The key insight: once connected, SIP calls behave identically to web-based calls. Your voice agent code does not need to know whether the user connected via browser or phone.
+
+Twilio Voice Integration​
+
+Twilio is the most widely-used cloud communications platform. Their Voice API provides reliable telephony with global coverage. Let's implement both inbound and outbound calling.
+
+Setting Up Twilio​
+
+First, you need a Twilio account and phone number:
+
+Create account at twilio.com
+Get a phone number (Voice-capable)
+Note your Account SID and Auth Token
+Configure webhook URL for incoming calls
+# Environment configuration
+import os
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")  # +18005551234
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")  # https://your-domain.com
+
+Inbound Calls: Receiving Phone Calls​
+
+When someone calls your Twilio number, Twilio sends an HTTP request to your webhook. You respond with TwiML (Twilio Markup Language) that tells Twilio what to do.
+
+from fastapi import FastAPI, Request, Form
+from twilio.twiml.voice_response import VoiceResponse, Dial
+from twilio.request_validator import RequestValidator
+import os
+
+app = FastAPI()
+validator = RequestValidator(TWILIO_AUTH_TOKEN)
+
+@app.post("/voice/incoming")
+async def handle_incoming_call(
+    request: Request,
+    From: str = Form(...),
+    To: str = Form(...),
+    CallSid: str = Form(...),
+):
+    """Handle incoming Twilio Voice call."""
+
+    # Validate request is from Twilio (production requirement)
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = str(request.url)
+    params = dict(await request.form())
+
+    if not validator.validate(url, params, signature):
+        return {"error": "Invalid signature"}, 403
+
+    print(f"Incoming call from {From} to {To}")
+    print(f"Call SID: {CallSid}")
+
+    # Build TwiML response
+    response = VoiceResponse()
+
+    # Greet the caller
+    response.say(
+        "Welcome to Task Manager. Connecting you to an assistant.",
+        voice="Polly.Joanna",
+        language="en-US"
+    )
+
+    # Connect to LiveKit via SIP (if using SIP integration)
+    dial = Dial()
+    dial.sip(
+        f"sip:agent-{CallSid}@your-livekit-sip.com",
+        status_callback=f"{WEBHOOK_BASE_URL}/voice/status",
+    )
+    response.append(dial)
+
+    return str(response)
+
+
+Output (when call arrives):
+
+[webhook] POST /voice/incoming
+[webhook] From: +15551234567, To: +18005551234
+[webhook] CallSid: CA9876543210fedcba
+
+Twilio receives TwiML:
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Joanna">Welcome to Task Manager. Connecting you to an assistant.</Say>
+    <Dial>
+        <Sip>sip:agent-CA9876543210fedcba@your-livekit-sip.com</Sip>
+    </Dial>
+</Response>
+
+[agent] SIP connection established
+[agent] Starting voice session with caller +15551234567
+
+Alternative: Conference-Based Connection​
+
+If you are not using native SIP, you can connect via Twilio Conference:
+
+@app.post("/voice/incoming-conference")
+async def handle_incoming_conference(
+    From: str = Form(...),
+    CallSid: str = Form(...),
+):
+    """Connect caller to agent via conference room."""
+    response = VoiceResponse()
+
+    # Brief greeting
+    response.say("Connecting you now.", voice="Polly.Joanna")
+
+    # Connect to conference
+    dial = Dial()
+    dial.conference(
+        f"agent-room-{CallSid}",
+        start_conference_on_enter=True,
+        end_conference_on_exit=True,
+        status_callback=f"{WEBHOOK_BASE_URL}/voice/conference-status",
+    )
+    response.append(dial)
+
+    # Simultaneously trigger your agent to join the same conference
+    await trigger_agent_join(f"agent-room-{CallSid}", From)
+
+    return str(response)
+
+async def trigger_agent_join(conference_name: str, caller_number: str):
+    """Tell your voice agent to join the conference."""
+    # Implementation depends on your agent orchestration
+    # Could be a message queue, HTTP call to agent service, etc.
+    pass
+
+
+Output:
+
+[webhook] Creating conference: agent-room-CA9876543210
+[orchestrator] Triggering agent to join conference
+[agent] Joining conference via Twilio
+[agent] Caller +15551234567 connected
+[agent] Starting conversation...
+
+Outbound Calls: Agent Calls User​
+
+Your voice agent can also initiate calls. This is essential for appointment reminders, follow-ups, or proactive customer outreach.
+
+from twilio.rest import Client
+
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+async def make_outbound_call(
+    to_number: str,
+    message: str,
+    connect_to_agent: bool = True,
+):
+    """Have the voice agent call a user."""
+
+    if connect_to_agent:
+        # Call connects to agent for conversation
+        call = client.calls.create(
+            to=to_number,
+            from_=TWILIO_PHONE_NUMBER,
+            url=f"{WEBHOOK_BASE_URL}/voice/outbound-connect",
+            status_callback=f"{WEBHOOK_BASE_URL}/voice/status",
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+        )
+    else:
+        # Simple message, no agent needed
+        call = client.calls.create(
+            to=to_number,
+            from_=TWILIO_PHONE_NUMBER,
+            twiml=f'<Response><Say>{message}</Say></Response>',
+        )
+
+    print(f"Outbound call initiated: {call.sid}")
+    return call.sid
+
+@app.post("/voice/outbound-connect")
+async def handle_outbound_connection(CallSid: str = Form(...)):
+    """Called when outbound call is answered."""
+    response = VoiceResponse()
+
+    # Greet the user
+    response.say(
+        "Hi, this is Task Manager calling about your upcoming deadline.",
+        voice="Polly.Joanna"
+    )
+
+    # Connect to agent for conversation
+    dial = Dial()
+    dial.sip(f"sip:outbound-{CallSid}@your-livekit-sip.com")
+    response.append(dial)
+
+    return str(response)
+
+
+Output:
+
+>>> await make_outbound_call("+15559876543", "Your task is due tomorrow")
+
+[twilio] Initiating outbound call to +15559876543
+[twilio] Call SID: CA1111222233334444
+[twilio] Status: initiated
+[twilio] Status: ringing
+[twilio] Status: answered
+[webhook] POST /voice/outbound-connect
+[agent] Joining outbound call session
+[agent] "Hi, this is Task Manager calling about your upcoming deadline."
+
+Call Status Tracking​
+
+Track call lifecycle for logging, analytics, and error handling:
+
+from datetime import datetime
+
+call_records = {}  # In production, use a database
+
+@app.post("/voice/status")
+async def handle_call_status(
+    CallSid: str = Form(...),
+    CallStatus: str = Form(...),
+    CallDuration: str = Form(None),
+    From: str = Form(None),
+    To: str = Form(None),
+):
+    """Track call status changes."""
+
+    if CallSid not in call_records:
+        call_records[CallSid] = {
+            "from": From,
+            "to": To,
+            "events": [],
+        }
+
+    call_records[CallSid]["events"].append({
+        "status": CallStatus,
+        "timestamp": datetime.utcnow().isoformat(),
+        "duration": CallDuration,
+    })
+
+    print(f"Call {CallSid}: {CallStatus}")
+
+    # Handle specific statuses
+    if CallStatus == "completed":
+        duration = int(CallDuration or 0)
+        print(f"Call completed. Duration: {duration} seconds")
+        # Save transcript, update CRM, etc.
+
+    elif CallStatus == "failed" or CallStatus == "busy" or CallStatus == "no-answer":
+        print(f"Call failed: {CallStatus}")
+        # Maybe schedule retry or send SMS instead
+
+    return {"status": "ok"}
+
+
+Output:
+
+[status] Call CA1111222233334444: initiated
+[status] Call CA1111222233334444: ringing
+[status] Call CA1111222233334444: in-progress
+[status] Call CA1111222233334444: completed
+[status] Call completed. Duration: 127 seconds
+
+Telnyx Cost Optimization​
+
+Twilio is reliable but not always the most cost-effective choice. Telnyx offers similar capabilities at significantly lower prices, making it attractive for high-volume applications.
+
+Pricing Comparison​
+Provider	Per-Minute Inbound	Per-Minute Outbound	Phone Number
+Twilio	~$0.0085	~$0.014	~$1.15/month
+Telnyx	~$0.002	~$0.005	~$1.00/month
+
+For 5,000 minutes per month of inbound calls:
+
+Twilio: 5,000 x $0.0085 = $42.50
+Telnyx: 5,000 x $0.002 = $10.00
+
+That is a 76% cost reduction with Telnyx for the same functionality.
+
+Telnyx Integration​
+
+Telnyx uses similar concepts to Twilio with slightly different API structure:
+
+import telnyx
+import os
+
+telnyx.api_key = os.getenv("TELNYX_API_KEY")
+
+# Outbound call with Telnyx
+async def make_telnyx_call(to_number: str, message: str):
+    """Initiate outbound call via Telnyx."""
+
+    call = telnyx.Call.create(
+        connection_id=os.getenv("TELNYX_CONNECTION_ID"),
+        to=to_number,
+        from_=os.getenv("TELNYX_PHONE_NUMBER"),
+        webhook_url=f"{WEBHOOK_BASE_URL}/telnyx/events",
+        answering_machine_detection="detect",
+    )
+
+    print(f"Telnyx call initiated: {call.call_control_id}")
+    return call.call_control_id
+
+
+Output:
+
+[telnyx] Call initiated: ctrl_abc123def456
+[telnyx] Status: ringing
+[telnyx] Status: answered
+[webhook] Call connected, speaking message...
+
+Telnyx Webhook Handler​
+
+Telnyx sends events differently than Twilio, using a unified webhook format:
+
+from fastapi import Request
+import json
+
+@app.post("/telnyx/events")
+async def handle_telnyx_events(request: Request):
+    """Handle Telnyx call events."""
+
+    body = await request.json()
+    event_type = body.get("data", {}).get("event_type")
+    payload = body.get("data", {}).get("payload", {})
+    call_control_id = payload.get("call_control_id")
+
+    print(f"Telnyx event: {event_type}")
+
+    if event_type == "call.initiated":
+        print(f"Call starting: {call_control_id}")
+
+    elif event_type == "call.answered":
+        print(f"Call answered: {call_control_id}")
+        # Connect to voice agent or play message
+        await connect_telnyx_to_agent(call_control_id)
+
+    elif event_type == "call.hangup":
+        print(f"Call ended: {call_control_id}")
+        # Cleanup and logging
+
+    return {"status": "received"}
+
+async def connect_telnyx_to_agent(call_control_id: str):
+    """Transfer Telnyx call to voice agent."""
+
+    call = telnyx.Call.retrieve(call_control_id)
+
+    # Transfer to SIP endpoint (your LiveKit SIP trunk)
+    call.transfer(
+        to=f"sip:agent-{call_control_id}@your-livekit-sip.com"
+    )
+
+
+Output:
+
+[telnyx] Event: call.initiated
+[telnyx] Call starting: ctrl_abc123def456
+[telnyx] Event: call.answered
+[telnyx] Transferring to SIP endpoint...
+[agent] Telnyx call connected via SIP
+
+When to Use Telnyx vs Twilio​
+Choose Telnyx When...	Choose Twilio When...
+Cost is primary concern	Need extensive documentation/support
+High volume (10,000+ min/month)	Using Twilio ecosystem (SMS, Video)
+Technical team can handle integration	Want managed complexity
+Primarily US/EU traffic	Need global reach in specific regions
+
+Many production systems use both providers: Telnyx for high-volume, cost-sensitive traffic, and Twilio as backup or for premium features.
+
+8kHz PSTN Audio Considerations​
+
+Phone networks use lower audio quality than web-based voice. This affects how your voice agent performs.
+
+The 8kHz Reality​
+
+PSTN audio transmits at 8kHz sample rate (8,000 samples per second), compared to 16kHz or 48kHz for web audio. This means:
+
+Less speech clarity (frequencies above 4kHz cut off)
+Reduced transcription accuracy (STT models trained on higher quality)
+Some voice nuances lost (speaker identification harder)
+┌────────────────────────────────────────────────────────────────┐
+│                    Audio Quality Comparison                     │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Web Audio (48kHz)    ████████████████████████████             │
+│                       Full frequency range                      │
+│                       Excellent STT accuracy                    │
+│                                                                 │
+│  PSTN Audio (8kHz)    ████████                                 │
+│                       Limited to 4kHz                          │
+│                       Good STT accuracy (optimized models)      │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+
+Impact on Voice Agent Performance​
+
+Native Speech-to-Speech models (like GPT-4o Realtime) lose some advantage at 8kHz because:
+
+Prosody detection less accurate
+Emotion recognition reduced
+Speaker identification harder
+
+Cascaded pipelines (STT -> LLM -> TTS) may actually perform better on phone because:
+
+STT models have 8kHz-optimized variants
+Text-based LLM reasoning unaffected by audio quality
+TTS output downsampled anyway for PSTN
+Configuring for PSTN Audio​
+
+When building voice agents for phone integration, configure your pipeline accordingly:
+
+from livekit.agents import VoiceAgent
+from livekit.plugins import deepgram, openai, cartesia
+
+# Configuration optimized for PSTN
+agent = VoiceAgent(
+    # Use Deepgram's telephony-optimized model
+    stt=deepgram.STT(
+        model="nova-2-phonecall",  # Optimized for 8kHz
+        language="en-US",
+        smart_format=True,
+        filler_words=True,  # Keep "um", "uh" for natural flow
+    ),
+
+    # LLM doesn't care about audio quality
+    llm=openai.LLM(
+        model="gpt-4o-mini",
+        temperature=0.7,
+    ),
+
+    # TTS should output phone-compatible audio
+    tts=cartesia.TTS(
+        voice="sonic-english",
+        sample_rate=8000,  # Match PSTN rate
+    ),
+
+    instructions="""
+    You are a phone-based assistant. Users are calling from phones,
+    so audio quality may be lower. Key adaptations:
+    - Speak clearly and at moderate pace
+    - Confirm important details by repeating back
+    - Spell out unusual words when needed
+    - Ask for clarification if unclear
+    """,
+)
+
+
+Output:
+
+[stt] Using nova-2-phonecall (8kHz optimized)
+[tts] Sample rate: 8000 Hz (PSTN compatible)
+[agent] PSTN-optimized pipeline ready
+
+Testing with Phone Quality​
+
+Before deploying to production, test with actual phone audio:
+
+async def test_pstn_quality():
+    """Test voice agent with simulated PSTN audio."""
+
+    # Resample test audio to 8kHz
+    import librosa
+
+    audio, sr = librosa.load("test_utterance.wav", sr=None)
+    audio_8khz = librosa.resample(audio, orig_sr=sr, target_sr=8000)
+
+    # Run through STT
+    transcription = await stt.transcribe(audio_8khz)
+    print(f"PSTN transcription: {transcription}")
+
+    # Compare to high-quality transcription
+    audio_48khz = librosa.resample(audio, orig_sr=sr, target_sr=48000)
+    transcription_hq = await stt.transcribe(audio_48khz)
+    print(f"HQ transcription: {transcription_hq}")
+
+
+Output:
+
+PSTN transcription: "I need to reschedule my appointment for Tuesday"
+HQ transcription: "I need to reschedule my appointment for Tuesday"
+Match: 100% (simple utterance)
+
+PSTN transcription: "My confirmation number is B as in bravo, 7, 4, 2"
+HQ transcription: "My confirmation number is B742"
+Match: Different format, same content
+
+Improve Your Skill​
+
+You have learned telephony integration patterns that your voice-telephony skill from Lesson 0 may not fully capture. Take a moment to reflect on what you discovered.
+
+New Knowledge to Add:
+
+SIP vs HTTP webhook decision criteria
+Twilio inbound/outbound code patterns
+Telnyx as cost-effective alternative (76% savings potential)
+PSTN audio quality considerations
+
+Skill Improvement Questions:
+
+Does your skill explain when to use native SIP vs webhooks?
+Does it include Twilio/Telnyx setup code patterns?
+Does it mention PSTN audio quality and STT model selection?
+Does it have a provider comparison table?
+
+Update .claude/skills/voice-telephony/SKILL.md with patterns from this lesson. A skill that grows with your understanding becomes increasingly valuable for future projects.
+
+Try With AI​
+Prompt 1: Understand SIP vs Webhooks​
+I'm learning phone integration for voice agents. Use my voice-telephony
+skill to help me understand:
+
+1. When should I use LiveKit's native SIP vs Twilio webhooks?
+2. What's the latency difference between approaches?
+3. What infrastructure do I need for each?
+4. Which approach works better with my existing LiveKit agent?
+
+Use diagrams or flow charts to clarify the decision.
+
+
+What you are learning: Architecture selection for telephony. Understanding when to use each approach prevents over-engineering simple integrations or under-building complex ones. This decision affects latency, cost, and operational complexity.
+
+Prompt 2: Implement Twilio Inbound Calls​
+Help me implement inbound Twilio Voice calls that connect to my
+LiveKit voice agent:
+
+Requirements:
+- Twilio phone number: [your number]
+- Voice agent: Running on LiveKit (from Chapter 110)
+- Webhook: FastAPI endpoint for incoming calls
+- Response: Connect caller to voice agent room
+
+Walk me through the code step by step. After we build it, I'll make
+a test call and report what works.
+
+
+What you are learning: Inbound telephony integration. Receiving real phone calls requires handling Twilio's webhook format, generating valid TwiML responses, and connecting the PSTN call to your voice agent infrastructure. This is the foundation for any phone-accessible voice agent.
+
+Prompt 3: Compare Provider Costs​
+I need to choose between Twilio and Telnyx for my Task Manager's
+phone integration. My constraints:
+
+- Expected volume: 1,000-5,000 minutes/month
+- Budget sensitivity: Cost matters for this use case
+- Feature needs: Inbound + outbound, basic IVR
+- Reliability: Must work 99.9% of time
+
+Use my voice-telephony skill to:
+1. Calculate monthly costs for both providers
+2. Compare feature parity
+3. Recommend which to use and why
+
+I'll validate your cost estimates against current pricing pages.
+
+
+What you are learning: Cost optimization for production voice systems. Provider selection is not just about features but about matching usage patterns to pricing structures. Learning to analyze these tradeoffs helps you build economically sustainable voice applications.
+
+Safety Note​
+
+Phone integration involves handling personal information and incurs real costs. Always:
+
+Validate caller identity for sensitive operations
+Comply with regulations (TCPA for outbound calls in US, GDPR for EU)
+Monitor costs with alerts (unexpected call volume can be expensive)
+Test thoroughly in sandbox before production
+Log call metadata for debugging but be careful with call content

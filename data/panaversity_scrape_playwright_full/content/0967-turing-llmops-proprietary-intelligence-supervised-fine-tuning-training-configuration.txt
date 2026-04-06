@@ -1,0 +1,392 @@
+Training Configuration
+
+You have a dataset. You have Unsloth configured. Now comes the question that determines whether your fine-tuning succeeds or fails: how do you configure training?
+
+Get the learning rate wrong, and your model either learns nothing (too low) or forgets everything (too high). Get batch size wrong, and you run out of memory. Get epochs wrong, and you either underfit or overfit.
+
+This lesson gives you the decision frameworks to configure training correctly the first time. No guesswork. No trial-and-error loops that waste your limited Colab GPU time.
+
+The Configuration Challenge​
+
+Fine-tuning configuration is not intuitive. Unlike traditional programming where you can debug line-by-line, training configurations interact in complex ways:
+
+Symptom	Possible Causes
+Loss doesn't decrease	Learning rate too low, bad data, wrong format
+Loss spikes then explodes	Learning rate too high
+Out of memory (OOM)	Batch size too large, sequence length too long
+Model forgets base knowledge	Learning rate too high, too many epochs
+Model doesn't learn new patterns	Learning rate too low, too few epochs
+
+The good news: LoRA training is more forgiving than full fine-tuning. The bad news: you still need to get the fundamentals right.
+
+Learning Rate: The Most Critical Parameter​
+
+Learning rate controls how much the model updates its weights after each training step. For LoRA fine-tuning, the sweet spot is significantly higher than traditional fine-tuning because you're only training a small subset of parameters.
+
+Learning Rate Ranges​
+Full Fine-Tuning:  1e-6  to  1e-5   (very small steps)
+LoRA Fine-Tuning:  5e-5  to  2e-4   (10-100x higher)
+QLoRA (4-bit):     1e-4  to  3e-4   (slightly higher still)
+
+
+Why the difference? In full fine-tuning, you're modifying all 7 billion parameters. A high learning rate causes catastrophic forgetting. In LoRA, you're modifying about 1% of parameters (the adapters), so the base model knowledge is preserved.
+
+Starting Point for Task API​
+
+For our 500-row Task API dataset on Llama-3-8B:
+
+learning_rate = 2e-4  # 0.0002
+
+
+This is the Unsloth recommended default for QLoRA. It works well for most instruction-tuning tasks.
+
+When to Adjust​
+Dataset Size	Recommended LR	Reasoning
+< 100 examples	1e-4	Lower to prevent overfitting
+100-1000 examples	2e-4	Standard range
+1000-10000 examples	2e-4 to 5e-5	Can go lower for stability
+> 10000 examples	5e-5	Lower for smoother convergence
+
+With our 500-row dataset, 2e-4 is appropriate. If you see unstable loss curves (jumping around), try 1e-4.
+
+Batch Size and Gradient Accumulation​
+
+Batch size determines how many examples the model sees before updating weights. Larger batches provide more stable gradients but require more memory.
+
+The Memory Constraint​
+
+On Colab T4 with 16GB VRAM, running Llama-3-8B with 4-bit quantization:
+
+per_device_train_batch_size	Memory Usage	Status
+1	~12GB	Safe
+2	~13GB	Safe
+4	~15GB	Near limit
+8	OOM	Fails
+
+Recommendation: per_device_train_batch_size = 4 for T4.
+
+Gradient Accumulation​
+
+What if you want the benefits of larger batches without the memory cost? Gradient accumulation simulates larger batches by accumulating gradients over multiple forward passes before updating weights.
+
+# Effective batch size = per_device_batch_size * gradient_accumulation_steps
+effective_batch_size = 4 * 4  # = 16
+
+training_args = TrainingArguments(
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,  # Effective batch size: 16
+)
+
+Why Effective Batch Size Matters​
+Effective Batch	Training Behavior
+4	Noisier gradients, faster iteration, may need lower LR
+16	More stable gradients, standard choice for instruction-tuning
+32+	Very stable, may be overkill for small datasets
+
+For Task API (500 rows), effective batch size of 16 is appropriate. With 16 examples per gradient update, you get stable training without over-smoothing.
+
+The Calculation​
+Total steps per epoch = dataset_size / effective_batch_size
+                      = 500 / 16
+                      = 31.25 (rounds to 32)
+
+Total training steps = steps_per_epoch * num_epochs
+                     = 32 * 3
+                     = 96 steps
+
+
+Only 96 training steps! This is why LoRA is so fast.
+
+Epochs: How Long to Train​
+
+An epoch is one complete pass through your training data. More epochs mean more exposure to examples, but too many leads to overfitting.
+
+The Overfitting Risk​
+Epoch 1: Model learns general patterns
+Epoch 2: Model refines understanding
+Epoch 3: Model memorizes specific examples
+Epoch 4+: Model overfits, loses generalization
+
+
+For instruction-tuning datasets:
+
+Dataset Size	Recommended Epochs
+< 200 examples	1-2
+200-500 examples	2-3
+500-2000 examples	1-3
+> 2000 examples	1 (often sufficient)
+
+Task API Recommendation: num_train_epochs = 3
+
+With 500 rows, 3 epochs means the model sees each example 3 times. This is enough to learn patterns without memorizing.
+
+Warmup: Gradual Learning Start​
+
+Training starts with random adapter weights. If you immediately apply the full learning rate, you can destabilize training. Warmup gradually increases the learning rate from near-zero to the target value.
+
+Step   1:  LR = 0.00001  (near zero)
+Step  10:  LR = 0.00010  (ramping up)
+Step  30:  LR = 0.00020  (full learning rate)
+Step 100:  LR = 0.00020  (maintained)
+
+Warmup Ratio​
+warmup_ratio = 0.03  # 3% of total steps
+
+
+With 96 total steps:
+
+Warmup steps = 96 * 0.03 = ~3 steps
+Full learning rate reached at step 3
+
+For small datasets, 3-5% warmup is standard. You can also specify warmup_steps directly:
+
+warmup_steps = 5  # Alternative to warmup_ratio
+
+Weight Decay: Light Regularization​
+
+Weight decay prevents overfitting by penalizing large weights. For LoRA training, use light regularization:
+
+weight_decay = 0.01  # 1% penalty
+
+
+This is low compared to traditional models (often 0.1) because LoRA already constrains what can be learned through low-rank decomposition.
+
+When to Increase​
+
+If you see overfitting (training loss decreasing but validation loss increasing):
+
+weight_decay = 0.05  # Try 5% for severe overfitting
+
+
+But first, try reducing epochs. Overfitting is usually a data/duration problem, not a regularization problem.
+
+Mixed Precision: Speed and Memory​
+
+Mixed precision (FP16) uses 16-bit floats instead of 32-bit for most operations. Benefits:
+
+2x faster training
+Half the memory for activations
+Nearly identical quality
+fp16 = True  # Enable on NVIDIA GPUs
+
+
+For T4 GPUs, always enable FP16. The quality difference is negligible, and you get significant speed and memory benefits.
+
+BF16 Alternative​
+
+If using A100 or newer GPUs, BF16 (bfloat16) is even better:
+
+bf16 = True   # Only on Ampere GPUs (A100, RTX 3090+)
+fp16 = False  # Mutually exclusive with bf16
+
+
+For Colab T4 (Turing architecture), stick with FP16.
+
+The Complete Configuration​
+
+Here's the full TrainingArguments for Task API fine-tuning:
+
+from transformers import TrainingArguments
+
+training_args = TrainingArguments(
+    # Output
+    output_dir="./task-api-model",
+
+    # Training duration
+    num_train_epochs=3,
+
+    # Batch configuration
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=4,
+    gradient_accumulation_steps=4,  # Effective batch: 16
+
+    # Learning rate
+    learning_rate=2e-4,
+    lr_scheduler_type="linear",  # Linear decay
+    warmup_ratio=0.03,
+
+    # Regularization
+    weight_decay=0.01,
+
+    # Precision
+    fp16=True,
+
+    # Logging
+    logging_steps=10,
+    save_strategy="epoch",
+
+    # Evaluation (if you have eval dataset)
+    eval_strategy="epoch",
+
+    # Reproducibility
+    seed=42,
+)
+
+Configuration Summary​
+Parameter	Value	Reasoning
+num_train_epochs	3	Standard for 500-row dataset
+per_device_train_batch_size	4	Max safe for T4 16GB
+gradient_accumulation_steps	4	Effective batch = 16
+learning_rate	2e-4	Standard for QLoRA
+warmup_ratio	0.03	3% warmup
+weight_decay	0.01	Light regularization
+fp16	True	Speed + memory on T4
+Configuration for Unsloth​
+
+Unsloth uses a simplified trainer interface. Here's how to apply these configurations:
+
+from unsloth import FastLanguageModel
+from trl import SFTTrainer
+
+# After loading model and dataset
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",  # Column containing formatted text
+    max_seq_length=2048,
+
+    args=TrainingArguments(
+        output_dir="./task-api-model",
+        num_train_epochs=3,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=4,
+        learning_rate=2e-4,
+        warmup_ratio=0.03,
+        weight_decay=0.01,
+        fp16=True,
+        logging_steps=10,
+        save_strategy="epoch",
+        seed=42,
+    ),
+)
+
+# Train
+trainer.train()
+
+
+Output:
+
+{'loss': 2.3456, 'learning_rate': 0.0001, 'epoch': 0.1}
+{'loss': 1.8234, 'learning_rate': 0.0002, 'epoch': 0.3}
+...
+{'train_runtime': 180.5, 'train_samples_per_second': 8.3}
+
+Troubleshooting Configuration Issues​
+OOM (Out of Memory)​
+
+Symptom: CUDA out of memory error
+
+Fixes (in order):
+
+Reduce per_device_train_batch_size to 2
+Reduce max_seq_length to 1024
+Enable gradient checkpointing (trades memory for compute)
+model.gradient_checkpointing_enable()
+
+Loss Doesn't Decrease​
+
+Symptom: Loss stays flat or decreases very slowly
+
+Possible causes:
+
+Learning rate too low: Try 5e-4
+Wrong data format: Check dataset structure
+Bad data: Validate a few examples manually
+Loss Explodes​
+
+Symptom: Loss suddenly increases to infinity (NaN)
+
+Fixes:
+
+Reduce learning rate to 1e-4
+Increase warmup to 0.1 (10%)
+Check for corrupted data (empty examples, very long sequences)
+Loss Decreases Then Plateaus​
+
+Symptom: Good initial progress, then no improvement
+
+Possible causes:
+
+Model is converged (good!)
+Need more epochs (if validation loss still high)
+Dataset too small for further learning
+Configuration Cheat Sheet​
+Quick Reference for Colab T4:
+
+Dataset < 200 rows:
+  epochs: 1-2
+  lr: 1e-4
+
+Dataset 200-1000 rows:
+  epochs: 2-3
+  lr: 2e-4
+
+Dataset > 1000 rows:
+  epochs: 1-2
+  lr: 1e-4 to 5e-5
+
+Always:
+  batch_size: 4
+  gradient_accumulation: 4
+  warmup: 0.03
+  fp16: True
+
+Try With AI​
+Prompt 1: Analyze a Configuration​
+Review this training configuration for a 500-row dataset:
+
+TrainingArguments(
+    num_train_epochs=10,
+    per_device_train_batch_size=8,
+    learning_rate=5e-3,
+    warmup_ratio=0.0,
+)
+
+This will run on a Colab T4 GPU (16GB VRAM).
+
+Identify all the problems with this configuration and suggest fixes.
+For each issue, explain what symptom would appear during training.
+
+
+What you're learning: Configuration analysis and troubleshooting. You're developing the skill to diagnose configuration problems before they waste GPU time.
+
+Prompt 2: Scale the Configuration​
+I'm moving from Colab T4 (16GB) to an A100 (40GB) for production training.
+
+Current config:
+- per_device_train_batch_size: 4
+- gradient_accumulation_steps: 4
+- fp16: True
+
+How should I modify the configuration to take advantage of the larger GPU?
+Consider:
+1. Batch size changes
+2. Precision changes (bf16)
+3. Sequence length opportunities
+4. Any other optimizations
+
+Walk me through the reasoning for each change.
+
+
+What you're learning: Platform-aware configuration. You're developing the ability to adapt configurations to different hardware, a critical skill for production LLMOps.
+
+Prompt 3: Debug My Training​
+I'm fine-tuning Llama-3-8B on a 1000-row customer support dataset.
+
+Here's my loss curve:
+- Epoch 1: 2.8 -> 1.9 (good decrease)
+- Epoch 2: 1.9 -> 1.4 (good decrease)
+- Epoch 3: 1.4 -> 1.1 (slower)
+- Epoch 4: 1.1 -> 1.1 (no change)
+- Epoch 5: 1.1 -> 1.2 (slight increase)
+
+Config: epochs=5, lr=2e-4, batch=4, grad_accum=4
+
+What's happening? Should I be concerned about the epoch 5 increase?
+What configuration changes would you recommend for the next training run?
+
+
+What you're learning: Loss curve interpretation. You're developing the diagnostic skill to understand what training metrics reveal about configuration quality.
+
+Safety Note: When experimenting with configuration changes, always save checkpoints. A bad configuration can waste hours of GPU time. Start with recommended defaults and make one change at a time to understand cause and effect.

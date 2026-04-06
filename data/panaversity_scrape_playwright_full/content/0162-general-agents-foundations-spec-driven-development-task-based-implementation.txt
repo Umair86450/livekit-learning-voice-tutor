@@ -1,0 +1,217 @@
+Phase 4: Task-Based Implementation
+
+"You are the main agent and your subagents are your devs."
+
+This single prompt transforms Claude from a solo coder into a development team. In Lesson 7, you refined your specification through interview until ambiguities disappeared. Now you have a spec precise enough that implementation becomes execution of a well-understood plan.
+
+But here's the problem: even with a perfect spec, a single AI context accumulates errors. Decisions made in minute 5 affect code written in minute 45. A wrong assumption early contaminates everything downstream. And when something breaks after an hour of work, you're left debugging a massive context with no clear rollback point.
+
+Task-based implementation solves this. Instead of one long implementation session, you decompose the spec into independent tasks. Each task executes in a fresh subagent context. Each completed task commits before the next begins. If task 7 fails, tasks 1-6 are safely committed. You roll back only what broke.
+
+The Core Prompt Pattern​
+
+The implementation phase begins with this prompt:
+
+Implement @docs/my-spec.md
+Use the task tool and each task should only be done by a subagent
+so that context is clear. After each task do a commit before you continue.
+You are the main agent and your subagents are your devs.
+
+
+This prompt triggers a specific behavior mode in Claude Code. Let's break down what happens.
+
+What Happens When You Run This​
+
+Step 1: Task Extraction
+
+Claude reads your specification and extracts the implementation checklist. Each checkbox becomes a task. Dependencies between tasks are identified,some must complete before others can start.
+
+Step 2: Subagent Delegation
+
+For each task, Claude spawns a fresh subagent. This subagent receives:
+
+The specific task description
+Relevant context from the spec
+Access to the codebase state
+
+The subagent does NOT receive the main agent's accumulated conversation history. It starts fresh.
+
+Step 3: Task Execution and Commit
+
+The subagent completes its assigned task, then commits the changes with an atomic commit message describing exactly what changed. Control returns to the main agent.
+
+Step 4: Progress Tracking
+
+The main agent updates task status and moves to the next task. If a task fails, the main agent can retry, skip, or escalate based on the error.
+
+The Task System Tools​
+
+Claude Code provides four tools for managing this workflow:
+
+Tool	Purpose	When Used
+TaskCreate	Define a new task with description and dependencies	Main agent extracts tasks from spec
+TaskUpdate	Change task status (pending, in_progress, completed, failed)	Subagent completes or fails task
+TaskList	View all tasks with current status and blockers	Main agent tracks overall progress
+TaskGet	Retrieve full details of a specific task	Before starting work on a task
+
+The main agent orchestrates. The subagents execute. Tasks provide the coordination layer between them.
+
+Why Context Isolation Matters​
+
+Chapter 15 (Lesson 9) introduced context isolation,why subagents use clean slates. Here we see that principle in action, solving two named problems from the SDD research literature:
+
+Agent Amnesia: Starting a new session mid-task loses all progress unless documented. The specification and task list persist across sessions, providing external memory that survives restarts. This is why Phase 2 produces a written spec,it's your insurance against amnesia.
+
+Context Pollution: A full context window causes agents to drop discovered bugs instead of tracking them. Fresh subagent context per task prevents accumulated errors from propagating. The Tasks system you learned in Chapter 15 (Lesson 4) enables this,persistent state that coordinates isolated subagents.
+
+Consider what happens without isolation:
+
+Minute 10: Main agent makes assumption about data format
+Minute 25: Writes validation logic based on assumption
+Minute 40: Implements API endpoint using validation
+Minute 55: Tests fail - original assumption was wrong
+Result: 45 minutes of contaminated work to untangle
+
+
+Now with context isolation:
+
+Task 1: Define data schema (subagent 1, commits)
+Task 2: Write validation logic (subagent 2, commits)
+Task 3: Implement API endpoint (subagent 3, commits)
+Task 4: Add tests (subagent 4, fails - schema assumption wrong)
+Result: Roll back task 4, fix schema in task 1, tasks 2-3 still valid
+
+
+Each subagent starts with clean context. If it makes a wrong assumption, that assumption dies with the subagent. The contamination doesn't spread to other tasks.
+
+Parallel execution benefit: Tasks without dependencies can run simultaneously. Task 2 doesn't need to wait for task 1 if they're independent. The main agent can spawn multiple subagents working in parallel,like a development team where each developer handles their assigned feature.
+
+The Backpressure Pattern​
+
+Fast execution without validation creates a different problem: you might commit broken code faster. The backpressure pattern (inspired by Steve Yegge's "Beads" project) adds quality gates that slow implementation when quality drops.
+
+Pre-commit hooks are the primary backpressure mechanism:
+
+# .husky/pre-commit
+pnpm typecheck && pnpm lint && pnpm test-run
+
+
+When a subagent attempts to commit, this hook runs automatically. If typechecking fails, the commit is rejected. If linting fails, the commit is rejected. If tests fail, the commit is rejected.
+
+The subagent must fix the issues before the commit succeeds. This prevents broken code from entering the repository,even when AI is writing it.
+
+Setting up pre-commit hooks:
+
+# Install husky (if using npm/pnpm)
+pnpm add -D husky
+pnpm exec husky init
+
+# Create the pre-commit hook
+echo "pnpm typecheck && pnpm lint && pnpm test-run" > .husky/pre-commit
+
+
+Now every commit,whether from you or from a subagent,must pass the quality gates.
+
+Real Results: The alexop.dev Implementation​
+
+Here's what task-based implementation looks like on a real project (alexop.dev redesign):
+
+Metric	Result
+Total time	45 minutes
+Tasks completed	14
+Commits made	14 (one per task)
+Context usage	71% of available window
+Rollbacks needed	0
+
+Each task averaged about 3 minutes. Each commit was atomic and self-contained. The final 29% of context remained available for any follow-up work.
+
+Compare this to a single-session approach: 45 minutes of accumulated context would have consumed nearly the entire window, with no clear rollback points if something broke late in the process.
+
+When to Use Task-Based Implementation​
+
+Use task-based implementation when:
+
+Specification has 5+ distinct implementation items
+Work can be parallelized across independent components
+You need clear rollback boundaries
+Implementation will exceed 30 minutes
+
+Use simpler approaches when:
+
+Specification is small (1-3 items)
+Work is inherently sequential with no parallel opportunities
+Quick prototype or exploration (not production code)
+Entire implementation fits in single commit
+
+The overhead of task extraction and subagent coordination isn't free. For a two-line bug fix, just fix it directly. For a feature implementation with database changes, API updates, and frontend modifications,use tasks.
+
+Lab: Task Decomposition​
+
+Objective: Practice identifying task structure from a specification.
+
+Task​
+
+Take a specification (your own or from previous labs) and extract its task structure:
+
+List all implementation items from the spec's checklist or requirements
+
+Identify dependencies:
+
+Which tasks require others to complete first?
+Which tasks can run in parallel?
+
+Estimate task sizes:
+
+Tasks should be 5-15 minutes of work each
+If larger, split into subtasks
+If smaller, consider combining
+
+Draw the dependency graph:
+
+Task 1 (schema) ─┬─> Task 3 (API)
+                 │
+Task 2 (utils) ──┴─> Task 4 (tests)
+
+
+Don't implement yet,just map the structure. Understanding task relationships before implementation prevents mid-execution surprises.
+
+Try With AI​
+
+Running Example Continued: We have a refined report-spec.md. Now we implement by extracting tasks and delegating to subagents.
+
+Prompt 1: Extract Tasks from Spec
+
+Read report-spec.md. Extract the implementation checklist into tasks.
+
+For each task:
+- One sentence description
+- Dependencies (what must complete first?)
+- Can it run in parallel with others?
+
+Write to tasks.md.
+
+
+What you're learning: The spec's checklist becomes your task list. "Write executive summary" depends on other sections (summarizes them). "Write tool comparison section" and "Write ROI section" might be independent. Making dependencies explicit prevents blocked subagents.
+
+Prompt 2: Implement First Task
+
+Implement report-spec.md using tasks.md.
+Use the task tool. Each task should be done by a subagent.
+After each task, commit before continuing.
+You are the main agent; your subagents are your writers.
+
+Start with task 1 only. Verify it meets the spec before proceeding.
+
+
+What you're learning: The main agent orchestrates; subagents execute. Each subagent reads the spec and writes one section. Fresh context means the subagent writing "ROI Analysis" doesn't carry assumptions from the subagent that wrote "Tool Comparison."
+
+Prompt 3: Parallel Execution
+
+"Tool Comparison" and "Implementation Risks" in tasks.md have no
+dependencies on each other. Execute them in parallel using separate
+subagents. Commit each independently when complete.
+
+
+What you're learning: Independent sections can be written simultaneously. If "Tool Comparison" and "Implementation Risks" don't cross-reference, parallel execution halves the time. The spec keeps both subagents aligned on audience, tone, and depth.
+
+Flashcards Study Aid​

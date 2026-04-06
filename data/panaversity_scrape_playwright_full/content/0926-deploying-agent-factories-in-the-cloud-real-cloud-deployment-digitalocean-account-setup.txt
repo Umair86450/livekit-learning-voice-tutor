@@ -1,0 +1,394 @@
+DigitalOcean Account & doctl Setup
+
+Your Kubernetes knowledge from Docker Desktop and local clusters translates directly to the cloud. The only new element? Connecting to a remote cluster instead of a local one. Before you can provision DOKS (DigitalOcean Kubernetes Service), you need credentials and the CLI tools to manage them.
+
+This lesson establishes your cloud connection: account setup, API token generation, and doctl authentication. Once complete, you'll be ready to create real Kubernetes clusters in Lesson 3.
+
+Why DigitalOcean for Learning Cloud Kubernetes?​
+
+Cloud providers offer managed Kubernetes services that handle the control plane (API server, etcd, scheduler) while you manage worker nodes. The major providers are:
+
+Provider	Service	Minimum Monthly Cost	Free Tier
+AWS	EKS	~$73 (control plane) + nodes	None for EKS
+Google Cloud	GKE	~$73 (control plane) + nodes	Autopilot free tier
+Azure	AKS	Control plane free + nodes	Control plane free
+DigitalOcean	DOKS	~$24 (2-node cluster)	$200 free credit (60 days)
+Civo	Civo K3s	~$5 (starter cluster)	$250 free credit
+
+DigitalOcean stands out for learners:
+
+Predictable pricing: No surprise bills from hidden egress charges
+Simple interface: Clean dashboard, straightforward CLI
+Generous free credit: $200 for 60 days covers extensive practice
+Fast provisioning: Clusters ready in 4-5 minutes (vs 10-15 for AWS/GCP)
+
+Your kubectl and Helm skills from Chapters 80-81 work identically on DOKS. The only difference is how you connect.
+
+Step 1: Create Your DigitalOcean Account​
+Navigate to Signup​
+Open cloud.digitalocean.com/registrations/new
+Choose signup method:
+Email: Enter email and password
+Google: Sign in with Google account
+GitHub: Sign in with GitHub account
+
+GitHub signup is convenient if you already use it for development.
+
+Verify Email​
+
+After signup, check your email for verification link. Click it to confirm your account.
+
+Add Payment Method​
+
+DigitalOcean requires a payment method before provisioning resources, even with free credit. This prevents abuse of free tier.
+
+Navigate to Settings > Billing
+Click Add Payment Method
+Enter credit card details
+DigitalOcean authorizes $1 (refunded immediately) to verify the card
+
+Important: You won't be charged until your free credit expires AND you have active resources. The payment method is required to create an account.
+
+Claim Free Credit​
+
+New accounts receive $200 free credit valid for 60 days. This appears automatically after account verification. Confirm by checking:
+
+Click your profile icon (top right)
+Select Billing
+Look for "Account Credit" showing $200.00
+
+If you see $0 credit, look for promotional emails or check if your account was created before the current promotion period.
+
+Step 2: Generate an API Token​
+
+The DigitalOcean API token lets doctl (and other tools) manage your infrastructure programmatically. Think of it as a password specifically for CLI and automation access.
+
+Navigate to API Settings​
+Click your profile icon (top right)
+Select API
+Click Generate New Token
+Configure Token Settings​
+Setting	Value	Why
+Token name	doctl-cli	Descriptive name for identifying this token later
+Expiration	90 days (or No expiry for learning)	Balance security vs convenience
+Scopes	Read and Write	Required for creating clusters, deployments, load balancers
+Understand Token Scopes​
+
+Read scope allows:
+
+Listing resources (droplets, clusters, domains)
+Viewing account information
+Checking balances and usage
+
+Write scope adds:
+
+Creating resources (clusters, droplets, load balancers)
+Modifying configurations
+Deleting resources
+
+For cluster provisioning, you need read/write scope. Read-only tokens cannot create DOKS clusters.
+
+Save Your Token Securely​
+
+After clicking Generate Token, you'll see the token value once. DigitalOcean does not store it.
+
+dop_v1_a1b2c3d4e5f6...  # Example format
+
+
+Critical: Copy this token immediately and store it securely:
+
+macOS: Store in Keychain Access
+Linux: Store in password manager or encrypted file
+All platforms: Never commit tokens to Git repositories
+
+If you lose this token, you must revoke it and generate a new one.
+
+Step 3: Install doctl CLI​
+
+doctl is DigitalOcean's official command-line interface. It's your primary tool for managing cloud resources.
+
+macOS
+Windows
+Linux
+
+Using Scoop (recommended):
+
+scoop install doctl
+
+
+Using Chocolatey:
+
+choco install doctl
+
+
+Alternative (manual download):
+
+Download doctl-X.X.X-windows-amd64.zip from GitHub releases
+Extract to a folder (e.g., C:\doctl)
+Add that folder to your PATH environment variable
+Verify Installation​
+
+Confirm doctl installed correctly:
+
+doctl version
+
+
+Expected output:
+
+doctl version 1.104.0-release
+Git commit hash: a1b2c3d4
+
+
+If you see command not found, your installation path may not be in your shell's PATH variable. Restart your terminal or add the installation directory to PATH.
+
+Step 4: Authenticate doctl​
+
+Now connect doctl to your DigitalOcean account using the API token.
+
+Initialize Authentication​
+doctl auth init
+
+
+When prompted, paste your API token:
+
+Please authenticate doctl for use with your DigitalOcean account. You can generate a token in the control panel at https://cloud.digitalocean.com/account/api/tokens
+
+Enter your access token: [paste your token here]
+
+
+Expected output:
+
+Validating token... OK
+
+
+doctl stores the token in your system's secure credential store:
+
+macOS: Keychain Access
+Linux: ~/.config/doctl/config.yaml (file permissions restricted)
+Windows: Credential Manager
+Verify Connection​
+
+Confirm authentication works by querying your account:
+
+doctl account get
+
+
+Expected output:
+
+Email                        Droplet Limit    Email Verified    UUID                                    Status
+you@example.com              25               true              xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx    active
+
+Field	Meaning
+Email	Your account email
+Droplet Limit	Maximum VMs you can create (increases with usage history)
+Email Verified	Must be true to create resources
+UUID	Your unique account identifier
+Status	Must be active to create resources
+
+If you see Error: Unable to authenticate, your token may be incorrect or expired. Generate a new token and run doctl auth init again.
+
+Understanding doctl Command Structure​
+
+doctl follows a consistent pattern:
+
+doctl [resource] [action] [flags]
+
+
+Common resources you'll use:
+
+Resource	Purpose	Example
+account	Account information	doctl account get
+kubernetes	DOKS clusters	doctl kubernetes cluster list
+compute	Droplets (VMs), load balancers	doctl compute droplet list
+apps	App Platform deployments	doctl apps list
+
+Explore available commands:
+
+doctl --help
+
+
+Expected output (abbreviated):
+
+doctl is a command-line interface (CLI) for the DigitalOcean API.
+
+Usage:
+  doctl [command]
+
+Available Commands:
+  account     Display commands that retrieve account details
+  apps        Display commands for working with apps
+  auth        Display commands for authenticating doctl with an account
+  compute     Display commands that manage infrastructure
+  databases   Display commands that manage databases
+  kubernetes  Display commands for managing Kubernetes clusters and configurations
+  ...
+
+
+For cluster management specifically:
+
+doctl kubernetes --help
+
+Security Best Practices​
+Token Rotation​
+
+API tokens should be rotated periodically:
+
+Generate a new token in the DigitalOcean dashboard
+Run doctl auth init with the new token
+Revoke the old token in the dashboard
+
+For production environments, rotate tokens every 30-90 days.
+
+Multiple Contexts​
+
+If you have multiple DigitalOcean accounts (personal, work), doctl supports authentication contexts:
+
+# Add a named context
+doctl auth init --context work
+
+# Switch between contexts
+doctl auth switch --context work
+doctl auth switch --context default
+
+# List contexts
+doctl auth list
+
+Environment Variables​
+
+For CI/CD pipelines or scripts, use environment variables instead of interactive auth:
+
+export DIGITALOCEAN_ACCESS_TOKEN=dop_v1_your_token_here
+doctl account get  # Uses token from environment
+
+
+Warning: Never commit scripts containing hardcoded tokens. Use secret management tools (GitHub Secrets, HashiCorp Vault) in production.
+
+Troubleshooting Common Issues​
+Issue: "Error: Unable to authenticate"​
+
+Cause: Token is invalid, expired, or has insufficient scope.
+
+Fix:
+
+Verify token in DigitalOcean dashboard (API section)
+Check token hasn't expired
+Ensure token has read/write scope
+Generate a new token and re-run doctl auth init
+Issue: "command not found: doctl"​
+
+Cause: doctl not in PATH or not installed.
+
+Fix:
+
+macOS: Run brew install doctl or add installation directory to PATH
+Linux: Ensure /snap/bin is in PATH for snap installs, or move binary to /usr/local/bin
+Windows: Add doctl directory to PATH environment variable
+Issue: "Droplet Limit: 0" in account get​
+
+Cause: New accounts may have zero limit until payment method verified.
+
+Fix:
+
+Ensure payment method is added in Billing settings
+Wait 24 hours for account verification
+Contact DigitalOcean support if issue persists
+Issue: Token works in browser but not doctl​
+
+Cause: Token may have been copied with extra whitespace.
+
+Fix:
+
+Copy token again, ensuring no leading/trailing spaces
+Run doctl auth init and paste cleanly
+What You've Accomplished​
+
+Your cloud foundation is now ready:
+
+Component	Status	Purpose
+DigitalOcean Account	Active	Access to managed Kubernetes
+Payment Method	Added	Required for resource creation
+Free Credit	$200 (60 days)	Practice without cost
+API Token	Generated	Programmatic access
+doctl CLI	Installed	Local cluster management
+Authentication	Verified	Ready for cluster provisioning
+
+In Lesson 3, you'll use these credentials to provision your first DOKS cluster. The kubectl commands you learned in Chapter 80 will work identically—the only difference is the cluster runs on DigitalOcean's infrastructure instead of your laptop.
+
+Try With AI​
+
+Now that you have doctl configured, explore DigitalOcean's capabilities with your AI partner.
+
+Prompt 1: Explore Available Regions​
+I just authenticated doctl for DigitalOcean. Before I create a Kubernetes
+cluster, I want to understand the available regions. Help me:
+
+1. List all DigitalOcean regions using doctl
+2. Understand which regions support DOKS (Kubernetes)
+3. Choose a region based on:
+   - My location (I'm in [your country/region])
+   - Latency considerations
+   - Pricing (if there are differences)
+
+Show me the doctl commands and explain what the output means.
+
+
+What you're learning: Understanding cloud geography. Region selection affects latency, compliance requirements, and sometimes pricing. Your AI partner helps you interpret doctl output and make informed decisions.
+
+Prompt 2: Understand Pricing Before Provisioning​
+I have $200 free credit on DigitalOcean for 60 days. I want to practice
+Kubernetes without exhausting my credit. Help me understand:
+
+1. What does a minimal DOKS cluster cost per month?
+2. What are the hidden costs I should watch for (egress, load balancers)?
+3. How can I monitor my spending with doctl or the dashboard?
+4. What's the safest way to teardown resources to avoid charges?
+
+I don't want any surprises on my credit card.
+
+
+What you're learning: Cloud cost awareness. Unlike local Docker, cloud resources incur real costs. Understanding pricing before provisioning prevents bill shock and teaches you to build cost-conscious habits.
+
+Prompt 3: Compare Authentication Methods​
+I authenticated doctl using an API token. But I've heard about other
+authentication methods for cloud CLIs. Compare for me:
+
+1. API tokens (what I'm using)
+2. OAuth flows
+3. Service accounts
+
+When would I use each? What are the security tradeoffs? I want to
+understand this before I use these credentials in CI/CD pipelines.
+
+
+What you're learning: Authentication patterns for cloud infrastructure. Understanding the security model helps you make appropriate choices for different environments (development, CI/CD, production).
+
+Safety note: API tokens are powerful credentials. Anyone with your token can create or delete resources in your account. Treat tokens like passwords: rotate regularly, never share, and use environment variables instead of hardcoding in scripts.
+
+Reflect on Your Skill​
+
+You built a multi-cloud-deployer skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my multi-cloud-deployer skill, verify I have DigitalOcean doctl properly
+configured. Does my skill include authentication verification and account
+status checks?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include doctl installation for multiple platforms?
+Did it explain API token scope requirements (read vs read/write)?
+Did it include verification commands like doctl account get?
+Improve Your Skill​
+
+If you found gaps:
+
+My multi-cloud-deployer skill is missing doctl setup verification. Update it
+to include:
+1. doctl authentication flow
+2. API token scope explanation (why read/write is needed for clusters)
+3. Account verification with expected output format
+
+
+Your skill should now help others set up DigitalOcean access without re-reading this lesson.

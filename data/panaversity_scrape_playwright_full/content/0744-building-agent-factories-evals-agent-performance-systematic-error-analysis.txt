@@ -1,0 +1,466 @@
+Systematic Error Analysis
+
+Your agent fails 30% of the time. You have graders that detect failures. But which failures matter most? Which component is causing them? And what should you fix first?
+
+Andrew Ng identified what separates effective AI builders from the rest: "Less experienced teams spend a lot of time building and probably much less time analyzing." When your agent fails, the instinct is to start fixing immediately. You see an error, you have a theory about the cause, and you start coding. But that theory is often wrong.
+
+Consider this scenario: Your web research agent produces poor results. You think "the LLM prompt must be unclear," so you spend two days rewriting prompts. Performance improves slightly. Then you actually count the errors and discover: 45% of failures came from the web search component returning low-quality sources. The prompt was fine. You fixed the wrong component.
+
+Analysis time is not overhead. Analysis time is investment that prevents wasted effort. The developers who spend 30 minutes counting errors before fixing anything outperform those who spend 30 hours fixing the wrong component.
+
+The Build-Analyze Loop​
+
+Effective agent development follows a cycle:
+
+Build agent v1
+    |
+    v
+Run evaluations
+    |
+    v
+Analyze errors <-- This is where most developers skip
+    |
+    v
+Identify which component failed most
+    |
+    v
+Fix that specific component
+    |
+    v
+Run evaluations again
+    |
+    v
+(Repeat until quality is acceptable)
+
+
+The trap is moving directly from "run evaluations" to "fix something." Without analysis, you're guessing which component to fix. Even smart guesses are often wrong because agent failures have multiple causes, and the one that comes to mind first is not necessarily the one causing most failures.
+
+Traces and Spans: The Vocabulary of Analysis​
+
+Before analyzing errors, you need language to describe what you're examining.
+
+Trace: All intermediate outputs from a single agent run. When your agent processes a query, it might call an LLM, search the web, select sources, and generate a response. The trace captures everything: every input, every intermediate output, every decision point.
+
+Span: The output of a single step within a trace. If the trace is the complete journey, each span is one leg of that journey. The web search span contains query terms and results. The source selection span contains which sources were chosen and why. The final output span contains the response shown to the user.
+
+Think of debugging a flight delay. The trace is the entire trip: airport, plane, connections, destination. Each span is one segment: "check-in took 45 minutes," "boarding delayed 30 minutes," "connection missed due to late arrival." To fix delays, you examine spans to find which segment caused the problem.
+
+The relationship in practice:
+
+Term	What It Contains	When to Examine
+Trace	Complete agent run from input to output	Understanding overall failure pattern
+Span	Single step's input, processing, and output	Identifying which component failed
+
+When your agent produces a poor response, you examine the trace to see what happened. You look at each span to identify where the problem originated. Maybe the web search span returned only blog posts when you needed academic sources. Maybe the source selection span picked the wrong articles from good search results. Maybe the output generation span ignored the best sources.
+
+This vocabulary matters because error analysis requires precision. "The agent failed" doesn't tell you what to fix. "The source selection span selected low-quality blogs despite high-quality academic sources being available in the search results" tells you exactly what to fix.
+
+The Spreadsheet Method​
+
+The most effective error analysis tool is embarrassingly simple: a spreadsheet.
+
+When your agent fails, don't just note "it failed." Break down the trace into spans and mark which spans produced problematic outputs. After analyzing 20-30 failures, patterns emerge from the data rather than from your intuition.
+
+The structure:
+
+Case	Input	Search Terms	Search Results	Source Selection	Final Output	Error Location
+Q1	"Black holes"	OK	Too many blogs	Based on poor input	Missing key points	Search Results
+Q2	"Seattle rent"	OK	OK	Missed relevant blog	OK	Source Selection
+Q3	"Robot farming"	Too generic	Poor results	Based on poor input	Missing company	Search Terms
+Q4	"Climate 2024"	OK	OK	OK	OK	None
+Q5	"AI agents"	OK	Outdated sources	Based on poor input	Stale information	Search Results
+
+After completing the table, count the Error Location column:
+
+Error Location	Count	Percentage
+Search Results	2	40%
+Source Selection	1	20%
+Search Terms	1	20%
+None (success)	1	20%
+Total	5	100%
+
+Now you have data instead of intuition. If you had guessed, you might have focused on the LLM prompt generating final outputs. The data shows the real problem: the web search component returns low-quality results 40% of the time. Fix that first.
+
+Why Counting Beats Intuition​
+
+Your intuition about error causes is biased. You remember the dramatic failures, not the common ones. You remember the failures you understand, not the ones that confuse you. You remember recent failures more than older ones.
+
+Andrew Ng describes teams that "spend a lot of time building and probably much less time analyzing." These teams chase the last error they saw. They fix the failure that frustrated them most. They work on the component they understand best, regardless of whether it's the component that fails most.
+
+Counting corrects for these biases:
+
+Bias	How It Misleads	How Counting Corrects
+Availability bias	Recent or dramatic errors feel more common	All errors counted equally
+Confirmation bias	You notice errors matching your theory	Data shows all patterns
+Expertise bias	You focus on components you understand	Data reveals unfamiliar problems
+Anchoring bias	First error you saw dominates thinking	Percentages show true distribution
+
+When someone says "I think the routing is the problem," ask them: "What percentage of errors come from routing?" If they can't answer with data, they're guessing. Maybe they're right, maybe not. The spreadsheet tells you for certain.
+
+The Prioritization Formula​
+
+Knowing which component fails most doesn't automatically tell you what to fix first. A component might fail frequently but be nearly impossible to fix. Another might fail rarely but be trivially fixable.
+
+The prioritization formula balances both factors:
+
+Priority = Frequency x Feasibility
+
+Factor	What It Measures	Scale
+Frequency	How often this error type occurs	0-100% of failures
+Feasibility	How easily you can fix it	0 (impossible) to 1 (trivial)
+
+Example prioritization:
+
+Error Type	Frequency	Feasibility	Priority Score
+Search returns blogs	45%	0.8 (add filters)	36
+Routing misclassifies	25%	0.4 (needs new training data)	10
+Output format wrong	15%	0.9 (fix template)	13.5
+Source timeout	10%	0.3 (infrastructure change)	3
+Unknown errors	5%	0.2 (need investigation)	1
+
+By priority score, you should fix in this order:
+
+Search returns blogs (score: 36)
+Output format wrong (score: 13.5)
+Routing misclassifies (score: 10)
+Source timeout (score: 3)
+Unknown errors (score: 1)
+
+The routing errors occur more often than format errors (25% vs 15%), but format errors are much easier to fix (0.9 vs 0.4). Fix the format first, then tackle routing.
+
+How to estimate feasibility:
+
+Feasibility	Description	Example
+0.9 - 1.0	Trivial fix, minutes to implement	Change a config value, fix a regex
+0.7 - 0.8	Clear solution, hours to implement	Add search filters, update prompt
+0.5 - 0.6	Known approach, days to implement	Retrain classifier, add new component
+0.3 - 0.4	Uncertain solution, research needed	New architecture, external dependency
+0.0 - 0.2	Unknown cause, investigation required	Intermittent failures, vendor issues
+Generating Error Analysis Data​
+
+While spreadsheets work for small-scale analysis, Python code systematizes the process for larger evaluations:
+
+import csv
+from dataclasses import dataclass
+from collections import Counter
+
+@dataclass
+class AnalyzedCase:
+    """A single analyzed test case with error attribution."""
+    case_id: str
+    input_query: str
+    search_terms_ok: bool
+    search_results_ok: bool
+    source_selection_ok: bool
+    output_ok: bool
+    error_location: str  # Which span failed, or "None"
+
+
+def analyze_trace(case_id: str, trace: dict) -> AnalyzedCase:
+    """
+    Analyze a single trace and determine which span caused failure.
+
+    Args:
+        case_id: Identifier for this test case
+        trace: Dictionary containing span outputs from agent run
+
+    Returns:
+        AnalyzedCase with error attribution
+    """
+    # Extract span quality from trace
+    # Your actual logic depends on trace structure
+    search_terms_ok = trace.get("search_terms_quality", "OK") == "OK"
+    search_results_ok = trace.get("search_results_quality", "OK") == "OK"
+    source_selection_ok = trace.get("source_selection_quality", "OK") == "OK"
+    output_ok = trace.get("output_quality", "OK") == "OK"
+
+    # Attribute error to first failing span
+    if not search_terms_ok:
+        error_location = "Search Terms"
+    elif not search_results_ok:
+        error_location = "Search Results"
+    elif not source_selection_ok:
+        error_location = "Source Selection"
+    elif not output_ok:
+        error_location = "Output"
+    else:
+        error_location = "None"
+
+    return AnalyzedCase(
+        case_id=case_id,
+        input_query=trace.get("input_query", ""),
+        search_terms_ok=search_terms_ok,
+        search_results_ok=search_results_ok,
+        source_selection_ok=source_selection_ok,
+        output_ok=output_ok,
+        error_location=error_location
+    )
+
+
+def generate_error_report(cases: list[AnalyzedCase]) -> dict:
+    """
+    Generate error analysis report from analyzed cases.
+
+    Returns:
+        Dictionary with error counts, percentages, and recommendations
+    """
+    error_counts = Counter(case.error_location for case in cases)
+    total = len(cases)
+
+    # Calculate percentages
+    error_percentages = {
+        location: (count / total) * 100
+        for location, count in error_counts.items()
+    }
+
+    # Sort by frequency
+    sorted_errors = sorted(
+        error_percentages.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    # Identify highest-frequency error (excluding "None" which means success)
+    non_success = [(loc, pct) for loc, pct in sorted_errors if loc != "None"]
+    recommendation = non_success[0][0] if non_success else "No errors detected"
+
+    return {
+        "total_cases": total,
+        "error_counts": dict(error_counts),
+        "error_percentages": error_percentages,
+        "sorted_by_frequency": sorted_errors,
+        "recommendation": f"Focus on: {recommendation} ({error_percentages.get(recommendation, 0):.1f}% of failures)"
+    }
+
+
+def export_to_csv(cases: list[AnalyzedCase], filename: str) -> None:
+    """Export analyzed cases to CSV for spreadsheet analysis."""
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "Case ID", "Input Query", "Search Terms OK",
+            "Search Results OK", "Source Selection OK",
+            "Output OK", "Error Location"
+        ])
+        for case in cases:
+            writer.writerow([
+                case.case_id,
+                case.input_query,
+                "OK" if case.search_terms_ok else "ERROR",
+                "OK" if case.search_results_ok else "ERROR",
+                "OK" if case.source_selection_ok else "ERROR",
+                "OK" if case.output_ok else "ERROR",
+                case.error_location
+            ])
+
+
+Output:
+
+# Example usage with sample data
+traces = [
+    {"case_id": "Q1", "input_query": "Black holes",
+     "search_results_quality": "ERROR", "output_quality": "ERROR"},
+    {"case_id": "Q2", "input_query": "Seattle rent",
+     "source_selection_quality": "ERROR"},
+    {"case_id": "Q3", "input_query": "Robot farming",
+     "search_terms_quality": "ERROR", "search_results_quality": "ERROR"},
+    {"case_id": "Q4", "input_query": "Climate 2024"},  # All OK
+    {"case_id": "Q5", "input_query": "AI agents",
+     "search_results_quality": "ERROR"}
+]
+
+# Analyze all traces
+cases = [analyze_trace(t["case_id"], t) for t in traces]
+
+# Generate report
+report = generate_error_report(cases)
+print(f"Total cases analyzed: {report['total_cases']}")
+print(f"\nError distribution:")
+for location, percentage in report['sorted_by_frequency']:
+    print(f"  {location}: {percentage:.1f}%")
+print(f"\n{report['recommendation']}")
+
+# Export for spreadsheet review
+export_to_csv(cases, "error_analysis.csv")
+print(f"\nExported to error_analysis.csv")
+
+Total cases analyzed: 5
+
+Error distribution:
+  Search Results: 40.0%
+  None: 20.0%
+  Source Selection: 20.0%
+  Search Terms: 20.0%
+
+Focus on: Search Results (40.0% of failures)
+
+Exported to error_analysis.csv
+
+Exercise: Analyze Task API Agent Failures​
+
+Your Task API agent helps users manage their tasks. You've run 20 test cases and collected traces. Here are the summarized results:
+
+Case	Input	Intent Recognition	Database Query	Task Matching	Response Generation	Overall
+1	"What's next?"	OK	OK	OK	OK	PASS
+2	"Add dentist call"	OK	OK	N/A	OK	PASS
+3	"Overdue tasks"	OK	ERROR (timeout)	N/A	ERROR	FAIL
+4	"Mark groceries done"	ERROR (ambiguous)	N/A	N/A	ERROR	FAIL
+5	"High priority only"	OK	OK	OK	OK	PASS
+6	"Delete old tasks"	OK	ERROR (timeout)	N/A	ERROR	FAIL
+7	"What did I finish?"	OK	OK	OK	OK	PASS
+8	"Tasks for Monday"	OK	OK	OK	OK	PASS
+9	"Add buy milk"	ERROR (truncated)	N/A	N/A	ERROR	FAIL
+10	"Show everything"	OK	OK	OK	OK	PASS
+11	"Complete the report"	ERROR (ambiguous)	N/A	N/A	ERROR	FAIL
+12	"Overdue items"	OK	OK	OK	OK	PASS
+13	"What's urgent?"	OK	OK	OK	OK	PASS
+14	"Delete meeting prep"	OK	OK	ERROR (matched wrong task)	ERROR	FAIL
+15	"Add task call mom"	OK	OK	N/A	OK	PASS
+16	"Show today's tasks"	OK	ERROR (timeout)	N/A	ERROR	FAIL
+17	"Mark done: email"	OK	OK	ERROR (matched wrong task)	ERROR	FAIL
+18	"What needs attention?"	OK	OK	OK	OK	PASS
+19	"Clear completed"	OK	OK	OK	OK	PASS
+20	"Add reminder walk dog"	ERROR (truncated)	N/A	N/A	ERROR	FAIL
+
+Your task:
+
+Count errors by component
+Calculate percentages
+Apply the prioritization formula (estimate feasibility yourself)
+Determine which component to fix first
+
+Work through this before reading the solution below.
+
+Solution:
+
+Step 1: Count errors by component
+
+Component	Error Count
+Intent Recognition	4 (Cases 4, 9, 11, 20)
+Database Query	3 (Cases 3, 6, 16)
+Task Matching	2 (Cases 14, 17)
+Response Generation	0 (errors are downstream from other failures)
+None (success)	11
+
+Step 2: Calculate percentages (of 20 total, 9 failures)
+
+Component	Percentage of Failures
+Intent Recognition	4/9 = 44%
+Database Query	3/9 = 33%
+Task Matching	2/9 = 22%
+
+Step 3: Apply prioritization formula
+
+Error Type	Frequency	Feasibility	Priority Score
+Intent Recognition (ambiguous/truncated)	44%	0.6 (prompt engineering, add examples)	26.4
+Database Query (timeout)	33%	0.4 (infrastructure, caching, indices)	13.2
+Task Matching (wrong task)	22%	0.7 (improve matching algorithm)	15.4
+
+Step 4: Recommended fix order
+
+Intent Recognition (score: 26.4) - Fix the prompt to handle ambiguous and truncated inputs
+Task Matching (score: 15.4) - Improve the matching logic for similar task names
+Database Query (score: 13.2) - Address timeout issues (lower priority due to infrastructure complexity)
+
+Even though database timeouts are frustrating, they're harder to fix than prompt improvements. Start with intent recognition.
+
+Reflect on Your Skill​
+
+After practicing systematic error analysis, add these patterns to your agent-evals skill:
+
+Pattern: The Spreadsheet Method
+
+When analyzing agent failures:
+1. Create a table with columns for each component/span
+2. Mark each span as OK or ERROR
+3. Identify which span FIRST introduced the error
+4. Count error locations across all failures
+5. Percentages reveal where to focus
+
+
+Pattern: Prioritization Formula
+
+Priority = Frequency x Feasibility
+
+Frequency: Percentage of failures from this component
+Feasibility: How easily you can fix it (0 to 1)
+
+Fix high-priority items first, even if lower-frequency
+errors are more frustrating to debug.
+
+
+Pattern: Trace and Span Vocabulary
+
+Trace: Complete record of one agent run
+  - Contains all intermediate outputs
+  - Shows the full journey from input to output
+
+Span: Output of single step within trace
+  - Web search span: query + results
+  - Selection span: which sources chosen
+  - Output span: final response
+
+Error attribution: Which span first produced bad output?
+Downstream spans inherit upstream errors.
+
+
+Key insight to encode: Don't go by gut. Count errors systematically. The time spent analyzing is an investment that prevents wasted effort fixing the wrong component. Andrew Ng's observation that "less experienced teams spend a lot of time building and probably much less time analyzing" is the difference between methodical improvement and thrashing.
+
+Try With AI​
+Prompt 1: Design Error Categories for Your Agent​
+I'm building error analysis for my [describe agent type] agent.
+
+The agent has these components:
+- [Component 1, e.g., "intent classification"]
+- [Component 2, e.g., "data retrieval"]
+- [Component 3, e.g., "response generation"]
+
+Help me design a spreadsheet structure for error analysis:
+1. What columns should I track for each test case?
+2. What error categories make sense for each component?
+3. How should I attribute errors when multiple components fail?
+
+Give me a template I can use with 20 test cases.
+
+
+What you're learning: Error categories must match your specific agent architecture. Generic categories like "LLM error" don't help you fix anything. AI helps you design categories specific to your component structure.
+
+Prompt 2: Estimate Feasibility for Your Error Types​
+I've identified these error types in my agent (with frequency):
+1. [Error type 1] - [X]% of failures
+2. [Error type 2] - [Y]% of failures
+3. [Error type 3] - [Z]% of failures
+
+For each error type, help me estimate feasibility:
+- What would fixing it involve?
+- Is it a code change, prompt change, or infrastructure change?
+- What unknowns would require investigation?
+
+Use the 0-1 feasibility scale where 0.9-1.0 is trivial and 0.0-0.2 needs investigation.
+Then calculate priority scores and recommend my fix order.
+
+
+What you're learning: Feasibility estimation requires understanding the fix. You might think "improve intent recognition" is easy, but it could require new training data (hard) or just adding examples to the prompt (easy). AI helps you think through what the fix actually involves.
+
+Prompt 3: Generate Error Analysis Code for Your Framework​
+I'm using [OpenAI Agents SDK / Claude SDK / Google ADK / custom framework]
+for my agent. My agent has these spans:
+- [Span 1]
+- [Span 2]
+- [Span 3]
+
+Write Python code that:
+1. Extracts span outputs from my framework's trace format
+2. Classifies each span as OK or ERROR based on [describe your criteria]
+3. Produces error analysis CSV with component attribution
+4. Calculates error percentages and recommends focus area
+
+Include example output showing what the analysis would look like
+for 5 sample failures.
+
+
+What you're learning: Error analysis automation is framework-specific. The trace format differs between SDKs. AI helps you bridge from generic patterns to your specific implementation.
+
+Safety Note​
+
+Error analysis reveals patterns in your agent's failures, but patterns are not always causes. A component might fail frequently because it receives bad input from an earlier component, not because it's broken. Always trace errors back to their root cause by examining full traces, not just counting which span flagged the error. The goal is systematic improvement, not blame attribution.

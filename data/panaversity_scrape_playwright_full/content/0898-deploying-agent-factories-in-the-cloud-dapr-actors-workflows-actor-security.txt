@@ -1,0 +1,505 @@
+Actor Security Essentials
+
+Your TaskActor is working beautifully. It persists conversation history, fires deadline reminders, and scales across your Kubernetes cluster. Then your security team asks the questions that keep production systems trustworthy: "Is the state encrypted at rest? How do we know actor-to-actor calls are secured? Who accessed which actor and when?"
+
+These aren't theoretical concerns. In November 2024, a misconfigured Redis instance exposed 1.1 million customer records because state wasn't encrypted and access wasn't logged. The organization had built sophisticated business logic but overlooked fundamental security controls.
+
+Dapr provides the building blocks for zero-trust actor security, but they require configuration and verification. This lesson transforms your development-ready actors into production-hardened systems that security teams can approve.
+
+The Actor Threat Model​
+
+Before configuring security controls, you need to understand what you're protecting against. Actors have a specific threat surface that differs from traditional microservices.
+
+Where Sensitive Data Lives​
+Location	Exposure Risk	Mitigation
+State Store	Database administrator access, backup exposure, storage breach	State encryption at rest
+Network Transit	Man-in-the-middle, packet sniffing, compromised network	mTLS encryption
+Application Logs	Log aggregator access, debug output leaks	Structured audit logging (sanitized)
+Memory	Container escape, memory dump	Process isolation, secrets management
+Actor-Specific Threats​
+
+Actors introduce unique considerations beyond typical microservice security:
+
+Identity-Based Attacks: Each actor has a unique ID (e.g., TaskActor/task-123). An attacker who learns your ID scheme can attempt to invoke arbitrary actors.
+
+State Poisoning: Unlike stateless services, actors persist state. Compromised state affects all future interactions with that actor.
+
+Reminder/Timer Manipulation: If an attacker can register reminders, they can trigger actor methods at will.
+
+Placement Service Trust: The placement service routes actor calls. A compromised placement service could redirect traffic.
+
+State Encryption Configuration​
+
+Dapr doesn't encrypt state by default. Your actor state sits in Redis (or your configured store) in plaintext. Anyone with database access can read it.
+
+Understanding the Encryption Model​
+
+Dapr implements client-side encryption using AES in Galois/Counter Mode (GCM). This means:
+
+Encryption happens in the Dapr sidecar, before data reaches the state store
+The state store never sees plaintext data
+You control the encryption keys through a secrets component
+
+Supported key sizes: 128, 192, or 256 bits. Dapr documentation recommends 128-bit keys for optimal performance with strong security.
+
+Generating Encryption Keys​
+
+Create a 128-bit hex-encoded encryption key:
+
+openssl rand 16 | hexdump -v -e '/1 "%02x"'
+
+
+Output:
+
+a3b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2
+
+
+Store this key in a Kubernetes secret:
+
+kubectl create secret generic actor-encryption-keys \
+  --from-literal=primary-key=a3b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2 \
+  --namespace default
+
+Configuring the Encrypted State Store​
+
+Update your state store component to enable encryption:
+
+# components/statestore-encrypted.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: default
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis-master.default.svc.cluster.local:6379
+    - name: redisPassword
+      secretKeyRef:
+        name: redis-credentials
+        key: password
+    # Enable actor state store
+    - name: actorStateStore
+      value: "true"
+    # Primary encryption key (from secrets)
+    - name: primaryEncryptionKey
+      secretKeyRef:
+        name: actor-encryption-keys
+        key: primary-key
+
+
+Key points:
+
+Encryption keys must come from a secrets component (never plaintext in YAML)
+The actorStateStore: "true" flag enables actor-specific optimizations
+Keys must be valid hex-encoded values
+Key Rotation Strategy​
+
+Production systems need key rotation. Dapr supports primary and secondary keys for zero-downtime rotation.
+
+metadata:
+  # New primary key
+  - name: primaryEncryptionKey
+    secretKeyRef:
+      name: actor-encryption-keys
+      key: new-primary-key
+  # Old primary becomes secondary
+  - name: secondaryEncryptionKey
+    secretKeyRef:
+      name: actor-encryption-keys
+      key: old-primary-key
+
+
+Rotation process:
+
+Generate new encryption key
+Add new key to secrets as new-primary-key
+Update component: new key as primary, old key as secondary
+Restart pods to pick up new configuration
+Dapr automatically identifies which key encrypted each state item
+New writes use primary key; reads work with either key
+After sufficient time, remove secondary key
+
+Important: Data encrypted with the old key is not automatically re-encrypted. If you need full re-encryption, your application must read and write each state item.
+
+Verifying Encryption​
+
+Check that state is actually encrypted in Redis:
+
+# Connect to Redis
+kubectl exec -it redis-master-0 -- redis-cli
+
+# Look at an actor state key
+GET "task-actor-service||TaskActor||task-123||task_data"
+
+
+Without encryption (BAD):
+
+"{\"status\": \"pending\", \"title\": \"Review PR\"}"
+
+
+With encryption (GOOD):
+
+"\x00\x01actor-encryption-keys\x00...<binary data>..."
+
+
+The encrypted value includes a prefix identifying which key encrypted it, enabling the rotation strategy.
+
+mTLS Verification​
+
+Dapr enables mTLS by default through the Sentry service. But "enabled by default" doesn't mean "working correctly." You need to verify.
+
+Understanding Dapr's mTLS Architecture​
+┌─────────────────────────────────────────────────────────────┐
+│                    Dapr Sentry (CA)                          │
+│                                                              │
+│  - Issues workload certificates to sidecars                  │
+│  - Manages certificate rotation                              │
+│  - Validates service identities                              │
+└─────────────────────────────────────────────────────────────┘
+                            │
+            ┌───────────────┼───────────────┐
+            ▼               ▼               ▼
+      ┌──────────┐    ┌──────────┐    ┌──────────┐
+      │ TaskActor │    │ Worker   │    │ Notifier │
+      │ Sidecar   │←──→│ Sidecar  │←──→│ Sidecar  │
+      │ (cert-A)  │    │ (cert-B) │    │ (cert-C) │
+      └──────────┘    └──────────┘    └──────────┘
+            │               │               │
+            ▼               ▼               ▼
+      ┌──────────┐    ┌──────────┐    ┌──────────┐
+      │ TaskActor│    │ Worker   │    │ Notifier │
+      │ Service  │    │ Service  │    │ Service  │
+      └──────────┘    └──────────┘    └──────────┘
+
+
+Each sidecar gets a unique certificate from Sentry. Actor-to-actor calls (via ActorProxy) go through the sidecars with mutual TLS authentication.
+
+Verifying Sentry is Running​
+kubectl get pods -n dapr-system | grep sentry
+
+
+Expected output:
+
+dapr-sentry-7b9c8d6f5-x2kjv   1/1   Running   0   5d
+
+
+If Sentry isn't running, mTLS is not functional.
+
+Checking mTLS Configuration​
+kubectl get configurations/daprsystem -n dapr-system -o yaml
+
+
+Look for the mTLS section:
+
+spec:
+  mtls:
+    enabled: true
+    workloadCertTTL: "24h"
+    allowedClockSkew: "15m"
+
+
+Key settings:
+
+enabled: true - mTLS is active
+workloadCertTTL - How long workload certificates are valid (default 24h)
+allowedClockSkew - Tolerance for time differences between nodes
+Verifying Certificate Status​
+
+Check the Sentry logs for certificate operations:
+
+kubectl logs -n dapr-system -l app=dapr-sentry --tail=50
+
+
+Look for:
+
+level=info msg="certificate signed successfully" app_id=task-actor-service
+
+
+Warning signs (30 days before root certificate expiration):
+
+level=warning msg="Dapr root certificate expiration warning: certificate expires in 25 days"
+
+Certificate Rotation​
+
+Dapr self-signed certificates are valid for one year. Before expiration, rotate them:
+
+# Using Dapr CLI (recommended)
+dapr mtls renew-certificate -k --valid-until 365 --restart
+
+
+Critical: Always sign new certificates with the same private root key to avoid service disruption.
+
+API Token Authentication​
+
+For additional defense-in-depth, configure API token authentication for actor invocations.
+
+Configuring API Tokens​
+
+Create a token secret:
+
+kubectl create secret generic dapr-api-token \
+  --from-literal=token=$(openssl rand -base64 32) \
+  --namespace default
+
+
+Update your deployment annotations:
+
+metadata:
+  annotations:
+    dapr.io/enabled: "true"
+    dapr.io/app-id: "task-actor-service"
+    dapr.io/app-port: "8000"
+    # Enable API token authentication
+    dapr.io/api-token-secret: "dapr-api-token"
+
+Client Configuration​
+
+Clients must include the token in requests:
+
+from dapr.clients import DaprClient
+
+# Token is automatically read from DAPR_API_TOKEN environment variable
+# Or configure explicitly:
+with DaprClient() as client:
+    client.invoke_actor(
+        actor_type="TaskActor",
+        actor_id="task-123",
+        method="get_task",
+        headers={"dapr-api-token": "your-token-here"}
+    )
+
+Audit Logging Implementation​
+
+Security teams need to know: Who accessed which actor? When? What method did they call? What changed?
+
+Structured Audit Log Format​
+
+Implement audit logging in your actor methods:
+
+import logging
+import json
+from datetime import datetime
+from dapr.actor import Actor
+from dapr.actor.runtime.context import ActorRuntimeContext
+
+# Configure structured logging
+logging.basicConfig(
+    format='%(message)s',
+    level=logging.INFO
+)
+audit_logger = logging.getLogger("actor.audit")
+
+class TaskActor(Actor, TaskActorInterface):
+    def __init__(self, ctx: ActorRuntimeContext, actor_id: str):
+        super().__init__(ctx, actor_id)
+        self._actor_type = "TaskActor"
+
+    def _audit_log(self, method: str, details: dict = None, caller: str = None):
+        """Emit structured audit log entry."""
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "event_type": "actor.method.invoked",
+            "actor_type": self._actor_type,
+            "actor_id": self.id.id,
+            "method": method,
+            "caller": caller or "unknown",
+            "details": details or {}
+        }
+        audit_logger.info(json.dumps(log_entry))
+
+    async def update_status(self, status: str) -> None:
+        """Update task status with audit logging."""
+        # Log BEFORE the operation
+        self._audit_log(
+            method="update_status",
+            details={
+                "new_status": status,
+                "previous_status": await self._get_current_status()
+            }
+        )
+
+        # Perform the operation
+        state = await self._state_manager.get_state("task_data")
+        state["status"] = status
+        state["updated_at"] = datetime.utcnow().isoformat()
+        await self._state_manager.set_state("task_data", state)
+
+    async def _get_current_status(self) -> str:
+        """Get current status for audit comparison."""
+        found, state = await self._state_manager.try_get_state("task_data")
+        return state.get("status", "unknown") if found else "not_found"
+
+
+Output (JSON log line):
+
+{
+  "timestamp": "2025-01-15T10:30:45.123Z",
+  "event_type": "actor.method.invoked",
+  "actor_type": "TaskActor",
+  "actor_id": "task-123",
+  "method": "update_status",
+  "caller": "unknown",
+  "details": {
+    "new_status": "completed",
+    "previous_status": "in_progress"
+  }
+}
+
+SIEM Integration Considerations​
+
+For security monitoring tools (Splunk, Elastic SIEM, Azure Sentinel):
+
+def _audit_log(self, method: str, details: dict = None, caller: str = None):
+    """SIEM-ready audit log with standard fields."""
+    log_entry = {
+        # Standard fields for SIEM parsing
+        "@timestamp": datetime.utcnow().isoformat() + "Z",
+        "event.category": "process",
+        "event.type": "access",
+        "event.action": f"actor.{method}",
+        "event.outcome": "success",  # Update on failure
+
+        # Actor-specific context
+        "actor.type": self._actor_type,
+        "actor.id": self.id.id,
+        "actor.method": method,
+
+        # Request context (if available from headers)
+        "source.ip": details.get("source_ip", "unknown"),
+        "user.id": caller or "system",
+
+        # Custom fields
+        "custom.details": details or {}
+    }
+    audit_logger.info(json.dumps(log_entry))
+
+Security-Sensitive Operations​
+
+Certain operations warrant enhanced logging:
+
+async def set_deadline_reminder(self, deadline_seconds: int) -> None:
+    """Register deadline reminder with security logging."""
+    # Security-sensitive: reminders can trigger actor methods
+    self._audit_log(
+        method="set_deadline_reminder",
+        details={
+            "deadline_seconds": deadline_seconds,
+            "security_note": "reminder_registration",
+            "risk_level": "elevated"
+        }
+    )
+
+    await self.register_reminder(
+        reminder_name="deadline",
+        state=b'{"source": "user_request"}',
+        due_time=timedelta(seconds=deadline_seconds),
+        period=timedelta(seconds=0)
+    )
+
+Security Checklist for Production Actors​
+
+Before deploying actors to production, verify:
+
+Control	Verification Command	Expected Result
+Sentry running	kubectl get pods -n dapr-system -l app=dapr-sentry	1/1 Running
+mTLS enabled	kubectl get config/daprsystem -n dapr-system -o yaml	mtls.enabled: true
+Certificate valid	Check Sentry logs for expiration warnings	No warnings
+State encryption	Check Redis key format	Binary/encrypted data
+Encryption keys in secrets	kubectl get secret actor-encryption-keys	Secret exists
+Audit logging	Check pod logs for JSON audit entries	Structured logs present
+API token (optional)	Verify unauthorized calls are rejected	401 response
+SECURITY IS NON-NEGOTIABLE
+
+Production actor deployments without security controls create real business risk:
+
+Unencrypted state: One database breach exposes all customer data
+Missing mTLS: Network attackers can intercept actor communications
+No audit logs: Security incidents become undetectable and uninvestigable
+
+These aren't theoretical concerns. Implement security controls before your first production deployment, not after an incident.
+
+Reflect on Your Skill​
+
+Test your dapr-deployment skill with security scenarios:
+
+Prompt 1: "Using my dapr-deployment skill, configure state encryption for my TaskActor with key rotation support."
+
+Evaluate whether your skill:
+
+Generates valid component YAML with secretKeyRef (not plaintext keys)
+Includes both primary and secondary encryption key configuration
+Explains the rotation process correctly
+
+Prompt 2: "How do I verify mTLS is working for actor-to-actor communication in my Kubernetes cluster?"
+
+Evaluate whether your skill:
+
+Provides specific kubectl commands for verification
+Explains what to look for in Sentry logs
+Mentions certificate expiration monitoring
+
+Prompt 3: "Generate audit logging code for my TaskActor that's suitable for SIEM integration."
+
+Evaluate whether your skill:
+
+Produces JSON-structured logs (not plain text)
+Includes standard fields for SIEM parsing
+Logs security-relevant context (actor ID, method, timestamp)
+Try With AI​
+
+Setup: Have your TaskActor implementation and Kubernetes cluster ready.
+
+Prompt 1: Threat Model Analysis​
+I'm deploying TaskActors to production. The actors store task data including
+assignee emails and project names. Help me analyze the threat model:
+1. What data is at risk?
+2. Where is it exposed?
+3. What controls should I prioritize?
+
+
+What you're learning: How to apply security thinking systematically to actor deployments, identifying threats before they become incidents.
+
+Prompt 2: Encryption Configuration​
+Help me configure state encryption for my actor state store. I need:
+1. Key generation commands
+2. Kubernetes secret creation
+3. State store component YAML with encryption
+4. Verification steps to confirm encryption is working
+
+My state store is Redis at redis-master.default.svc.cluster.local:6379
+
+
+What you're learning: The complete workflow from key generation through verification, not just isolated configuration snippets.
+
+Prompt 3: Production Security Audit​
+Review my actor deployment for security issues:
+
+Deployment annotations:
+  dapr.io/enabled: "true"
+  dapr.io/app-id: "task-actor"
+  dapr.io/app-port: "8000"
+
+State store component:
+  type: state.redis
+  metadata:
+    - name: redisHost
+      value: redis:6379
+    - name: actorStateStore
+      value: "true"
+
+What's missing? What should I add before production deployment?
+
+
+What you're learning: How to conduct security reviews of actor configurations, identifying gaps between development-ready and production-ready deployments.
+
+Safety reminder: Never commit encryption keys, API tokens, or certificates to version control. Use Kubernetes secrets, external secrets management (Vault, AWS Secrets Manager), or sealed secrets for all sensitive configuration.
+
+Sources:
+
+Dapr State Encryption Documentation
+Dapr mTLS Setup Guide
+Dapr Security Concepts
+Zero Trust Security with Dapr - Diagrid Blog

@@ -1,0 +1,209 @@
+Your First Widget
+
+Theory from Lesson 1 gave you the mental model. Now let's get something working. In the next 45 minutes, you'll build a ChatGPT App that displays "Hello, World!" in a styled widget—and you'll do it in under 50 lines of code.
+
+The goal isn't to understand every detail yet. The goal is to see a widget render in ChatGPT. Once that works, you have a foundation to build on. Each subsequent lesson adds one feature to this widget until you have a complete TaskManager.
+
+Project Setup​
+
+Create a new directory for your ChatGPT App:
+
+mkdir taskmanager-widget
+cd taskmanager-widget
+uv init
+
+
+Add dependencies:
+
+uv add "mcp[cli]>=1.9.2" "uvicorn>=0.32.0"
+
+
+Output:
+
+Resolved 12 packages in 1.2s
+Installed 12 packages in 50ms
+ + mcp==1.9.2
+ + uvicorn==0.32.0
+ ...
+
+The Minimal Server​
+
+Here's the entire server—under 50 lines. Create main.py:
+
+import mcp.types as types
+from mcp.server.fastmcp import FastMCP
+
+# The magic MIME type that triggers widget rendering
+MIME_TYPE = "text/html+skybridge"
+
+# Your widget HTML - simple and styled
+WIDGET_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      min-height: 150px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+    }
+    .card {
+      background: white;
+      padding: 24px 48px;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      text-align: center;
+    }
+    h1 { margin: 0; color: #333; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Hello, World!</h1>
+    <p>Your first ChatGPT App widget</p>
+  </div>
+</body>
+</html>'''
+
+mcp = FastMCP("TaskManager")
+
+@mcp.tool()
+def show_greeting() -> types.CallToolResult:
+    """Display a greeting widget."""
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text="Showing greeting")],
+        _meta={
+            "openai.com/widget": types.EmbeddedResource(
+                type="resource",
+                resource=types.TextResourceContents(
+                    uri="ui://greeting",
+                    mimeType=MIME_TYPE,
+                    text=WIDGET_HTML,
+                )
+            )
+        }
+    )
+
+if __name__ == "__main__":
+    import uvicorn
+    app = mcp.sse_app()
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+
+What Makes This Work​
+
+Three things turn this MCP server into a ChatGPT App:
+
+MIME_TYPE = "text/html+skybridge" — This tells ChatGPT "render this as a widget, not text"
+
+_meta with "openai.com/widget" — This attaches the widget HTML to the tool response
+
+EmbeddedResource — This packages the HTML with its MIME type
+
+Without any of these three, you get text output instead of a widget.
+
+Running the Server​
+
+Start your server:
+
+uv run main.py
+
+
+Output:
+
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     Started server process [12345]
+
+
+Your server is running locally. But ChatGPT needs a public URL.
+
+Exposing with ngrok​
+
+In a second terminal, create a tunnel:
+
+ngrok http 8001
+
+
+Output:
+
+Forwarding    https://abc123.ngrok-free.app -> http://localhost:8001
+
+
+Copy that https://...ngrok-free.app URL. Your MCP endpoint is:
+
+https://abc123.ngrok-free.app/mcp
+
+
+Note: The URL changes each time you restart ngrok (on the free plan).
+
+Registering in ChatGPT​
+Go to chatgpt.com
+Click Settings (gear icon) → Toggle Developer mode ON
+Click Create app
+Enter:
+Name: TaskManager
+MCP Server URL: https://abc123.ngrok-free.app/mcp (your ngrok URL + /mcp)
+Authentication: No Auth
+Click Create
+
+Your app should show "Connected" status.
+
+Testing Your Widget​
+Start a new chat
+Type @TaskManager to select your app
+Say: "Show me a greeting"
+
+Output:
+
+You should see your purple gradient card with "Hello, World!" displayed directly in the conversation.
+
+If it works—congratulations. You've built your first ChatGPT App.
+
+Troubleshooting​
+
+Widget shows "Loading..." forever
+
+Check that MIME_TYPE is exactly "text/html+skybridge"
+Verify _meta key is exactly "openai.com/widget"
+
+App shows "Disconnected"
+
+ngrok URL may have changed—restart ngrok and update the app URL in ChatGPT settings
+
+Tool not appearing
+
+Delete the app in ChatGPT and recreate it with the current ngrok URL
+What You Built​
+
+You now have:
+
+A FastMCP server running on port 8001
+A widget that renders in ChatGPT
+A development workflow (ngrok + Developer Mode)
+
+This is your foundation. In the next lesson, you'll add a "Refresh" button that triggers new conversation turns.
+
+Try With AI​
+Prompt 1: Add a Name Parameter​
+Modify my show_greeting tool to accept a "name" parameter.
+The widget should display "Hello, [name]!" instead of "Hello, World!".
+Use window.openai?.toolOutput to read the name in the widget JavaScript.
+
+
+What you're learning: How data flows from tool parameters through structuredContent to the widget via window.openai.toolOutput. This pattern is essential for the TaskManager.
+
+Prompt 2: Change the Style​
+Update my widget's CSS to use a different color gradient (green to teal instead of purple). Also add a subtle animation when the widget appears.
+
+
+What you're learning: Widget styling capabilities within the iframe sandbox. All CSS must be inline since external stylesheets don't reliably load.
+
+Prompt 3: Understand the MIME Type​
+Explain why text/html+skybridge is required for ChatGPT App widgets. What happens if I use text/html instead? Why did OpenAI create a custom MIME type?
+
+
+What you're learning: The architectural decision behind widget rendering. Understanding this helps debug when widgets fail to appear.
+
+Safety Note: Your ngrok tunnel is publicly accessible. Don't include real credentials or sensitive data in your test server.

@@ -1,0 +1,302 @@
+Testing With pytest
+NEW STARTING POINT
+
+In this lesson, you will replace the contents of main.py with a simpler function designed specifically for testing. Your Lesson 5 code demonstrated pyright; this lesson demonstrates pytest. Each tool gets a focused example.
+
+In Lesson 5, you ran uv run pyright on SmartNotes and watched it verify every type label in your code -- catching bugs before a single line executed. Pyright is the second verification tool in your workbench, after ruff. Two tools are checking your code automatically. But two tools are not enough.
+
+Code that passes linting and type checking can still do the wrong thing. A function can be perfectly formatted, fully typed, and still return the wrong answer. Ruff cannot see that add(3, 2) returns 1 instead of 5. Pyright cannot see it either -- int - int returns int, and the types are correct. The logic is wrong, but no tool has caught it.
+
+James is working on a piece of SmartNotes code called format_title that capitalizes the first letter of each word in a note title. He typed it carefully, checked the output by eye, watched it produce the right result. "Looks good," he says, and moves on. But "looks good" is not a specification. What if the function breaks on edge cases he did not think to try? What if someone changes it next week and the old behavior disappears without anyone noticing? James is trusting his eyes and his memory -- the same two things that ruff and pyright were designed to replace. This becomes even more dangerous when working with AI-generated code: an AI can produce a function that looks correct and runs without errors, but silently handles edge cases wrong. Only a test can prove the code does what you specified.
+
+Emma watches him test by reading terminal output. "I already tested it," James says, before Emma can speak. "I ran the function, I read the output, I checked it against what I expected. That is testing."
+
+"What did you test it with?" Emma asks.
+
+"A normal title. 'hello world.' It came back 'Hello World.' Correct."
+
+"Test it with an empty string," Emma says.
+
+James runs it. Empty string returns empty string. "Works."
+
+"Now an already-capitalized title. Then one with extra spaces. Then a single character."
+
+James runs each one by hand: typing the input, running the file, reading the output, comparing it to what he expected. The extra-spaces case surprises him. The function does not strip them.
+
+"I have been doing this for five minutes and I have five cases," James says. "Every time someone changes this function, I would have to run all five again by hand."
+
+"That," Emma says, "is what neither ruff nor pyright can see."
+
+The Problem Without Tests​
+
+James's visual check is not wrong -- the code does produce the right output. But the check does not scale. It verifies one scenario, one time, and leaves no record. When the code changes, the only way to verify it again is to remember what to check and re-run it by hand.
+
+Missing Tool	What Happens	The Real Cost
+No tests	Code runs, but nobody knows if it does the right thing	A change that breaks existing behavior goes undetected until a user reports it
+Manual testing only	Developer checks output by eye, one scenario at a time	Verifies one case once; no regression protection, no documentation of what "correct" means
+
+These are not theoretical risks. They are the daily reality of any project that skips Axiom VII.
+
+pytest Defined​
+
+pytest is a testing tool that discovers test files, runs them, and reports which ones pass and which ones fail. It uses a plain Python keyword called assert -- no special setup required. A passing test means your code does what the test says it should.
+
+pytest Discovery Conventions​
+
+pytest finds tests automatically using naming conventions:
+
+Element	Convention	Example
+Test files	Start with test_ or end with _test	test_main.py
+Test names	Start with test_ inside the file	def test_greet():
+Test directory	tests/ (configured in pyproject.toml)	tests/test_main.py
+pytest Output Characters​
+
+When pytest runs, each test produces a single character:
+
+Character	Meaning
+.	Passed
+F	Failed
+E	Error (exception during setup or teardown)
+s	Skipped
+
+A clean run shows dots. Any F means a test found a problem.
+
+Axiom VII in Action​
+
+In Axiom VII from Chapter 43, you learned that tests are the specification. pytest does not check that code runs. The Python interpreter already does that. pytest checks that code does what you specified it should do.
+
+When James writes assert format_title("hello world") == "Hello World", he is not writing a test. He is writing a specification: this piece of code, given this input, must produce this output. The assert keyword is the specification expressed as code. If the assertion is true, the test passes silently. If it is false, pytest reports exactly what went wrong -- what the code returned and what the test expected.
+
+This matters because specifications written as code do not drift. A comment that says "this function capitalizes words" can become outdated the moment someone changes the function. An assert that says format_title("hello world") == "Hello World" either passes or fails. There is no ambiguity. There is no room for the specification to become stale without someone noticing.
+
+Practical Application​
+Step 1: Write a Test File​
+
+Your SmartNotes project has a main.py file. You need a place for tests. Create a tests directory and a test file inside it.
+
+Create the file tests/test_main.py with this content:
+
+Type this code exactly as shown. The Python features (def, import, assert) are covered in later chapters -- right now, focus on what pytest does with it.
+
+# tests/test_main.py
+from main import main
+
+
+def test_main_returns_greeting() -> None:
+    """Verify that main() returns the expected greeting string."""
+    result: str = main()
+    assert result == "Hello from smartnotes!"
+
+
+Before this test can work, the main piece of code needs to return a string instead of printing it. Update main.py:
+
+# main.py
+def main() -> str:
+    return "Hello from smartnotes!"
+
+
+if __name__ == "__main__":
+    print(main())
+
+
+Two things to notice about the test file. First, assert is a plain Python keyword -- pytest does not need any special setup. assert result == "Hello from smartnotes!" means: if this condition is false, the test fails. Second, the name starts with test_ and the file name starts with test_. These naming conventions are how pytest discovers what to run. No configuration needed beyond what is already in your pyproject.toml.
+
+IF YOU SEE AN IMPORT ERROR
+
+The line from main import main works because SmartNotes uses a flat project layout -- main.py sits in the project root, and pytest knows how to find it. If you ever see ModuleNotFoundError: No module named 'main', create an empty file called __init__.py inside the tests/ directory. This tells Python to treat tests/ as a package and helps it locate files in the project root. For SmartNotes, this should not be necessary, but it is a common fix if your setup differs slightly.
+
+Step 2: Run pytest​
+uv run pytest
+
+
+Output (passing):
+
+tests/test_main.py .                                             [100%]
+1 passed in 0.12s
+
+IF PYTEST SAYS "NO TESTS RAN" OR "COLLECTED 0 ITEMS"
+
+Confirm your test file starts with test_ (e.g., test_main.py, not tests.py). Pytest discovers tests by filename pattern. Also check that each test function name starts with test_.
+
+That single dot is the most important character in this lesson. It means: one test ran, one test passed, your code does what the specification says it should.
+
+Read and Predict: If you changed main() to return "Hello from SmartNotes!" (capital S) instead of "Hello from smartnotes!" (lowercase s), would the test pass or fail? What character would pytest display instead of the dot? What would the E lines in the failure output show?
+
+Check your predictions
+Step 3: Read Pass/Fail Output​
+
+To see what a failure looks like, temporarily change the expected value in the test:
+
+def test_main_returns_greeting() -> None:
+    result: str = main()
+    assert result == "Wrong value on purpose"
+
+
+Run pytest again:
+
+uv run pytest
+
+
+Output (failing):
+
+tests/test_main.py F                                                [100%]
+=================================== FAILURES ===================================
+_________________________ test_main_returns_greeting ___________________________
+
+    def test_main_returns_greeting() -> None:
+        """Verify that main() returns the expected greeting string."""
+        result: str = main()
+>       assert result == "Wrong value on purpose"
+E       AssertionError: assert 'Hello from smartnotes!' == 'Wrong value on purpose'
+E
+E         - Wrong value on purpose
+E         + Hello from smartnotes!
+
+tests/test_main.py:8: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_main.py::test_main_returns_greeting - AssertionError: ...
+============================== 1 failed in 0.15s ===============================
+
+
+The F replaces the dot. pytest shows you exactly which line failed, what the actual value was, and what the expected value was. The lines starting with E are the explanation: the - line shows what you wrote in the test (the expected value), and the + line shows what the code actually returned. When assert fails, pytest generates this comparison automatically -- you do not need to write error messages yourself.
+
+Change the test back to the correct expected value before continuing.
+
+Quick Check: In the passing output, pytest showed a single . character. In the failing output, it showed F. If you had three tests -- two passing and one failing -- what characters would pytest display?
+
+Check your answer
+CHECKPOINT: VERIFY YOUR PROGRESS
+
+Run this command in the SmartNotes directory:
+
+uv run pytest
+
+
+You should see tests/test_main.py . [100%] and 1 passed. If you see F instead of ., make sure you changed the test back to the correct expected value: assert result == "Hello from smartnotes!"
+
+Anti-Patterns​
+
+James has seen pytest in action. He also knows two ways to undermine it. Each anti-pattern below seems like a shortcut. Each one has a specific cost.
+
+The first anti-pattern is "Testing later." James writes five pieces of code, then plans to add tests "once the code stabilizes." The code never stabilizes. Each new piece changes the behavior of existing ones, and his memory of the original intent fades. By the time tests get written, they test the current behavior -- which may include bugs that have existed since week one.
+
+The second is "Manual testing only." James checks that code works by running it and looking at the output. This verifies exactly one scenario, one time. It does not document what "correct" means, does not run automatically, and does not catch regressions when the code changes.
+
+Anti-Pattern	The Mistake	The Cost	The Fix
+"Testing later"	Writing code first, planning tests for some unspecified future date	Specifications fade from memory; tests end up documenting bugs, not intended behavior	Write the first test before or alongside the first piece of code
+"Manual testing only"	Checking output visually instead of writing automated checks	Verifies one scenario once; no regression protection, no documentation	Write an assert for every behavior you care about
+Try With AI​
+
+Open your AI coding assistant. The first two prompts deepen your understanding of testing and the pipeline. The third prompt shows you why assert statements are fundamentally different from print statements.
+
+Prompt 1: Write a Failing Test and Explain the Output​
+I am new to Python and learning about testing tools. I have this
+piece of code:
+
+def add(a: int, b: int) -> int:
+    return a - b  # Bug: subtracts instead of adding
+
+Write a pytest test for this code that will fail. Then show me
+exactly what the pytest output will look like when it fails. Explain
+each part of the failure output in simple terms: what the F character
+means, what the error message says, and how to tell what went wrong.
+
+
+What you're learning: You are building the skill of reading pytest failure output before you encounter it in your own code. The AI will generate a realistic failure message, and by studying it now -- when you are not under pressure -- you will recognize the pattern instantly when your own tests fail. Pay attention to the > line (the failing line) and the E line (the explanation of what went wrong).
+
+Prompt 2: Explain the Verification Pipeline Order​
+My Python project has three verification tools that run in this order:
+1. ruff check . (linting)
+2. pyright (type checking)
+3. pytest (testing)
+
+I connect them with && so each step only runs if the previous one passed:
+uv run ruff check . && uv run pyright && uv run pytest
+
+Why does the order matter? What would go wrong if I ran pytest first,
+then pyright, then ruff? Give me a concrete example where running them
+in the wrong order wastes time or misses a bug.
+
+
+What you're learning: You are understanding why the pipeline is ordered from fast-and-cheap checks (linting) to slow-and-expensive checks (testing). The AI's explanation will show you that catching a formatting issue before running the full test suite saves time, and that the && operator is doing the work of Axiom IX -- stopping the pipeline at the first failure so you fix the simplest problem first.
+
+Prompt 3: Assert vs Print -- Why Tests Beat Manual Checking​
+I have a Python function that I am checking two ways:
+
+Way 1 (manual): I run the function, print the result, and look at it
+Way 2 (pytest): I write assert statements comparing the result to expected values
+
+Here is the function:
+def format_title(title: str) -> str:
+    return " ".join(word.capitalize() for word in title.split())
+
+Show me:
+1. What manual testing looks like (print statements) and what
+   information it gives me
+2. What a pytest test looks like (assert statements) and what
+   additional information it gives me
+3. If someone changes format_title next week to handle hyphens
+   differently, which approach catches the regression automatically?
+4. Give me a concrete example where manual testing says "looks right"
+   but a pytest assert would catch the bug
+
+
+What you're learning: This prompt makes the case for why assert statements matter more than print statements. When you check by eye, you verify one scenario, one time, with no record. When you write an assert, you create a permanent specification that runs automatically every time. The AI's examples will show you exactly how a regression -- a change that breaks existing behavior -- slips past manual testing but gets caught by pytest.
+
+PRIMM-AI+ Practice: Testing With pytest​
+Predict [AI-FREE]​
+
+Look at this function -- you do not need to understand every detail, just notice the comment that says "Bug":
+
+def add(a, b):
+    return a - b  # Bug: subtracts instead of adding
+
+
+Predict: if someone calls add(3, 4), what number will it return? (Hint: the comment tells you the operation is wrong.) Now predict: when pytest runs a test expecting 7 but gets a different number, will the output show a dot (.) for pass or the letter F for fail? Write your answers and a confidence score from 1 to 5.
+
+Run​
+
+The Practical Application section above had you run uv run pytest. Look at the output from that step. Did you see the F character (failure), the > line (which test failed), and the E line (what went wrong)? After the bug was fixed, did the F change to a dot (.)? These three symbols -- F, >, E -- are the key to reading pytest output.
+
+Investigate​
+
+Before asking your AI assistant, write in your own words: why does the pipeline run ruff first, then pyright, then pytest? What would happen if you ran pytest first and it failed -- would you have wasted time?
+
+Then ask your AI assistant:
+
+Why does the verification pipeline run ruff FIRST, then pyright,
+then pytest? What goes wrong if I run them in a different order?
+
+
+Compare the AI's answer to yours. Now think about the Error Taxonomy from Chapter 42, Lesson 3: the bug in the add function is not a type error -- the types are fine (numbers in, number out). It is a logic error -- the code does the wrong thing. Can you think of why pyright would NOT catch this bug, but pytest would? Write your answer before reading on.
+
+Modify​
+
+Try this experiment: add an unused import line (like import os) to the top of your main.py. Before running anything, predict: which tool in the pipeline will catch it -- ruff, pyright, or pytest? Now run the full pipeline: uv run ruff check . && uv run pyright && uv run pytest. Did it stop at the first tool (ruff) without reaching pytest? That is Axiom IX in action -- fast checks first, slow checks last. Remove the unused import when done.
+
+Make​
+
+Self-check: answer these without looking back at the lesson.
+
+What exact command runs the test suite? Write it and run it in SmartNotes. You should see a green line with "passed."
+In pytest output, what does F mean and what does a dot (.) mean? If a test fails, name the three pieces of information pytest shows you in the failure report.
+Give a concrete example of a bug pyright would miss but pytest would catch. Hint: a function can have correct types and still return the wrong value.
+Why does the pipeline run ruff first and pytest last? If your answer mentions "fast checks catch simple problems before slow checks run," you have the reasoning.
+
+Verification Ladder checkpoint: This lesson is Rung 3 (Tests) in action. Combined with pyright at Rung 2 (Types) and ruff, you now have three automated verification layers. The chained pipeline (ruff check && pyright && pytest) is Rung 4 (Pipeline) -- coordinated verification -- which you will formalize in Lesson 7.
+
+Operational Takeaways​
+
+pytest uses plain assert as specifications. assert func(3) == 4 means: this code, given 3, must return 4. No special setup, no extra tools. The assert keyword is how you express what "correct" means.
+
+pytest discovers tests by naming convention. Files named test_*.py, test names starting with test_ -- pytest finds and runs them automatically. Naming is the only configuration required.
+
+Reading test output is a core skill. A dot means passed, F means failed. When a test fails, pytest shows the exact line, the expected value, and the actual value. Learning to read this output is as important as learning to write tests.
+
+Looking Ahead​
+
+Your code has a specification now. pytest checks that main() returns exactly what the test says it should. If someone changes the function, the test catches it. If someone adds a new function, a new test can verify that too. Ruff checks style. Pyright checks types. pytest checks behavior.
+
+But all three of these verifications exist on one machine. One accidental deletion, one bad edit, one crash -- and the verified code is gone. There is no checkpoint. There is no way to go back.
+
+In Lesson 7, James discovers the last tool in the discipline stack: Git. It makes every change reversible.

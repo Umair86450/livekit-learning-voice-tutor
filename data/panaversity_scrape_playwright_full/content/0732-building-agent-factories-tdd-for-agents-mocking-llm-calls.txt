@@ -1,0 +1,753 @@
+Mocking LLM Calls
+
+Every LLM call costs money. Every mock costs nothing.
+
+You learned in Lesson 1 that an unmocked test suite can cost $1,000-2,000 per month. You also learned that mocked tests run in milliseconds instead of seconds. But knowing the "why" doesn't tell you the "how."
+
+This lesson teaches you respx—the library that makes zero-cost LLM testing possible. By the end, you'll mock OpenAI completions, tool calls, error responses, and Anthropic messages with confidence.
+
+Why respx Works for LLM Mocking​
+
+Here's the key insight: respx mocks httpx at the transport layer.
+
+The OpenAI SDK, Anthropic SDK, and most modern Python HTTP clients use httpx under the hood. When you mock at the transport layer, you intercept requests before they leave your machine. The SDK never knows the difference—it receives your mock response as if it came from the real API.
+
+Your Code → OpenAI SDK → httpx → respx intercepts → Mock Response
+                                    ↑
+                           No network call happens
+
+
+This architecture means:
+
+Zero API calls (no charges)
+Instant responses (no network latency)
+Complete control (you define exactly what the LLM "returns")
+Deterministic tests (same mock, same result, every time)
+respx Basics: Three Styles​
+
+respx offers three ways to set up mocks. Choose based on your testing needs.
+
+Decorator Style (Recommended for Single Tests)​
+import pytest
+import respx
+import httpx
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_completion():
+    """Mock with decorator—cleanest for single tests."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello! How can I help you today?"
+                    }
+                }],
+                "usage": {"total_tokens": 25}
+            }
+        )
+    )
+
+    # Your agent code runs here—it thinks it's calling OpenAI
+    result = await call_openai("Say hello")
+
+    assert "Hello" in result
+    assert respx.calls.call_count == 1
+
+
+Output:
+
+tests/test_agent.py::test_openai_completion PASSED
+
+
+The @respx.mock decorator activates mocking for that test. When the test ends, mocking automatically deactivates.
+
+Context Manager Style (For Explicit Scope)​
+@pytest.mark.asyncio
+async def test_with_context_manager():
+    """Mock with context manager—explicit control over scope."""
+    with respx.mock:
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={
+                "choices": [{"message": {"content": "Response"}}]
+            })
+        )
+
+        result = await call_openai("Test")
+        assert "Response" in result
+
+    # After the `with` block, mocking is disabled
+
+
+Output:
+
+tests/test_agent.py::test_with_context_manager PASSED
+
+
+Use context managers when you need mocking for only part of a test.
+
+Fixture Style (For Shared Mocks)​
+@pytest.fixture
+def mock_openai():
+    """Fixture for tests that share mock configuration."""
+    with respx.mock:
+        yield respx
+
+@pytest.mark.asyncio
+async def test_with_fixture(mock_openai):
+    mock_openai.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "choices": [{"message": {"content": "Fixture response"}}]
+        })
+    )
+
+    result = await call_openai("Test")
+    assert "Fixture" in result
+
+
+Output:
+
+tests/test_agent.py::test_with_fixture PASSED
+
+
+Fixtures shine when multiple tests need the same mock setup.
+
+Mocking OpenAI Responses​
+
+The OpenAI chat completions API returns a specific structure. Your mock must match it exactly, or your code will fail trying to parse the response.
+
+Basic Completion Response​
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_chat_completion():
+    """Mock a standard chat completion response."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-abc123",
+                "object": "chat.completion",
+                "created": 1699876543,
+                "model": "gpt-4",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "I'd be happy to help you with that task."
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "completion_tokens": 12,
+                    "total_tokens": 27
+                }
+            }
+        )
+    )
+
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key="test-key-not-used")
+
+    response = await client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": "Help me with this task"}]
+    )
+
+    assert response.choices[0].message.content == "I'd be happy to help you with that task."
+    assert response.usage.total_tokens == 27
+
+
+Output:
+
+tests/test_openai.py::test_openai_chat_completion PASSED
+
+
+Critical structure details:
+
+Response must have choices array (not choice)
+Each choice has message with role and content
+usage tracks tokens for cost monitoring code
+finish_reason indicates completion state
+Full Response with All Fields​
+
+When your code inspects metadata, include the complete structure:
+
+COMPLETE_OPENAI_RESPONSE = {
+    "id": "chatcmpl-abc123",
+    "object": "chat.completion",
+    "created": 1699876543,
+    "model": "gpt-4o-2024-08-06",
+    "system_fingerprint": "fp_abc123",
+    "choices": [{
+        "index": 0,
+        "message": {
+            "role": "assistant",
+            "content": "Your complete response here.",
+            "refusal": None
+        },
+        "logprobs": None,
+        "finish_reason": "stop"
+    }],
+    "usage": {
+        "prompt_tokens": 25,
+        "completion_tokens": 50,
+        "total_tokens": 75,
+        "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+        }
+    }
+}
+
+Mocking Tool Calls​
+
+When your agent uses tools, the LLM returns a tool_calls array instead of (or alongside) content. This is where mocking gets interesting.
+
+Single Tool Call​
+@pytest.mark.asyncio
+@respx.mock
+async def test_agent_tool_call():
+    """Mock an LLM response that triggers a tool."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,  # No content when making tool call
+                        "tool_calls": [{
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": '{"title": "Buy groceries", "priority": "high"}'
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }
+        )
+    )
+
+    # Your agent processes this and calls the create_task tool
+    result = await agent.process("Create a task to buy groceries")
+
+    # Verify tool was parsed correctly
+    assert result.tool_calls[0].function.name == "create_task"
+    assert '"title": "Buy groceries"' in result.tool_calls[0].function.arguments
+
+
+Output:
+
+tests/test_agent.py::test_agent_tool_call PASSED
+
+
+Tool call structure requirements:
+
+content is None when the LLM makes a tool call
+tool_calls is an array (multiple tools can be called)
+Each tool call has id, type, and function
+function.arguments is a JSON string (not parsed object)
+finish_reason is "tool_calls" not "stop"
+Multiple Tool Calls​
+@pytest.mark.asyncio
+@respx.mock
+async def test_multiple_tool_calls():
+    """Mock LLM calling multiple tools in parallel."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city": "London"}'
+                                }
+                            },
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city": "Paris"}'
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }
+        )
+    )
+
+    result = await agent.process("What's the weather in London and Paris?")
+
+    assert len(result.tool_calls) == 2
+    cities = [tc.function.arguments for tc in result.tool_calls]
+    assert '"London"' in cities[0]
+    assert '"Paris"' in cities[1]
+
+
+Output:
+
+tests/test_agent.py::test_multiple_tool_calls PASSED
+
+Mocking Error Responses​
+
+Production agents must handle failures gracefully. respx lets you simulate every error condition.
+
+Rate Limit (429)​
+@pytest.mark.asyncio
+@respx.mock
+async def test_rate_limit_handling():
+    """Test agent handles rate limiting gracefully."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "Rate limit exceeded. Please retry after 60 seconds.",
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded"
+                }
+            },
+            headers={"Retry-After": "60"}
+        )
+    )
+
+    # Your error handling should catch this
+    with pytest.raises(RateLimitError) as exc_info:
+        await agent.process("Test query")
+
+    assert "rate limit" in str(exc_info.value).lower()
+
+
+Output:
+
+tests/test_errors.py::test_rate_limit_handling PASSED
+
+Server Error (500)​
+@pytest.mark.asyncio
+@respx.mock
+async def test_server_error_handling():
+    """Test agent handles OpenAI server errors."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            500,
+            json={
+                "error": {
+                    "message": "Internal server error",
+                    "type": "server_error",
+                    "code": "internal_error"
+                }
+            }
+        )
+    )
+
+    with pytest.raises(ServerError):
+        await agent.process("Test query")
+
+
+Output:
+
+tests/test_errors.py::test_server_error_handling PASSED
+
+Timeout​
+@pytest.mark.asyncio
+@respx.mock
+async def test_timeout_handling():
+    """Test agent handles network timeouts."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=httpx.TimeoutException("Connection timed out")
+    )
+
+    with pytest.raises(AgentTimeoutError) as exc_info:
+        await agent.process("Test query")
+
+    assert "timed out" in str(exc_info.value).lower()
+
+
+Output:
+
+tests/test_errors.py::test_timeout_handling PASSED
+
+Malformed Response​
+@pytest.mark.asyncio
+@respx.mock
+async def test_malformed_response_handling():
+    """Test agent handles unexpected response structure."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"unexpected": "structure", "no_choices": True}
+        )
+    )
+
+    with pytest.raises(AgentResponseError):
+        await agent.process("Test query")
+
+
+Output:
+
+tests/test_errors.py::test_malformed_response_handling PASSED
+
+Sequential Responses (Multi-Turn Testing)​
+
+Real agent conversations involve multiple LLM calls. Use side_effect with a list to mock sequential responses.
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_multi_turn_agent_flow(client):
+    """Test complete agent pipeline: tool call → execution → response."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            # First call: LLM decides to use a tool
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "create_task",
+                                "arguments": '{"title": "Write tests"}'
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            # Second call: LLM responds after seeing tool result
+            httpx.Response(200, json={
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "I've created the task 'Write tests' for you."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+        ]
+    )
+
+    response = await client.post(
+        "/api/agent/chat",
+        json={"message": "Create a task to write tests"}
+    )
+
+    assert response.status_code == 200
+    assert "created" in response.json()["response"].lower()
+
+    # Verify the LLM was called twice
+    assert respx.calls.call_count == 2
+
+
+Output:
+
+tests/test_integration.py::test_multi_turn_agent_flow PASSED
+
+Verifying Mock Calls​
+
+respx tracks every request it intercepts. Use this to verify your code makes the right API calls.
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_request_verification():
+    """Verify correct data is sent to OpenAI."""
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "choices": [{"message": {"content": "Response"}}]
+        })
+    )
+
+    await agent.process("Hello, agent!")
+
+    # Verify route was called
+    assert route.called
+    assert route.call_count == 1
+
+    # Inspect the request
+    request = route.calls[0].request
+    body = request.content.decode()
+
+    # Verify request body contains expected data
+    assert "Hello, agent!" in body
+    assert "gpt-4" in body  # Expected model
+
+    # Verify headers
+    assert "Bearer" in request.headers.get("Authorization", "")
+
+
+Output:
+
+tests/test_agent.py::test_request_verification PASSED
+
+Mocking Anthropic API​
+
+Anthropic's API structure differs from OpenAI. Here's the correct format:
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_anthropic_completion():
+    """Mock Anthropic messages API."""
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "msg_abc123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "Hello! I'm Claude, happy to help."
+                }],
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 15,
+                    "output_tokens": 12
+                }
+            }
+        )
+    )
+
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic(api_key="test-key")
+
+    response = await client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Hello!"}]
+    )
+
+    assert response.content[0].text == "Hello! I'm Claude, happy to help."
+
+
+Output:
+
+tests/test_anthropic.py::test_anthropic_completion PASSED
+
+
+Key differences from OpenAI:
+
+Endpoint is /v1/messages (not /v1/chat/completions)
+content is an array of content blocks, not a string
+stop_reason instead of finish_reason
+input_tokens/output_tokens instead of prompt_tokens/completion_tokens
+Anthropic Tool Use​
+@pytest.mark.asyncio
+@respx.mock
+async def test_anthropic_tool_use():
+    """Mock Anthropic tool use response."""
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "msg_abc123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_abc123",
+                    "name": "create_task",
+                    "input": {"title": "New task", "priority": "high"}
+                }],
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 20, "output_tokens": 30}
+            }
+        )
+    )
+
+    # Your agent code handles this tool call
+    result = await agent.process("Create a high-priority task")
+
+    assert result.content[0].type == "tool_use"
+    assert result.content[0].name == "create_task"
+
+
+Output:
+
+tests/test_anthropic.py::test_anthropic_tool_use PASSED
+
+Hands-On Exercise​
+
+Create a complete test file that achieves zero API calls.
+
+Create tests/test_agent_mock.py:
+
+"""
+Complete agent testing with mocked LLM calls.
+
+Requirements:
+1. All tests pass with zero network calls
+2. Mock OpenAI completion response
+3. Mock tool call response
+4. Mock 429 rate limit error
+5. Verify all mocks were called correctly
+"""
+
+import pytest
+import respx
+import httpx
+from app.agent import Agent, RateLimitError
+
+@pytest.fixture
+def agent():
+    """Create agent instance for testing."""
+    return Agent(api_key="test-key-not-used")
+
+# TODO: Implement these tests
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_basic_completion(agent):
+    """Test agent handles basic completion."""
+    # Your mock here
+    pass
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_tool_call_execution(agent):
+    """Test agent parses and executes tool calls."""
+    # Your mock here
+    pass
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_rate_limit_error(agent):
+    """Test agent handles 429 gracefully."""
+    # Your mock here
+    pass
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_multi_turn_conversation(agent):
+    """Test two-turn conversation with tool."""
+    # Your mock with side_effect here
+    pass
+
+
+Run your tests with:
+
+pytest tests/test_agent_mock.py -v
+
+
+Success criteria:
+
+All 4 tests pass
+pytest --cov shows mocking code is covered
+No network calls (tests complete in under 1 second)
+Try With AI​
+
+Work with your AI assistant to build comprehensive mocks.
+
+Prompt 1: Generate Mock for Your Agent​
+My agent uses OpenAI and calls these tools:
+- create_task(title: str, priority: str, due_date: str | None)
+- search_tasks(query: str, status: str = "all")
+- update_task(task_id: int, updates: dict)
+
+Generate respx mocks for:
+1. A completion that calls create_task with all parameters
+2. A completion that calls search_tasks and returns results
+3. A multi-turn flow: search → no results → create
+
+Use the exact OpenAI response structure with choices[0].message.tool_calls.
+
+
+What you're learning: AI generates complex mock structures that you can verify against the OpenAI documentation. You validate the structure is correct before trusting it.
+
+Prompt 2: Fix Mock Structure​
+My test is failing. Here's the mock I'm using:
+
+respx.post("https://api.openai.com/v1/chat/completions").mock(
+    return_value=httpx.Response(200, json={
+        "response": {
+            "tool_calls": [{"name": "create_task", "args": {"title": "Test"}}]
+        }
+    })
+)
+
+My code expects `response.choices[0].message.tool_calls[0].function.name`.
+What's wrong with my mock? Fix it to match the real OpenAI response format.
+
+
+What you're learning: You teach the AI the correct structure by pointing out what your code expects. This reinforces your understanding of the API response format.
+
+Prompt 3: Build Error Scenario Suite​
+I want comprehensive error coverage for my agent. Help me design tests for:
+1. Rate limit (429) with retry logic - what headers should I include?
+2. Server error (500) with fallback behavior
+3. Timeout with graceful degradation
+4. Invalid JSON response
+5. Missing required fields in response
+
+For each, show me the respx mock and what my agent should do in response.
+Which should we implement first?
+
+
+What you're learning: Collaborative error scenario planning. AI suggests scenarios you might miss; you prioritize based on your agent's production requirements.
+
+Reflect on Your Skill​
+Test Your Skill​
+Using my agent-tdd skill, show me how to mock an OpenAI API call
+that returns a tool call. Does my skill include:
+- The correct choices[0].message.tool_calls structure?
+- The function.arguments as JSON string (not parsed object)?
+- The finish_reason of "tool_calls"?
+
+Also check: does my skill cover Anthropic API mocking?
+
+Identify Gaps​
+
+After running that prompt, ask yourself:
+
+Does my skill include both decorator and fixture mock styles?
+Does it show sequential response mocking with side_effect?
+Does it cover error responses (429, 500, timeout)?
+Does it explain how to verify mock calls were made?
+Improve Your Skill​
+
+If you found gaps:
+
+My agent-tdd skill needs comprehensive LLM mocking patterns. Add:
+
+1. OpenAI mock patterns:
+   - Basic completion with choices[0].message.content
+   - Tool calls with tool_calls array structure
+   - Sequential responses using side_effect list
+
+2. Anthropic mock patterns:
+   - Messages API endpoint and response structure
+   - Tool use with content[0].type = "tool_use"
+
+3. Error mocking:
+   - Rate limit (429) with Retry-After header
+   - Server error (500)
+   - Timeout using side_effect=httpx.TimeoutException
+
+4. Call verification:
+   - route.called and route.call_count
+   - Inspecting request.content
+
+Make sure each pattern shows the exact JSON structure required.
+
+
+Your skill grows with each lesson. The mocking patterns you add now will save hours on every future agent project.

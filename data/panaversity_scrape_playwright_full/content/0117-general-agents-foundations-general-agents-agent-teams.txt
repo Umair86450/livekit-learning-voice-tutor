@@ -1,0 +1,423 @@
+Agent Teams: Coordinating Multiple Claude Sessions
+
+A management consultant is preparing a market entry analysis for a client expanding into Southeast Asia. The project needs competitive intelligence, financial modeling, and regulatory review -- all by Friday. She starts with a single Claude session, asking it to research competitors, then model revenue scenarios, then check import regulations. By the time it reaches the regulatory section, the financial assumptions are buried twenty messages up. Context is degrading. The analysis is shallow because one agent is juggling three specialties.
+
+What if three separate Claude instances could investigate simultaneously -- one dedicated to competitive landscape, one to financial modeling, one to regulatory requirements -- each with a fresh, focused context window? And what if those three analysts could then discuss their findings with each other, challenging assumptions and cross-referencing data, before delivering a unified brief?
+
+That is Agent Teams. Where subagents (Lesson 11) are fire-and-forget workers that report back to a single caller, Agent Teams are fully independent Claude Code instances that coordinate through a shared task list and direct messaging. Each teammate has its own context window, can message any other teammate, and self-coordinates work.
+
+Enable Agent Teams​
+
+Agent Teams is an experimental feature requiring Claude Code v2.1.32 or later. Add this to your VS Code settings.json or Claude Code settings:
+
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+
+
+Verify it worked: Start a new Claude Code session and type a prompt that requests a team. If the feature is enabled, you will see Claude creating teammates instead of subagents.
+
+Choose a Display Mode​
+
+Agent Teams supports two display modes:
+
+In-process (default): all teammates run inside your main terminal. Use Shift+Up/Down to select a teammate and type to message them directly. Works in any terminal.
+Split panes: each teammate gets its own pane. You can see everyone's output at once and click into a pane to interact directly. Requires tmux or iTerm2. Split-pane mode is not supported in VS Code's integrated terminal, Windows Terminal, or Ghostty.
+
+Set the mode in your settings.json:
+
+{
+  "teammateMode": "in-process"
+}
+
+
+Or override for a single session with a CLI flag:
+
+claude --teammate-mode in-process
+
+
+The default "auto" uses split panes if you are already running inside tmux, and in-process otherwise. For most learners, in-process mode is the simplest starting point.
+
+A note on "experimental": The patterns you learn here -- task decomposition, parallel coordination, role assignment -- are fundamental to multi-agent systems. The specific API may evolve, but the thinking transfers to any platform that supports agent coordination.
+
+Your First Team​
+
+Open Claude Code in any project folder and type:
+
+Create an agent team to evaluate a business opportunity from three angles:
+- Market researcher: size the opportunity and identify trends
+- Competitive analyst: map existing players and their weaknesses
+- Financial analyst: estimate costs, revenue potential, and breakeven
+Have them share findings with each other before producing a unified brief.
+
+What Happens (Watch Carefully)​
+
+Claude creates the team. You will see a team lead (your main session) and three teammates spawn. Each teammate gets its own context window.
+
+Tasks appear. Press Ctrl+T to view the shared task list. You will see tasks assigned to each teammate.
+
+Teammates work independently. Each teammate reads files, analyzes data, and builds findings -- all in its own isolated context. No context pollution between them.
+
+Navigate between teammates. Use Shift+Up and Shift+Down to switch your view between the lead and each teammate. Watch them work in real time.
+
+Teammates message each other. This is the key difference from subagents. The market researcher might message the financial analyst: "I found the total addressable market is $2.4B with 12% annual growth -- factor that into your revenue projections." The financial analyst incorporates this directly, without routing through the lead.
+
+Lead synthesizes. Once all three teammates finish, the lead reads their findings, resolves conflicting assumptions, and produces a combined brief.
+
+Try it now. Run the prompt above and observe each step. Even without real market data in your project folder, the team will demonstrate the coordination pattern using its own knowledge.
+
+Peek Under the Hood​
+
+While the team works, explore the files Claude creates behind the scenes. Open a separate terminal (not your Claude session) and inspect:
+
+Team config -- who is on the team:
+
+cat ~/.claude/teams/*/config.json | python3 -m json.tool | head -30
+
+
+You will see a members array where each teammate has a name, agentType, and model:
+
+{
+  "name": "opportunity-evaluation",
+  "members": [
+    {
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "model": "claude-opus-4-6"
+    },
+    {
+      "name": "market-researcher",
+      "agentType": "general-purpose",
+      "model": "claude-sonnet-4-5-20250929"
+    }
+  ]
+}
+
+
+Task files -- what work exists:
+
+cat ~/.claude/tasks/*/1.json | python3 -m json.tool
+
+
+Each task is a JSON file with dependency tracking:
+
+{
+  "id": "1",
+  "subject": "Research market size and growth trends for target region",
+  "description": "Focus on Southeast Asian market for consumer fintech...",
+  "owner": "market-researcher",
+  "status": "in_progress",
+  "blocks": ["3"],
+  "blockedBy": []
+}
+
+
+The blocks and blockedBy fields form a dependency graph. A task with unresolved blockedBy entries cannot be claimed until those dependencies complete. When a blocking task completes, dependent tasks unblock automatically.
+
+Why this matters: When a team gets stuck (a task says in_progress but the teammate seems idle), you can read these files to diagnose the problem. Is the task stuck? Is a dependency not marked complete? Knowing the internals turns debugging from guesswork into inspection.
+
+Subagents vs Agent Teams: The Decision​
+
+You already know subagents from Lesson 11. When should you use teams instead?
+
+Scenario	Subagents	Agent Teams
+"Summarize this report"	Focused, result-only	Overkill for one task
+"Evaluate this opportunity from 3 stakeholder perspectives"	Perspectives cannot discuss each other's findings	Use this -- perspectives challenge each other
+"Research 5 vendors and summarize each"	Each returns a summary	Only if they need to compare and rank
+"Plan a product launch across marketing, engineering, and operations"	Cannot coordinate across functions	Use this -- each owns their function, they sync
+"Draft a client email"	Quick and cheap	Way too expensive
+"Investigate why customer satisfaction dropped"	Anchors on first theory found	Use this -- competing hypotheses
+
+The decision rule: If teammates need to talk to each other, use teams. If they just report back, use subagents.
+
+Cost Consideration​
+
+Agent teams use more tokens than subagents because each teammate maintains its own full context window plus inter-agent messages. A 3-agent team analysis might cost 3-5x what a single-agent session costs. Use the strongest model for synthesis (the lead) and efficient models for research (teammates). Configure this in your team creation prompt:
+
+Create a team where the lead uses Opus and teammates use Sonnet.
+The teammates do the bulk research work, and the lead synthesizes.
+
+
+Use teams when the quality improvement justifies the cost -- multi-angle investigations, competing hypotheses, and cross-functional coordination are worth it. Simple summaries and single-perspective tasks are not.
+
+Controlling Your Team​
+
+Each technique below includes a prompt you should try.
+
+Delegate Mode (Shift+Tab)​
+
+Delegate mode prevents the team lead from doing analysis directly. The lead can only coordinate: create tasks, send messages, review results. All investigation goes to teammates.
+
+Think of it this way: You are the project director. You define scope, your team executes. You never write the deliverable yourself.
+
+Try it now:
+
+Press Shift+Tab to toggle delegate mode ON
+Type this prompt:
+Analyze the competitive landscape for AI-powered customer service tools.
+Create teammates to handle each competitor segment. You coordinate and
+review their work, but do not conduct any research yourself.
+
+Watch the lead create tasks and assign them to teammates without doing any analysis itself
+Press Shift+Tab again to toggle delegate mode OFF when done
+Plan Approval​
+
+Before executing, teammates present their approach for review -- like approving a consultant's work plan before they bill hours.
+
+Try it now:
+
+Create a teammate to analyze our pricing strategy against three competitors.
+Require plan approval before they begin work -- I want to review their
+approach and data sources first.
+
+
+Watch the flow:
+
+Teammate reads the project context (read-only)
+Teammate produces a plan outlining their analysis approach
+Lead receives the plan for review
+You (through the lead) approve or reject with feedback
+Only after approval does the teammate begin the analysis
+Direct Messages​
+
+You can redirect teammates mid-task without disrupting others.
+
+Try it now: During a team session, use Shift+Up / Shift+Down to select a specific teammate, then type:
+
+Focus on the Asia-Pacific market first, we'll cover EMEA in a follow-up.
+
+
+The teammate receives your message and adjusts its work accordingly. Other teammates are not interrupted.
+
+Task Dependencies​
+
+Tasks can depend on other tasks. A blocked task will not start until its dependency completes.
+
+Try it now:
+
+Create a team for a product launch plan:
+1. Market research -- size the opportunity and identify target segments (no dependencies)
+2. Positioning strategy -- define value proposition and messaging (blocked by task 1)
+3. Marketing plan -- channels, budget, timeline (blocked by task 2)
+4. Launch timeline -- milestones and go/no-go criteria (blocked by tasks 2 and 3)
+
+Assign each task to a different teammate. They should self-coordinate
+based on the dependency chain.
+
+
+Watch tasks unblock automatically as their dependencies complete. Teammates claim unblocked tasks without being told.
+
+Shared Documents​
+
+Teams can write to shared files that all teammates read. This is how teams produce consensus.
+
+Try it now:
+
+Create a team of 3 to investigate why Q4 sales declined.
+Each teammate writes their findings to ANALYSIS.md in the project root.
+After all three finish, the lead synthesizes ANALYSIS.md into a ranked
+action plan in RECOMMENDATION.md.
+
+
+Unlike messages (which live in each teammate's context), a shared file persists and can be read by anyone. This pattern is powerful for investigations where you want a permanent record.
+
+Quality Hooks for Teams​
+
+Lesson 15 introduced hooks for single-agent workflows. Two hook events are designed specifically for teams.
+
+TeammateIdle: Keep Teammates Working​
+
+When a teammate runs out of tasks and goes idle, this hook fires. You can use it to assign more work or check for remaining items.
+
+{
+  "hooks": {
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-remaining-tasks.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+The hook script (.claude/hooks/check-remaining-tasks.sh):
+
+#!/usr/bin/env bash
+# Check if there are remaining items for idle teammates
+
+INPUT=$(cat)
+TEAMMATE=$(echo "$INPUT" | jq -r '.teammate_name // "unknown"')
+
+# Check if the project still has open action items
+REMAINING=$(grep -r "TODO\|FIXME\|OPEN" docs/ 2>/dev/null | wc -l)
+
+if [ "$REMAINING" -gt 0 ]; then
+  echo "There are $REMAINING open items remaining in docs/. Pick one up."
+  exit 2  # Exit code 2 = send feedback, keep working
+fi
+
+exit 0  # Exit code 0 = allow idle
+
+
+Exit code 2 sends the stdout message as feedback and keeps the teammate working. Exit code 0 allows the teammate to go idle normally.
+
+TaskCompleted: Quality Gate​
+
+When a teammate marks a task as done, this hook fires before the task is accepted. You can use it to enforce quality standards on deliverables.
+
+{
+  "hooks": {
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/verify-task-quality.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+The hook script (.claude/hooks/verify-task-quality.sh):
+
+#!/usr/bin/env bash
+# Verify deliverable quality before accepting task completion
+
+INPUT=$(cat)
+TASK_DESC=$(echo "$INPUT" | jq -r '.task_description // "unknown"')
+
+# Check that the deliverable file exists and has substance
+if [ ! -f "ANALYSIS.md" ] || [ $(wc -w < ANALYSIS.md) -lt 100 ]; then
+  echo "Deliverable is missing or too short. Add findings with supporting evidence before marking complete."
+  exit 2  # Exit code 2 = reject completion, send feedback
+fi
+
+exit 0  # Exit code 0 = accept completion
+
+When Teams Go Wrong​
+
+Teams are powerful but introduce coordination complexity. Five common failure modes and their fixes:
+
+1. Lead Implements Instead of Delegating​
+
+What it looks like: The director starts writing the analysis instead of reviewing team output.
+
+Fix: Enable delegate mode (Shift+Tab) or include explicit instructions: "You are the coordinator. NEVER conduct research directly. Create tasks, assign them, and review results."
+
+2. Teammates Editing the Same File​
+
+What it looks like: Two analysts updating the same section of a report, overwriting each other's findings.
+
+Fix: Assign section ownership explicitly: "Market researcher writes to Section 1 of ANALYSIS.md. Financial analyst writes to Section 2. Competitive analyst writes to Section 3."
+
+3. Teammate Lost Context​
+
+What it looks like: A new team member does not know about project conventions or prior decisions.
+
+Fix: Teammates do NOT inherit the lead's conversation history. Include critical context in the spawn prompt, or ensure your CLAUDE.md file contains the necessary background (teammates DO read project context files).
+
+4. Token Costs Too High​
+
+What it looks like: A team analysis costs significantly more than expected.
+
+Fix: Use the strongest model for synthesis and efficient models for research. The teammates do the bulk investigative work; the lead synthesizes. This gives you depth where it matters without overspending on routine research.
+
+5. Tasks Stuck​
+
+What it looks like: A deliverable sits "in progress" while the teammate waits for input or is stuck in a loop.
+
+Fix: Check the teammate's view (Shift+Up/Down). Send a direct message to redirect or unstick it. If needed, inspect the task files at ~/.claude/tasks/*/ to check dependency status.
+
+Known Limitations​
+
+Beyond the failure modes above, be aware of these architectural constraints:
+
+No session resumption: If a teammate crashes or the session restarts, in-process teammates cannot be recovered. You must recreate the team.
+One team per session: A Claude Code session supports a single active team at a time.
+No nested teams: A teammate cannot itself create sub-teams.
+Lead is fixed: The lead agent is set at team creation and cannot be changed mid-session.
+Permissions set at spawn: Each teammate inherits its permission level when created; you cannot escalate permissions later.
+Patterns​
+
+Three universal patterns for team coordination. Each includes a prompt you can adapt.
+
+Parallel Investigation​
+
+Multiple angles on the same question, investigated simultaneously.
+
+Our customer satisfaction scores dropped 15% last quarter. Create a team
+with 3 investigators:
+- Pricing investigator: analyze whether recent price changes correlate
+  with churn patterns and competitor pricing
+- Product quality investigator: examine support tickets, feature requests,
+  and product usage data for quality signals
+- Market conditions investigator: research industry trends, competitor
+  launches, and economic factors affecting our segment
+
+Each investigator shares their top finding with the others.
+Converge on the most likely root cause with supporting evidence.
+
+Pipeline Build​
+
+Sequential dependencies where each stage feeds the next.
+
+Create a team for launching a new consulting service:
+1. Market research -- identify target clients and willingness to pay (no dependencies)
+2. Service design -- define deliverables, pricing tiers, and scope (blocked by task 1)
+3. Go-to-market plan -- channels, messaging, launch sequence (blocked by task 2)
+4. Financial projection -- costs, revenue forecast, breakeven timeline (blocked by tasks 2 and 3)
+
+Each stage should produce a written deliverable that the next stage references.
+
+Competing Hypotheses​
+
+When the root cause is unclear, multiple investigators actively try to disprove each other. This prevents anchoring bias -- the tendency to commit to the first plausible explanation.
+
+We lost our three largest enterprise accounts in the same month. Spawn 4
+teammates to investigate different theories:
+- Teammate 1: pricing and contract terms drove them away
+- Teammate 2: product reliability issues (outages, bugs) caused the churn
+- Teammate 3: a competitor made aggressive offers to poach them
+- Teammate 4: internal champion turnover at those accounts
+
+Have them broadcast challenges to each other's findings. The theory that
+survives debate is most likely correct. Write the consensus to FINDINGS.md.
+
+
+Why this works: A single investigator finds one plausible explanation and stops looking. With four independent investigators who can challenge each other's theories, the hypothesis that survives is much more likely to be the real root cause. Sequential investigation suffers from anchoring; parallel debate eliminates it.
+
+What's Next​
+
+Lesson 21 provides hands-on exercises to practice everything from this lesson -- market research sprints, event planning pipelines, feature prioritization debates, client proposal pipelines, and capstone projects across four professional domains. After that, Lesson 22 introduces Worktrees -- giving each Claude session its own isolated copy of the repository so parallel work never conflicts.
+
+Try With AI​
+
+Build a Two-Perspective Team:
+
+"Create a 2-agent team to evaluate a business decision from two opposing perspectives. One teammate argues FOR the decision with supporting evidence. One argues AGAINST with risks and alternatives. Have them challenge each other's reasoning before the lead writes a balanced recommendation."
+
+What you're learning: How to structure team roles so they complement rather than overlap. The opposing-perspectives pattern forces deeper analysis than a single agent producing a pro/con list, because each perspective actively challenges the other.
+
+Delegate Mode with Plan Approval:
+
+"Enable delegate mode (Shift+Tab). Then ask the lead to coordinate a competitive analysis with plan approval required. The lead should create an analyst teammate, require them to submit their research plan before starting, and only approve plans that specify data sources and analysis methodology."
+
+What you're learning: Maximum control over team behavior for high-stakes work. Delegate mode keeps the lead strategic while plan approval ensures quality before resources are spent.
+
+Apply to Your Domain:
+
+"Think of a complex problem in your professional domain that would benefit from parallel investigation. Design 3-4 specialist roles -- what does each investigate, and how do they share findings? Create the team and run it. After the team finishes, reflect: which findings only emerged because the specialists could discuss with each other?"
+
+What you're learning: Decomposing problems into parallel workstreams and coordinating independent specialists. This skill -- breaking a complex question into focused investigations that cross-pollinate -- extends to any professional domain where multiple perspectives produce better answers than one.
+
+Flashcards Study Aid​

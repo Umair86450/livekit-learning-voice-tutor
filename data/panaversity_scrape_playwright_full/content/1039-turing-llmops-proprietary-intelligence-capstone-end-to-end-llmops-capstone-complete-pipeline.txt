@@ -1,0 +1,736 @@
+Capstone: Build Your Complete LLMOps Pipeline
+
+This is it. The final synthesis. You've learned individual LLMOps skills across Part 8. Now you'll weave them into a complete, production-ready system.
+
+This capstone challenges you to build an end-to-end pipeline that takes your Task API model from raw data to production deployment—with quality gates, monitoring, and productization. By the end, you'll have a reusable LLMOps skill that encodes everything you've learned.
+
+The Complete Pipeline​
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        END-TO-END LLMOPS PIPELINE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   STAGE 1: DATA                 STAGE 2: TRAINING                           │
+│   ┌─────────────┐               ┌─────────────────────────────────┐         │
+│   │ Raw Data    │──────────────▶│  SFT → Merge → DPO             │         │
+│   │ Curation    │               │  (with quality gates)           │         │
+│   │             │               │                                 │         │
+│   │ - Collection│               │  - LoRA/QLoRA training          │         │
+│   │ - Cleaning  │               │  - Adapter merging              │         │
+│   │ - Formatting│               │  - Preference alignment         │         │
+│   └─────────────┘               └─────────────┬───────────────────┘         │
+│                                               │                              │
+│   STAGE 3: EVALUATION           STAGE 4: DEPLOYMENT                         │
+│   ┌─────────────┐               ┌─────────────────────────────────┐         │
+│   │ Quality     │◀──────────────│  Export → Deploy → Validate    │         │
+│   │ Gates       │               │                                 │         │
+│   │             │──────────────▶│  - GGUF conversion              │         │
+│   │ - Accuracy  │               │  - Ollama deployment            │         │
+│   │ - Safety    │               │  - Health checks                │         │
+│   │ - Format    │               │  - Smoke tests                  │         │
+│   └─────────────┘               └─────────────┬───────────────────┘         │
+│                                               │                              │
+│   STAGE 5: PRODUCTION           STAGE 6: PRODUCTIZATION                     │
+│   ┌─────────────┐               ┌─────────────────────────────────┐         │
+│   │ Monitoring  │◀──────────────│  Package → Price → Sell        │         │
+│   │ & Alerts    │               │                                 │         │
+│   │             │               │  - Product packaging            │         │
+│   │ - Metrics   │               │  - Documentation                │         │
+│   │ - Drift     │               │  - Pricing model                │         │
+│   │ - Incidents │               │  - Distribution                 │         │
+│   └─────────────┘               └─────────────────────────────────┘         │
+│                                                                              │
+│   OUTPUT: TaskMaster Digital FTE v1.0                                       │
+│   - Sellable product with clear value proposition                           │
+│   - Production-ready with monitoring                                        │
+│   - Complete documentation and support materials                            │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Your Challenge​
+
+Build a complete LLMOps pipeline that:
+
+Curates training data for the Task API domain
+Trains and aligns your custom model (SFT → DPO)
+Evaluates quality with automated gates
+Deploys to production via Ollama
+Monitors and alerts on quality drift
+Packages for sale as a Digital FTE
+
+You have 2 hours. Use everything you've learned.
+
+Part 1: Pipeline Architecture (20 minutes)​
+Design Your Pipeline​
+
+Create llmops_pipeline/config.py:
+
+"""
+Complete LLMOps Pipeline Configuration
+
+Your first task: Define the complete configuration structure that
+connects all pipeline stages.
+"""
+
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+from pathlib import Path
+
+@dataclass
+class DataConfig:
+    """Data curation configuration."""
+    raw_data_path: Path
+    output_path: Path
+    train_split: float = 0.9
+    # TODO: Add fields for:
+    # - Cleaning rules
+    # - Format specification
+    # - Quality thresholds
+
+@dataclass
+class TrainingConfig:
+    """Training pipeline configuration."""
+    base_model: str
+    output_dir: Path
+    # SFT settings
+    sft_epochs: int = 3
+    sft_batch_size: int = 4
+    sft_learning_rate: float = 2e-4
+    # DPO settings
+    dpo_epochs: int = 1
+    dpo_beta: float = 0.1
+    # TODO: Add fields for:
+    # - LoRA configuration
+    # - Checkpointing
+    # - Validation splits
+
+@dataclass
+class EvaluationConfig:
+    """Evaluation gates configuration."""
+    accuracy_threshold: float = 0.85
+    safety_threshold: float = 0.99
+    format_threshold: float = 0.95
+    # TODO: Add fields for:
+    # - Custom evaluators
+    # - Benchmark datasets
+    # - Regression detection
+
+@dataclass
+class DeploymentConfig:
+    """Deployment automation configuration."""
+    model_name: str
+    quantization: str = "Q4_K_M"
+    ollama_url: str = "http://localhost:11434"
+    # TODO: Add fields for:
+    # - Rollback settings
+    # - Health check parameters
+    # - Smoke test prompts
+
+@dataclass
+class MonitoringConfig:
+    """Production monitoring configuration."""
+    metrics_port: int = 9090
+    log_level: str = "INFO"
+    # TODO: Add fields for:
+    # - Alert thresholds
+    # - Drift detection baseline
+    # - Notification channels
+
+@dataclass
+class ProductConfig:
+    """Productization configuration."""
+    product_name: str
+    version: str
+    # TODO: Add fields for:
+    # - Pricing tiers
+    # - Documentation paths
+    # - License terms
+
+@dataclass
+class PipelineConfig:
+    """Complete pipeline configuration."""
+    pipeline_id: str
+    data: DataConfig
+    training: TrainingConfig
+    evaluation: EvaluationConfig
+    deployment: DeploymentConfig
+    monitoring: MonitoringConfig
+    product: ProductConfig
+
+    # Pipeline behavior
+    stop_on_failure: bool = True
+    save_intermediate: bool = True
+    parallel_evaluation: bool = True
+
+Create Master Orchestrator​
+"""
+llmops_pipeline/orchestrator.py
+
+The master orchestrator that runs all pipeline stages.
+Your task: Implement the complete pipeline flow.
+"""
+
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+from datetime import datetime
+import json
+import logging
+
+from .config import PipelineConfig
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class StageResult:
+    stage_name: str
+    success: bool
+    duration_seconds: float
+    artifacts: Dict[str, Any]
+    metrics: Dict[str, float]
+    error: Optional[str] = None
+
+@dataclass
+class PipelineResult:
+    pipeline_id: str
+    success: bool
+    stages_completed: List[str]
+    total_duration_seconds: float
+    stage_results: Dict[str, StageResult]
+    final_artifacts: Dict[str, Path]
+    errors: List[str]
+
+class LLMOpsPipeline:
+    """Complete LLMOps pipeline orchestrator."""
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.stage_results: Dict[str, StageResult] = {}
+        self.errors: List[str] = []
+
+    def run(self) -> PipelineResult:
+        """Execute the complete pipeline."""
+        import time
+        start_time = time.time()
+        stages_completed = []
+
+        logger.info(f"Starting LLMOps Pipeline: {self.config.pipeline_id}")
+
+        try:
+            # Stage 1: Data Curation
+            logger.info("=" * 50)
+            logger.info("STAGE 1: Data Curation")
+            logger.info("=" * 50)
+            data_result = self._run_data_stage()
+            self.stage_results["data"] = data_result
+            if not data_result.success:
+                raise PipelineError("Data curation failed")
+            stages_completed.append("data")
+
+            # Stage 2: Training
+            logger.info("=" * 50)
+            logger.info("STAGE 2: Training")
+            logger.info("=" * 50)
+            training_result = self._run_training_stage(
+                data_result.artifacts["train_dataset"]
+            )
+            self.stage_results["training"] = training_result
+            if not training_result.success:
+                raise PipelineError("Training failed")
+            stages_completed.append("training")
+
+            # Stage 3: Evaluation
+            logger.info("=" * 50)
+            logger.info("STAGE 3: Evaluation")
+            logger.info("=" * 50)
+            eval_result = self._run_evaluation_stage(
+                training_result.artifacts["model_path"]
+            )
+            self.stage_results["evaluation"] = eval_result
+            if not eval_result.success:
+                raise PipelineError("Evaluation gates failed")
+            stages_completed.append("evaluation")
+
+            # Stage 4: Deployment
+            logger.info("=" * 50)
+            logger.info("STAGE 4: Deployment")
+            logger.info("=" * 50)
+            deploy_result = self._run_deployment_stage(
+                training_result.artifacts["model_path"]
+            )
+            self.stage_results["deployment"] = deploy_result
+            if not deploy_result.success:
+                raise PipelineError("Deployment failed")
+            stages_completed.append("deployment")
+
+            # Stage 5: Monitoring Setup
+            logger.info("=" * 50)
+            logger.info("STAGE 5: Monitoring Setup")
+            logger.info("=" * 50)
+            monitor_result = self._run_monitoring_stage(
+                eval_result.metrics
+            )
+            self.stage_results["monitoring"] = monitor_result
+            stages_completed.append("monitoring")
+
+            # Stage 6: Productization
+            logger.info("=" * 50)
+            logger.info("STAGE 6: Productization")
+            logger.info("=" * 50)
+            product_result = self._run_productization_stage(
+                deploy_result.artifacts
+            )
+            self.stage_results["productization"] = product_result
+            stages_completed.append("productization")
+
+            return self._create_result(stages_completed, time.time() - start_time)
+
+        except PipelineError as e:
+            self.errors.append(str(e))
+            return self._create_result(stages_completed, time.time() - start_time)
+
+    def _run_data_stage(self) -> StageResult:
+        """Run data curation stage."""
+        # TODO: Implement using your data curation workflow
+        # Reference: Chapter 102, Lesson 2
+        pass
+
+    def _run_training_stage(self, dataset_path: Path) -> StageResult:
+        """Run training stage (SFT → Merge → DPO)."""
+        # TODO: Implement using your training orchestration
+        # Reference: Chapter 102, Lesson 3
+        pass
+
+    def _run_evaluation_stage(self, model_path: Path) -> StageResult:
+        """Run evaluation gates."""
+        # TODO: Implement using your evaluation integration
+        # Reference: Chapter 102, Lesson 4
+        pass
+
+    def _run_deployment_stage(self, model_path: Path) -> StageResult:
+        """Run deployment automation."""
+        # TODO: Implement using your deployment automation
+        # Reference: Chapter 102, Lesson 5
+        pass
+
+    def _run_monitoring_stage(self, baseline_metrics: Dict) -> StageResult:
+        """Set up production monitoring."""
+        # TODO: Implement using your monitoring setup
+        # Reference: Chapter 102, Lesson 7
+        pass
+
+    def _run_productization_stage(self, artifacts: Dict) -> StageResult:
+        """Package as Digital FTE product."""
+        # TODO: Implement using your productization workflow
+        # Reference: Chapter 102, Lesson 6
+        pass
+
+    def _create_result(
+        self,
+        stages_completed: List[str],
+        total_time: float
+    ) -> PipelineResult:
+        """Create final pipeline result."""
+        return PipelineResult(
+            pipeline_id=self.config.pipeline_id,
+            success=len(self.errors) == 0,
+            stages_completed=stages_completed,
+            total_duration_seconds=total_time,
+            stage_results=self.stage_results,
+            final_artifacts=self._collect_final_artifacts(),
+            errors=self.errors
+        )
+
+    def _collect_final_artifacts(self) -> Dict[str, Path]:
+        """Collect all final artifacts from completed stages."""
+        artifacts = {}
+        for stage_name, result in self.stage_results.items():
+            if result.success:
+                for key, value in result.artifacts.items():
+                    if isinstance(value, Path):
+                        artifacts[f"{stage_name}_{key}"] = value
+        return artifacts
+
+
+class PipelineError(Exception):
+    """Pipeline execution error."""
+    pass
+
+Part 2: Implementation (60 minutes)​
+
+Now implement each stage by integrating your previous work.
+
+Stage 1: Data Curation​
+"""
+llmops_pipeline/stages/data.py
+
+Implement data curation for Task API training.
+Use your work from Chapter 93 (Data Engineering).
+"""
+
+def run_data_curation(config: DataConfig) -> StageResult:
+    """
+    Curate training data for Task API model.
+
+    Steps:
+    1. Load raw conversation data
+    2. Clean and validate
+    3. Format for instruction tuning
+    4. Generate preference pairs for DPO
+    5. Create train/validation splits
+    """
+    # YOUR IMPLEMENTATION HERE
+    pass
+
+Stage 2: Training Pipeline​
+"""
+llmops_pipeline/stages/training.py
+
+Implement training pipeline: SFT → Merge → DPO.
+Use your work from Chapters 94-98.
+"""
+
+def run_training_pipeline(
+    dataset_path: Path,
+    config: TrainingConfig
+) -> StageResult:
+    """
+    Run complete training pipeline.
+
+    Steps:
+    1. SFT with LoRA/QLoRA
+    2. Validate SFT checkpoint
+    3. Merge adapter with base model
+    4. DPO alignment
+    5. Final checkpoint
+    """
+    # YOUR IMPLEMENTATION HERE
+    pass
+
+Stage 3: Evaluation Gates​
+"""
+llmops_pipeline/stages/evaluation.py
+
+Implement evaluation gates.
+Use your work from Chapter 102, Lesson 4.
+"""
+
+def run_evaluation_gates(
+    model_path: Path,
+    config: EvaluationConfig
+) -> StageResult:
+    """
+    Run evaluation quality gates.
+
+    Steps:
+    1. Accuracy evaluation
+    2. Format compliance
+    3. Safety evaluation
+    4. Preference alignment check
+    5. Aggregate pass/fail decision
+    """
+    # YOUR IMPLEMENTATION HERE
+    pass
+
+Stage 4: Deployment​
+"""
+llmops_pipeline/stages/deployment.py
+
+Implement deployment automation.
+Use your work from Chapter 102, Lesson 5.
+"""
+
+def run_deployment(
+    model_path: Path,
+    config: DeploymentConfig
+) -> StageResult:
+    """
+    Deploy model to production.
+
+    Steps:
+    1. Export to GGUF
+    2. Quantize
+    3. Generate Modelfile
+    4. Deploy to Ollama
+    5. Validate deployment
+    """
+    # YOUR IMPLEMENTATION HERE
+    pass
+
+Stage 5: Monitoring​
+"""
+llmops_pipeline/stages/monitoring.py
+
+Implement monitoring setup.
+Use your work from Chapter 102, Lesson 7.
+"""
+
+def setup_monitoring(
+    baseline_metrics: Dict,
+    config: MonitoringConfig
+) -> StageResult:
+    """
+    Set up production monitoring.
+
+    Steps:
+    1. Configure metrics collection
+    2. Set drift detection baseline
+    3. Create alert rules
+    4. Deploy dashboards
+    """
+    # YOUR IMPLEMENTATION HERE
+    pass
+
+Stage 6: Productization​
+"""
+llmops_pipeline/stages/productization.py
+
+Implement product packaging.
+Use your work from Chapter 102, Lesson 6.
+"""
+
+def create_product_package(
+    artifacts: Dict,
+    config: ProductConfig
+) -> StageResult:
+    """
+    Package as Digital FTE product.
+
+    Steps:
+    1. Create product structure
+    2. Generate documentation
+    3. Create pricing materials
+    4. Build distribution package
+    """
+    # YOUR IMPLEMENTATION HERE
+    pass
+
+Part 3: Integration Testing (20 minutes)​
+
+Create a test that runs the complete pipeline:
+
+"""
+tests/test_full_pipeline.py
+
+Integration test for complete pipeline.
+"""
+
+import pytest
+from pathlib import Path
+from llmops_pipeline.config import PipelineConfig, load_config
+from llmops_pipeline.orchestrator import LLMOpsPipeline
+
+def test_complete_pipeline():
+    """Test complete pipeline execution."""
+    # Load test configuration
+    config = load_config("configs/test_pipeline.yaml")
+
+    # Run pipeline
+    pipeline = LLMOpsPipeline(config)
+    result = pipeline.run()
+
+    # Verify all stages completed
+    assert result.success, f"Pipeline failed: {result.errors}"
+    assert len(result.stages_completed) == 6
+
+    # Verify artifacts
+    assert "training_model_path" in result.final_artifacts
+    assert "deployment_gguf_path" in result.final_artifacts
+    assert "productization_package_path" in result.final_artifacts
+
+    # Verify metrics
+    for stage in result.stage_results.values():
+        assert stage.success
+        assert stage.duration_seconds > 0
+
+    print(f"Pipeline completed in {result.total_duration_seconds:.1f}s")
+    print(f"Final artifacts: {list(result.final_artifacts.keys())}")
+
+Part 4: Package as Skill (20 minutes)​
+
+Create a reusable LLMOps skill:
+
+Create .claude/skills/llmops-pipeline/SKILL.md:
+
+---
+name: llmops-pipeline
+description: Complete LLMOps pipeline for training, deploying, and productizing custom language models
+allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+---
+
+# LLMOps Pipeline Skill
+
+## When to Use
+
+Invoke this skill when:
+- Training a custom language model from data to production
+- Setting up complete ML pipeline infrastructure
+- Productizing a trained model as a Digital FTE
+
+## Pipeline Stages
+
+1. **Data Curation**: Clean, format, and split training data
+2. **Training**: SFT → Merge → DPO with quality gates
+3. **Evaluation**: Automated quality checks before deployment
+4. **Deployment**: Export, quantize, and deploy to serving
+5. **Monitoring**: Set up observability and alerting
+6. **Productization**: Package as sellable Digital FTE
+
+## Quick Start
+
+```bash
+# Initialize pipeline
+python -m llmops_pipeline init --config pipeline.yaml
+
+# Run complete pipeline
+python -m llmops_pipeline run --config pipeline.yaml
+
+# Run specific stage
+python -m llmops_pipeline run --stage training
+
+Configuration Template​
+pipeline_id: my-model-v1
+data:
+  raw_data_path: ./data/raw
+  output_path: ./data/processed
+
+training:
+  base_model: unsloth/Qwen2.5-3B-Instruct-bnb-4bit
+  sft_epochs: 3
+  dpo_epochs: 1
+
+evaluation:
+  accuracy_threshold: 0.85
+  safety_threshold: 0.99
+
+deployment:
+  model_name: my-model
+  quantization: Q4_K_M
+
+monitoring:
+  metrics_port: 9090
+  alert_channels: [slack, email]
+
+product:
+  product_name: "My Digital FTE"
+  version: "1.0.0"
+
+Outputs​
+Trained model (GGUF format)
+Deployment configuration
+Monitoring dashboards
+Product package with documentation
+Dependencies​
+unsloth
+trl
+transformers
+prometheus_client
+fastapi
+
+## Completion Checklist
+
+Before submitting, verify:
+
+- [ ] Pipeline configuration complete with all fields
+- [ ] All 6 stages implemented and tested
+- [ ] Quality gates blocking on failure
+- [ ] Deployment validated with health checks
+- [ ] Monitoring baseline established
+- [ ] Product package generated with documentation
+- [ ] LLMOps skill created and tested
+- [ ] Integration test passing
+
+## Submission
+
+Your capstone deliverables:
+
+1. **Complete pipeline code** in `llmops_pipeline/`
+2. **Configuration files** in `configs/`
+3. **Test results** showing successful pipeline run
+4. **LLMOps skill** in `.claude/skills/llmops-pipeline/`
+5. **Product package** demonstrating Digital FTE output
+
+## Try With AI
+
+### Prompt 1: Debug Pipeline Failures
+
+
+
+My LLMOps pipeline is failing at the DPO stage with this error:
+
+"RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB"
+
+The pipeline completed SFT successfully. Help me:
+
+Diagnose why DPO is using more memory than SFT
+Suggest configuration changes to reduce memory
+Add memory monitoring to prevent future OOM errors
+Implement graceful degradation (reduce batch size automatically)
+
+Show the specific code changes needed.
+
+
+**What you're learning**: Debugging production pipeline failures.
+
+### Prompt 2: Add CI/CD Integration
+
+
+
+I want to run my LLMOps pipeline automatically when:
+
+New training data is pushed to the data branch
+A new model version is tagged
+Weekly scheduled retraining
+
+Design a CI/CD setup using GitHub Actions that:
+
+Triggers pipeline on these events
+Runs on GPU runners (or Colab)
+Reports results to Slack
+Deploys successful models automatically
+Rolls back on failure
+
+Show the complete workflow YAML and integration code.
+
+
+**What you're learning**: Automating LLMOps with CI/CD.
+
+### Prompt 3: Scale for Multiple Models
+
+
+
+I want to train and deploy multiple specialized models:
+
+TaskMaster (task management)
+CodeReviewer (code review)
+DocWriter (documentation)
+
+Each needs the same pipeline but different data and config. Help me:
+
+Refactor the pipeline for multi-model support
+Add model registry for tracking versions
+Implement parallel training when resources allow
+Create unified monitoring across models
+Design pricing for model bundles
+
+Show the architecture and implementation.
+
+
+**What you're learning**: Scaling LLMOps for multiple model products.
+
+---
+
+## Congratulations
+
+You've completed Part 8: LLMOps and Proprietary Intelligence.
+
+You now have the skills to:
+- Train custom language models for specific domains
+- Build production-grade training pipelines
+- Deploy and monitor models in production
+- Package models as sellable Digital FTE products
+
+This is the culmination of the Agent Factory journey. You can now **manufacture intelligence** that generates revenue.
+
+Your next step: Apply these skills to build your first production Digital FTE. Start with a domain you know, train a specialized model, and put it to work.
+
+The factory is running. What will you build?

@@ -1,0 +1,376 @@
+ChatKit Architecture Foundations
+
+You've built REST APIs with FastAPI. You know the pattern: request comes in, handler processes it, response goes out. Each request is independent, stateless, one-shot.
+
+Now imagine building a chat interface for your TaskManager agent. Users have ongoing conversations. The agent needs to remember what was said five messages ago. Responses stream token-by-token, updating the UI progressively. The interaction feels continuous, not transactional.
+
+This is where ChatKitServer enters. It's not a REST API framework. It's a conversation orchestration layer purpose-built for stateful, streaming, event-driven chat interfaces.
+
+Let's understand what makes it fundamentally different from the request/response world you already know.
+
+The Paradigm Shift: Conversations vs Requests​
+Request/Response World (FastAPI)​
+
+When you build a REST API with FastAPI, you're designing around discrete transactions:
+
+USER → HTTP POST /api/tasks → SERVER
+       ↓
+       Process request
+       ↓
+SERVER → HTTP 200 + JSON → USER
+
+
+Each request is:
+
+Stateless: Server doesn't remember previous requests
+One-shot: Request → Response → Done
+Independent: Each call stands alone
+
+Example: Creating a task:
+
+@app.post("/api/tasks")
+async def create_task(task: TaskCreate):
+    new_task = Task(title=task.title)
+    db.add(new_task)
+    db.commit()
+    return {"id": new_task.id, "status": "created"}
+
+
+Request happens. Function executes. Response returns. Connection closes. No memory of the interaction.
+
+Conversation World (ChatKitServer)​
+
+ChatKitServer operates on a different model: ongoing relationships:
+
+USER → Message: "Create a task for groceries" → AGENT
+       ↓
+       Agent streams response token-by-token
+       ↓
+AGENT → "I've created..." [streaming] → USER
+       ↓
+USER → Message: "What's its priority?" → AGENT
+       ↓
+       Agent recalls context from Thread history
+       ↓
+AGENT → "The task you created has default priority" → USER
+
+
+Each interaction is:
+
+Stateful: Conversation history maintained across messages
+Streaming: Responses update progressively (token-by-token)
+Contextual: Each message builds on previous messages in Thread
+
+The shift: From isolated calls to persistent conversations.
+
+Core Architecture Primitives​
+
+ChatKitServer introduces primitives designed for conversation management:
+
+1. Thread (Conversation Container)​
+
+A Thread is the conversation container—like an email thread, but for chat.
+
+What it contains:
+
+Thread ID (unique identifier)
+Metadata (timestamps, user context)
+Message history (all ThreadItems in chronological order)
+
+Mental model: Think of a Thread like a running conversation at a coffee shop. When you return the next day and continue where you left off, that's the Thread persisting context.
+
+Key difference from REST:
+
+REST: Each request is a new conversation
+ChatKit: Thread maintains ongoing conversation state
+2. ThreadItem (Individual Message)​
+
+A ThreadItem is a single message within a Thread.
+
+Types:
+
+User message: Input from the human
+Assistant message: Response from the agent
+Tool message: Result from tool execution (if agent uses tools)
+
+Structure:
+
+ThreadItem {
+  id: "msg_abc123"
+  role: "user" | "assistant" | "tool"
+  content: "Create a task for groceries"
+  timestamp: "2025-12-31T10:00:00Z"
+}
+
+
+Key difference from REST:
+
+REST: Request body is ephemeral (processed and discarded)
+ChatKit: Every message is persisted as ThreadItem for future context
+3. RequestContext (User Identity + Session)​
+
+RequestContext carries user identity and session information.
+
+What it contains:
+
+User ID (who is sending this message?)
+Session metadata (authentication, permissions)
+Request-specific context (IP, user agent, etc.)
+
+Why it matters: Multi-tenant chat systems need to isolate conversations. Your TaskManager agent shouldn't show Alice's tasks to Bob. RequestContext enforces this boundary.
+
+Mental model: Like a security badge in an office building. It identifies who you are and what you're allowed to access.
+
+4. respond() Method Signature​
+
+This is the core method you implement in ChatKitServer:
+
+async def respond(
+    self,
+    thread: ThreadMetadata,
+    input: UserMessageItem | None,
+    context: Any,
+) -> AsyncIterator[ThreadStreamEvent]:
+
+
+Parameters:
+
+thread: ThreadMetadata - Information about the conversation (Thread ID, history)
+input: UserMessageItem | None - The user's latest message (or None on initialization)
+context: Any - RequestContext with user identity and session info
+
+Returns: AsyncIterator[ThreadStreamEvent] - A stream of events (messages, tool status, widgets)
+
+Key difference from FastAPI route handler:
+
+# FastAPI (request/response)
+@app.post("/api/chat")
+async def chat(message: str) -> dict:
+    response = generate_response(message)
+    return {"reply": response}  # Single return
+
+# ChatKitServer (streaming)
+async def respond(self, thread, input, context):
+    async for token in generate_stream(input.content):
+        yield AssistantMessage(content=token)  # Stream events
+
+
+FastAPI returns once. ChatKitServer yields continuously.
+
+Architecture Comparison: REST vs ChatKit​
+Aspect	FastAPI (REST)	ChatKitServer (Chat)
+Pattern	Request → Process → Response	Message → Stream → Events
+State	Stateless (each request independent)	Stateful (Thread maintains history)
+Output	Single response object	Async iterator of events
+Lifecycle	One-shot (request completes)	Ongoing (conversation persists)
+Context	No built-in memory	Thread history loaded automatically
+Method	Route handler (@app.post())	respond() method override
+Use Case	CRUD operations, data APIs	Conversational AI, chat agents
+Streaming vs Request/Response: When to Use Each​
+Request/Response Pattern​
+
+Best for:
+
+Simple data fetch ("Get task by ID")
+CRUD operations ("Update task title")
+Idempotent actions ("Delete task")
+
+Characteristics:
+
+Fast, predictable response time
+Full response available at once
+No progressive UI updates needed
+
+Example: Fetching a task list
+
+@app.get("/api/tasks")
+async def get_tasks():
+    tasks = db.query(Task).all()
+    return {"tasks": [t.dict() for t in tasks]}
+
+
+User gets complete task list immediately. No need for streaming.
+
+Streaming Pattern​
+
+Best for:
+
+Long-running AI responses (token-by-token generation)
+Progressive UI updates (chat bubbles filling in real-time)
+Partial results useful before completion
+
+Characteristics:
+
+Response builds over time
+User sees progress immediately
+Better perceived performance (no "waiting" spinner)
+
+Example: Streaming agent response
+
+async def respond(self, thread, input, context):
+    # User sees tokens appear progressively:
+    # "I've" ... "created" ... "a" ... "task" ...
+    async for token in agent.stream(input.content):
+        yield AssistantMessage(content=token)
+
+
+User watches response construct in real-time, like a human typing.
+
+Event-Driven Architecture: ThreadStreamEvent​
+
+ChatKitServer streams events, not just text.
+
+Event types:
+
+AssistantMessage: Text response from agent
+ToolStatus: Tool execution progress ("Querying database...")
+Widget: Interactive UI components (buttons, forms)
+Task: Background work notifications
+
+Why events matter: Chat interfaces aren't just text exchanges. They're rich interactions.
+
+Example: Task creation with tool visibility
+
+async def respond(self, thread, input, context):
+    # Event 1: Tool execution status
+    yield ToolStatus(tool="create_task", status="running")
+
+    # Execute tool
+    task = await create_task(title="Groceries")
+
+    # Event 2: Tool completion status
+    yield ToolStatus(tool="create_task", status="completed")
+
+    # Event 3: Assistant response
+    yield AssistantMessage(
+        content=f"I've created task '{task.title}' with ID {task.id}"
+    )
+
+
+User sees:
+
+"Creating task..." (ToolStatus running)
+"Task created ✓" (ToolStatus completed)
+"I've created task 'Groceries' with ID 42" (AssistantMessage)
+
+This is event-driven communication—multiple signals, progressive updates.
+
+Conversation Persistence: The Memory Layer​
+
+ChatKitServer maintains Thread history automatically.
+
+What this means:
+
+When user sends message #5, the agent can reference messages #1-4. The Thread acts as working memory.
+
+Example conversation:
+
+Message 1 (User): "Create a task for groceries"
+Message 2 (Agent): "Task created with ID 42"
+Message 3 (User): "What's its priority?"
+Message 4 (Agent): "The task you created has default priority"
+
+
+When processing Message 3, the agent has access to Messages 1-2. It knows "its" refers to the task from Message 1.
+
+Contrast with REST:
+
+In a stateless REST API, Message 3 would need to explicitly pass context:
+
+POST /api/tasks/42/priority
+
+
+User must remember task ID and include it. With ChatKitServer, the Thread remembers.
+
+The respond() Lifecycle​
+
+Understanding what happens when a user sends a message:
+
+1. User sends message: "Create task for groceries"
+   ↓
+2. ChatKitServer receives message
+   ↓
+3. Loads Thread metadata (ID, history)
+   ↓
+4. Creates UserMessageItem
+   ↓
+5. Appends to Thread history
+   ↓
+6. Calls your respond() method with:
+   - thread (conversation context)
+   - input (latest user message)
+   - context (user identity)
+   ↓
+7. Your respond() yields events:
+   - ToolStatus (optional)
+   - AssistantMessage (response)
+   - Widgets (optional)
+   ↓
+8. ChatKitServer streams events to user
+   ↓
+9. Appends AssistantMessage to Thread history
+   ↓
+10. Thread persisted for next interaction
+
+
+Key insight: Thread history accumulates. Each message builds context for the next.
+
+Multi-Tenant Isolation: RequestContext​
+
+ChatKitServer supports multi-user chat systems through RequestContext.
+
+The problem: If your TaskManager agent serves 100 users, each needs isolated Threads.
+
+The solution: RequestContext identifies the user making the request.
+
+How it works:
+
+async def respond(self, thread, input, context):
+    # context contains user_id
+    user_id = context.user_id
+
+    # Load user-specific data
+    tasks = db.query(Task).filter(Task.user_id == user_id).all()
+
+    # Generate response scoped to this user
+    yield AssistantMessage(content=f"You have {len(tasks)} tasks")
+
+
+Safety implication: Without RequestContext validation, users could access each other's Threads. ChatKitServer enforces boundaries by design.
+
+Safety Note​
+
+When building multi-user chat systems, always validate RequestContext before accessing data. Never trust Thread ID alone—verify the requesting user has permission to access that Thread. ChatKitServer provides isolation primitives, but you must enforce authorization in your respond() implementation.
+
+Why This Architecture for Agent Factory​
+
+You're not just learning ChatKitServer for chat UIs. You're learning the infrastructure layer for sellable Digital FTEs.
+
+The connection:
+
+Your TaskManager Digital FTE needs:
+
+Conversation memory (Thread history)
+Streaming responses (professional UX)
+Multi-tenant isolation (serve multiple customers)
+Event-driven updates (tool execution visibility)
+
+ChatKitServer provides this infrastructure out-of-the-box. You focus on agent logic (what your Digital FTE does), not plumbing (how chat works).
+
+The next lessons will show you how to:
+
+Implement your first respond() method
+Stream agent responses token-by-token
+Load Thread history for context-aware agents
+Handle session management and authentication
+Build the TaskManager Digital FTE with full chat UX
+
+This lesson established the architectural foundation. You now understand:
+
+Thread and ThreadItem as conversation primitives
+respond() as the central integration point
+Streaming vs request/response decision framework
+Event-driven architecture for rich interactions
+Conversation persistence and multi-tenant isolation
+
+In the next lesson, you'll implement your first ChatKitServer agent using the OpenAI Agents SDK integration.

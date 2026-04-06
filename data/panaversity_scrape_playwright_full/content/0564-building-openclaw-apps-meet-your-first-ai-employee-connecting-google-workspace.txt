@@ -1,0 +1,381 @@
+Connecting Google Workspace
+USE A DEDICATED TEST GOOGLE ACCOUNT
+
+This lesson grants your AI Employee OAuth access to a real Google account -- including email, calendar, and files. Use a dedicated test Google account, not your primary one. This removes security anxiety and lets you experiment freely. You can always switch to your real account later once you are comfortable with the access model and security controls.
+
+In Lesson 6, you connected your AI Employee to a coding agent so it can delegate programming tasks to a specialist. Now you will cross the line that separates a demo from daily use: connecting your agent to your actual productivity tools.
+
+Until now, every task you gave your AI Employee operated on information it generated itself -- competitor research from training data, goal files it created, reports it wrote. Useful, but self-contained. Your agent has been working in a sandbox of its own making.
+
+This lesson breaks that sandbox. When it reads your real inbox, summarizes your actual calendar, and finds the document you were editing last week, the sandbox disappears. That is when a tutorial becomes something you want to open every morning.
+
+This is the capability that drove 209,000 people to star OpenClaw. Not the chat interface. Not the agent loop. The moment your agent handles your real work -- your email, your schedule, your files -- is when "AI Employee" stops being a metaphor.
+
+What gog Connects​
+
+gog is a command-line tool that bridges OpenClaw and Google Workspace. One OAuth setup gives your AI Employee access to six Google services through a unified CLI:
+
+Service	What Your Agent Can Do
+Gmail	Search messages, read threads, send mail, manage labels, handle drafts
+Calendar	List events, create meetings, check availability, respond to invitations
+Drive	Search files, upload and download documents, manage permissions
+Contacts	List and search your contact directory
+Sheets	Read cells, update values, append rows, access metadata
+Docs	Export documents, display content as text
+
+Your agent accesses all six through subcommands: gog gmail, gog calendar, gog drive, and so on. Every command supports JSON output for scripting, which is how OpenClaw parses the results into natural language responses.
+
+Setting Up gog​
+GOOGLE CLOUD CONSOLE FEELING OVERWHELMING?
+
+The OAuth credential setup below is a one-time process. If you get stuck on any step, ask your AI Employee (through your messaging channel or TUI): "Help me set up Google Cloud OAuth credentials for a desktop app called gog." It can walk you through each screen. You can also skip this lesson entirely and return when you need Google Workspace access -- Lessons 1-6 work without it.
+
+The setup has three parts: install the CLI, register your Google OAuth credentials, and authorize your account.
+
+Part 1: Install gog​
+SELECTED GOG DURING SETUP?
+
+If you chose gog from the skills picker during QuickStart in Lesson 2, it may already be installed. Run gog --version to check. If it works, skip to Part 2.
+
+macOS (Homebrew):
+
+brew install steipete/tap/gogcli
+
+
+Output:
+
+==> Fetching steipete/tap/gogcli
+==> Downloading https://github.com/steipete/gogcli/releases/...
+==> Installing gogcli from steipete/tap
+==> Summary
+🍺  /opt/homebrew/Cellar/gogcli/...
+
+
+Verify the installation:
+
+gog --version
+
+
+Output:
+
+gog version 0.x.x (or similar version string)
+
+
+Linux (Arch):
+
+yay -S gogcli
+
+
+Linux (other distributions): Build from source:
+
+git clone https://github.com/steipete/gogcli.git
+cd gogcli && make
+./bin/gog --version
+
+
+Windows:
+
+npm install -g gogcli
+
+
+Or download the binary from the gog releases page and add it to your PATH.
+
+Note: gog requires Node.js 18+ for the npm install path, or a working Go toolchain for building from source. Check that your Node.js version is compatible: node --version. On macOS, Homebrew handles dependencies automatically. On Linux, the Homebrew path also works if you have Linuxbrew installed. Check the gog documentation for the latest installation options and verify your gog version matches: gog --version.
+
+Part 2: Create and Register OAuth Credentials​
+
+gog needs a Google Cloud OAuth client to authenticate. This is a one-time setup.
+
+GCP CONSOLE CAN BE INTIMIDATING
+
+The Google Cloud Console has a dense interface with many options. If you are teaching this in a classroom, consider doing this section as a live walkthrough or providing a pre-recorded screencast. The console UI changes periodically, so a recording from this month is more reliable than static screenshots.
+
+Step 1: Go to console.cloud.google.com and sign in with the Google account you want your agent to access.
+
+Step 2: Create a project (or select an existing one). The project name does not matter -- something like "AI Employee" works fine.
+
+Step 3: Enable the APIs your agent will use. Navigate to APIs & Services > Library and enable:
+
+Gmail API
+Google Calendar API
+Google Drive API
+
+These are the three you will use in this lesson. You can enable Contacts API, Sheets API, and Docs API later if needed.
+
+Step 4: Configure the OAuth consent screen. Go to APIs & Services > OAuth consent screen:
+
+Choose External (unless you have a Google Workspace organization)
+Fill in the required fields (app name, support email)
+Add your email as a test user
+
+Step 5: Create credentials. Go to APIs & Services > Credentials:
+
+Click Create Credentials > OAuth client ID
+Application type: Desktop app
+Name it anything ("gog CLI" works)
+Click Create, then Download JSON
+
+This downloads a file named something like client_secret_123456.json. Save it somewhere you can find it.
+
+Step 6: Register the credentials with gog:
+
+gog auth credentials ~/Downloads/client_secret_*.json
+
+
+Output:
+
+Credentials stored successfully.
+
+Part 3: Authorize Your Account​
+gog auth add you@gmail.com
+
+
+Replace you@gmail.com with your actual email address. This opens your browser for the standard Google OAuth flow -- review the permissions and click Allow.
+
+Output:
+
+Authorization complete. Token stored securely.
+
+
+By default, gog requests access to Gmail, Calendar, Drive, Contacts, Sheets, and Docs. If you want to limit scope to specific services:
+
+gog auth add you@gmail.com --services gmail,calendar,drive
+
+
+Set your default account so you do not need to specify it every time:
+
+export GOG_ACCOUNT=you@gmail.com
+
+
+Add that line to your shell profile (~/.zshrc or ~/.bashrc) to make it permanent.
+
+Verify Everything Works​
+gog auth list
+
+
+Output:
+
+Account              Services                              Default
+you@gmail.com        gmail,calendar,drive,contacts,...      ✓
+
+
+Quick test -- list your Gmail labels:
+
+gog gmail labels list
+
+
+Output:
+
+Name              ID                    Type
+INBOX             INBOX                 system
+SENT              SENT                  system
+DRAFT             DRAFT                 system
+...
+
+
+If you see your labels, the connection works. You can also confirm gog is working from your messaging channel by asking your AI Employee:
+
+List my Gmail labels
+
+
+If your employee returns a list of labels (INBOX, SENT, DRAFT, etc.), the full pipeline is working end-to-end -- from your messaging channel through OpenClaw to gog to Google's API and back. Your agent can now access your Google Workspace.
+
+Real Employee Tasks​
+
+Open your chat with your AI Employee. These tasks use your actual data -- not practice exercises.
+
+Task 1: Email Summary (Gmail)​
+
+What to type:
+
+Summarize my top 5 unread emails. For each, give me the sender,
+subject, and a one-sentence summary of what they want.
+
+
+What to observe: Your agent calls gog gmail search 'is:unread' --max 5, reads the thread content, and produces a structured summary. The data flowing through is your real inbox -- names you recognize, subjects you have been ignoring, requests that actually need your attention.
+
+This is the moment. Not a demo email. Not sample data. Your actual unread messages, summarized by your agent, delivered to your phone.
+
+What the agent loop looks like here:
+
+Phase	What Happens
+Parse	Agent understands "top 5 unread" means Gmail search with is:unread filter, limit 5
+Plan	Search inbox, read each thread, extract sender/subject/intent, format as list
+Execute	Calls gog gmail search, reads results, synthesizes summaries
+Report	Delivers formatted summary to your messaging channel
+Task 2: Calendar Check (Calendar)​
+
+What to type:
+
+What meetings do I have tomorrow? Include the time, title, and
+who else is attending.
+
+
+What to observe: The agent calls gog calendar list-events with tomorrow's date range and formats the results. If you have a packed schedule, you see it laid out clearly. If tomorrow is empty, the agent tells you that too -- which is itself useful information.
+
+Notice how the agent handles time zones. It uses whatever your calendar is configured for. If an event spans multiple time zones (a meeting with overseas colleagues), the agent shows the time in your local zone.
+
+Task 3: File Search (Drive)​
+
+What to type:
+
+Find the document I was working on most recently that has "budget"
+or "proposal" in the name. Show me the title, last modified date,
+and a link to open it.
+
+
+What to observe: The agent searches Drive with query filters, finds matching files, and returns direct links you can tap to open the document. It accessed your actual Google Drive -- the same files you see when you open drive.google.com.
+
+What Just Happened​
+
+You delegated three tasks that would normally require you to open three different apps (Gmail, Calendar, Drive), navigate their interfaces, and manually compile the information. Your agent did all three from a single chat window on your phone.
+
+The agent loop you learned in Lesson 3 -- parse, plan, execute, report -- is now operating on your real data. The same four phases. The same execution engine. But instead of generating practice files, it is reading your actual inbox, checking your actual calendar, and searching your actual Drive.
+
+The Security Reality​
+
+Stop and consider what you just did. You granted your AI Employee OAuth access to your Google account. Look at what that means through the lens of the lethal trifecta from Lesson 5:
+
+Component	Before gog	After gog
+Private data access	Agent reads files it created itself	Agent reads your email, calendar, contacts, documents
+Untrusted content	Your typed messages only	Incoming emails, shared documents, calendar invitations from anyone
+External communication	Agent writes files locally	Agent can send emails, create calendar events, modify shared documents
+
+Every security rule from Lesson 5 applies with higher stakes now. The lethal trifecta is no longer theoretical -- it is operating on your actual data.
+
+Scope Awareness​
+
+gog requests broad access by default. Ask yourself which services your agent actually needs:
+
+If your agent only needs to...	Then limit scope to...
+Summarize unread emails	--services gmail (read-only)
+Check tomorrow's schedule	--services calendar (read-only)
+Find recent documents	--services drive (read-only)
+All of the above	--services gmail,calendar,drive
+Send emails on your behalf	Gmail with send scope -- think carefully
+
+The principle is least privilege: grant only the access your agent needs for the tasks you actually delegate. You can always add more services later with gog auth add --services and --force-consent.
+
+What Could Go Wrong​
+
+A malicious skill (remember ClawHavoc from Lesson 5) with gog access could:
+
+Read your email and extract sensitive information
+Send emails from your account without your knowledge
+Access confidential documents in your Drive
+Exfiltrate contacts to an external server
+
+This is why Lesson 5 came before this lesson. The security checklist you learned -- read skills before installing, never bind to 0.0.0.0, enable authentication -- is not abstract best practice. It is the difference between a useful employee and a compromised account.
+
+What Transfers​
+
+OAuth integration is universal. Every productivity tool your agent will access -- Slack, GitHub, Notion, Jira -- uses the same pattern: register credentials, authorize access, scope permissions.
+
+Least privilege is architectural. Granting minimum necessary access is not just a security rule for gog. It is a design principle for every agent integration you build.
+
+The employee threshold is tool access. Intelligence alone does not make an agent an employee. The agent loop (Lesson 3) gives it capability. Skills (Lesson 5) give it expertise. But tool access -- connecting to the systems where your actual work lives -- is what makes the "employee" label accurate. An employee who cannot access your email, calendar, or files is not really working for you.
+
+Try With AI​
+Prompt 1: Design a Daily Briefing​
+
+Setup: Use your AI Employee through your messaging channel or Claude Code.
+
+Design a daily morning briefing for my AI Employee that combines
+Gmail (unread, prioritized), Calendar (today's meetings with prep
+notes), and Drive (recently modified docs). Output as a single
+2-minute read with "requires action" and "FYI" sections.
+My role: [YOUR ROLE]
+
+
+What you're learning: Workflow composition -- combining multiple data sources into a single actionable output. This is the foundation of autonomous invocation from Lesson 3, Task 6. A morning briefing that runs on a schedule is what transforms your agent from "tool I use" to "employee that works while I sleep."
+
+Prompt 2: Push Notification Pipeline (Advanced Design)​
+
+Setup: Use Claude Code or your preferred AI assistant.
+
+Design the architecture for a Gmail push notification pipeline:
+detect important emails, summarize them, send to my messaging channel.
+I know it involves Google Pub/Sub. Give me component architecture
+and data flow with an ASCII diagram, not a full implementation.
+
+
+What you're learning: Event-driven agent architecture. Most agent interactions are pull-based (you ask, it answers). Push-based agents that react to external events represent the next level of autonomy. Understanding this architecture prepares you for building proactive agents.
+
+Prompt 3: Security Audit Your Own Setup​
+
+Setup: Use Claude Code or your AI Employee.
+
+I just connected my AI Employee to Google Workspace via gog with
+OAuth access to Gmail, Calendar, and Drive. Audit my setup: worst
+realistic attack scenario, which services I actually need, and the
+exact gog command to reduce scope to the minimum.
+
+
+What you're learning: Applied security auditing on your own infrastructure. This is the lethal trifecta from Lesson 5 made concrete -- you are evaluating real OAuth scopes on your real account, not a hypothetical scenario. The habit of auditing your own setup after connecting new services is what separates secure deployments from vulnerable ones.
+
+Safety Note: The OAuth credentials you created grant real access to your Google account. Do not share your client_secret.json file, your gog auth tokens, or screenshots showing your email content. If you are working through this lesson in a shared environment, consider using a dedicated test Google account rather than your primary one.
+
+Protecting Your Credentials with the Secrets CLI​
+
+You just downloaded a client_secret.json file and stored OAuth tokens on disk. Your OpenClaw config now contains references to real Google credentials. The security checklist from L05 says "never store secrets in skill instructions" -- but where DO all these credentials live, and are they safe?
+
+OpenClaw ships a dedicated CLI for this: openclaw secrets. The core idea is SecretRefs -- references that point to a secrets provider instead of storing credentials as plaintext in configuration files. When your agent needs an API key or OAuth token, it resolves the reference at runtime instead of reading a hardcoded string.
+
+THIS IS OPERATOR-SIDE TOOLING
+
+The openclaw secrets commands run in your terminal, not through your messaging channel. Regardless of whether you use WhatsApp, Telegram, or Discord to talk to your employee, secrets management happens on the machine where OpenClaw runs. You are securing the infrastructure your employee depends on.
+
+Audit Your Setup Now​
+
+You just connected Google Workspace. Run this in your terminal:
+
+openclaw secrets audit
+
+
+The audit scans your entire configuration for four problems:
+
+Finding Code	What It Means	Risk
+PLAINTEXT_FOUND	A credential stored as raw text in config	Anyone who reads your config file sees your API key
+REF_UNRESOLVED	A SecretRef points to a provider that cannot resolve it	Your agent will fail at runtime when it needs that credential
+REF_SHADOWED	An auth-profile overrides a config reference	Confusing precedence -- you think one key is active but another is
+LEGACY_RESIDUE	Old auth.json files still exist	Stale credentials sitting in plaintext on disk
+
+If the audit comes back clean, your secrets are properly managed. If it reports findings -- especially PLAINTEXT_FOUND after adding OAuth credentials -- you need to migrate.
+
+The Migration Workflow​
+
+Migration follows a strict loop: audit → configure → dry-run → apply → audit again → reload.
+
+# 1. See what needs fixing
+openclaw secrets audit --check
+
+# 2. Interactive setup -- maps credentials to SecretRefs
+openclaw secrets configure --plan-out /tmp/secrets-plan.json
+
+# 3. Preview what will change (no files modified)
+openclaw secrets apply --from /tmp/secrets-plan.json --dry-run
+
+# 4. Execute the migration
+openclaw secrets apply --from /tmp/secrets-plan.json
+
+# 5. Verify clean state
+openclaw secrets audit --check
+
+# 6. Hot-swap the runtime with new references
+openclaw secrets reload
+
+
+The configure command walks you through setting up providers and mapping each credential to a SecretRef. The apply step modifies openclaw.json, auth-profiles.json, and your environment file in one atomic operation. It intentionally does not create rollback backups containing your plaintext values -- backup files with raw credentials are themselves an attack vector.
+
+Why This Matters​
+
+Every integration you add stores credentials somewhere. You just added Google OAuth. Next you might add GitHub, Slack, or Notion. Each one adds another credential that a compromised skill (from L05's ClawHub section) could exfiltrate. The discipline is universal:
+
+Audit what credentials exist and where they live
+Migrate from plaintext to reference-based storage
+Verify the migration succeeded
+Reload without restarting the system
+
+Your agent's SKILL.md instructions flow through the LLM as plaintext -- any secret embedded in those instructions is visible in conversation history, debug logs, and potentially to other skills. SecretRefs keep credentials out of that flow entirely.
+
+Flashcards Study Aid​

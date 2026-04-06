@@ -1,0 +1,847 @@
+RAG Architecture Patterns (Capstone)
+
+Your Task API now has semantic search—users query in natural language and find related tasks. But what happens when a user asks a complex question like "Show me all deployment-related tasks, explain the common patterns, and suggest which I should tackle first based on my current workload"?
+
+Simple RAG retrieves documents and generates answers. But production systems need more: conversation memory, quality validation, adaptive strategies, and multi-step reasoning. This capstone lesson equips you with the architectural patterns to build RAG systems that match real-world complexity.
+
+The architecture remains clean throughout:
+
+LangChain: Embeddings, vector store, similarity search
+OpenAI Agents SDK: All LLM calls, agent orchestration, conversation memory
+
+By the end of this lesson, you will understand eight RAG architectures—from basic retrieval to autonomous agents—and implement at least two for your Task API.
+
+The Eight RAG Architectures​
+
+RAG has evolved from a simple "retrieve then generate" pattern into a family of architectures, each optimized for different requirements.
+
+Architecture	Retrieval Strategy	Agent Pattern	Best For
+Simple RAG	Single query, top-K	Agent + search tool	FAQ systems, known-scope knowledge
+Simple RAG + Memory	Context-aware query	Agent + SQLiteSession	Multi-turn chatbots, support systems
+Branched RAG	Intent-routed to specialized retrievers	Agent + multiple search tools	Multi-domain knowledge bases
+HyDE	Hypothetical document embedding	Agent generates hypothesis first	Vague queries, abstract questions
+Adaptive RAG	Complexity-driven strategy	Agent with analyze + search tools	Variable query complexity
+Corrective RAG (CRAG)	Graded retrieval with fallback	Agent grades and re-searches	High-accuracy requirements
+Self-RAG	Iterative self-retrieval	Agent self-assesses and refines	Research assistants, exploratory queries
+Agentic RAG	Multi-tool orchestration	Multi-agent with handoffs	Complex research, decision support
+Shared Setup​
+
+All patterns use this common foundation:
+
+from agents import Agent, Runner, function_tool, SQLiteSession
+from langchain_qdrant import QdrantVectorStore
+from langchain_openai import OpenAIEmbeddings
+
+# LangChain: Retrieval Layer
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vector_store = QdrantVectorStore.from_existing_collection(
+    embedding=embeddings,
+    url="http://localhost:6333",
+    collection_name="task_docs",
+)
+
+
+def format_docs(docs) -> str:
+    """Format retrieved documents for context."""
+    if not docs:
+        return "No relevant documents found."
+    formatted = []
+    for i, doc in enumerate(docs, 1):
+        source = doc.metadata.get("source", "unknown")
+        formatted.append(f"[{i}. {source}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(formatted)
+
+
+@function_tool
+def search_docs(query: str) -> str:
+    """Search Task API documentation for relevant information.
+
+    Args:
+        query: What to search for in the documentation.
+    """
+    docs = vector_store.similarity_search(query, k=4)
+    return format_docs(docs)
+
+Pattern 1: Simple RAG​
+
+The foundation. Agent uses a search tool to retrieve context, then generates an answer.
+
+User Query → Agent calls search_docs → Agent generates answer with context
+
+simple_rag_agent = Agent(
+    name="SimpleRAG",
+    instructions="""You answer questions about the Task API.
+
+When users ask questions:
+1. Use search_docs to find relevant documentation
+2. Answer based ONLY on retrieved information
+3. If docs don't cover the topic, say so clearly
+
+Never make up information.""",
+    tools=[search_docs],
+)
+
+# Run it
+result = Runner.run_sync(
+    simple_rag_agent,
+    "How do I create a new task with high priority?"
+)
+print(result.final_output)
+
+
+Output:
+
+To create a new task with high priority, use the POST /tasks endpoint:
+
+```json
+{
+  "title": "Your task title",
+  "description": "Task details",
+  "priority": "high"
+}
+
+
+The API returns the created task with its assigned ID.
+
+
+**When to use Simple RAG:**
+- Static knowledge bases with well-defined scope
+- FAQ systems where questions map clearly to documentation
+- Low-latency requirements
+
+---
+
+## Pattern 2: Simple RAG with Memory
+
+The Agents SDK handles conversation memory automatically with sessions.
+
+
+
+User Query + Session History → Agent retrieves with context awareness → Answer
+
+
+```python
+memory_rag_agent = Agent(
+    name="MemoryRAG",
+    instructions="""You answer questions about the Task API.
+
+Remember the conversation context. When users say things like
+"what about high priority?" or "and for deletion?", understand
+they're referring to previous topics.
+
+Use search_docs for information. Answer from documentation only.""",
+    tools=[search_docs],
+)
+
+# Create persistent session
+session = SQLiteSession("user_123", "conversations.db")
+
+# First question
+result1 = Runner.run_sync(
+    memory_rag_agent,
+    "Show me all deployment tasks",
+    session=session
+)
+print("Q1:", result1.final_output)
+
+# Follow-up that needs context
+result2 = Runner.run_sync(
+    memory_rag_agent,
+    "Which one should I start with?",  # References "deployment tasks"
+    session=session
+)
+print("Q2:", result2.final_output)
+
+
+Output:
+
+Q1: Based on the documentation, deployment-related tasks include:
+1. Docker Setup - Configure Docker Desktop
+2. K8s Config - Set up Kubernetes cluster
+3. CI/CD Pipeline - Configure automated deployments
+
+Q2: Based on the deployment workflow in the documentation, you should
+start with Docker Setup. It's the foundation - K8s and CI/CD both
+depend on having Docker configured correctly.
+
+
+The agent understood "Which one should I start with?" refers to the deployment tasks from the previous turn.
+
+When to use Memory RAG:
+
+Customer support chatbots
+Multi-turn conversation interfaces
+Any context-dependent interactions
+Pattern 3: Branched RAG (Router RAG)​
+
+Give the agent multiple specialized search tools. It routes queries automatically based on tool descriptions.
+
+Query → Agent chooses appropriate search tool → Specialized retrieval → Answer
+
+# Create specialized vector stores (in production, these are separate collections)
+# For demo, we'll create tools with different search behaviors
+
+@function_tool
+def search_api_docs(query: str) -> str:
+    """Search API reference documentation for endpoints, schemas, and parameters.
+
+    Args:
+        query: Technical query about API endpoints or data structures.
+    """
+    docs = vector_store.similarity_search(
+        query,
+        k=4,
+        filter={"doc_type": "api_reference"}  # Metadata filter
+    )
+    return format_docs(docs)
+
+
+@function_tool
+def search_tutorials(query: str) -> str:
+    """Search tutorials and how-to guides for step-by-step instructions.
+
+    Args:
+        query: How-to query about accomplishing a workflow.
+    """
+    docs = vector_store.similarity_search(
+        query,
+        k=3,
+        filter={"doc_type": "tutorial"}
+    )
+    return format_docs(docs)
+
+
+@function_tool
+def search_troubleshooting(query: str) -> str:
+    """Search troubleshooting guides for error resolution and debugging.
+
+    Args:
+        query: Query about errors, issues, or debugging.
+    """
+    docs = vector_store.similarity_search(
+        query,
+        k=3,
+        filter={"doc_type": "troubleshooting"}
+    )
+    return format_docs(docs)
+
+
+branched_agent = Agent(
+    name="BranchedRAG",
+    instructions="""You help users with the Task API.
+
+Choose the most appropriate search tool:
+- search_api_docs: Technical reference (endpoints, schemas)
+- search_tutorials: Step-by-step guides
+- search_troubleshooting: Error resolution, debugging
+
+You can use multiple tools if needed for comprehensive answers.""",
+    tools=[search_api_docs, search_tutorials, search_troubleshooting],
+)
+
+# Test - agent should route to troubleshooting
+result = Runner.run_sync(
+    branched_agent,
+    "Why am I getting a 500 error on task creation?"
+)
+print(result.final_output)
+
+
+Output:
+
+Based on the troubleshooting guide, a 500 error on task creation typically means:
+
+1. **Database connection issue** - Check QDRANT_URL is accessible
+2. **Missing required fields** - Ensure "title" is present in request body
+3. **Validation error** - Priority must be "low", "medium", or "high"
+
+Check your request body format:
+```json
+{"title": "Required", "priority": "medium"}
+
+
+**When to use Branched RAG:**
+- Multi-domain knowledge bases
+- When specialized indexes improve retrieval quality
+- Systems with distinct document categories
+
+---
+
+## Pattern 4: HyDE (Hypothetical Document Embeddings)
+
+For vague queries, generate a hypothetical answer first, then use that for retrieval.
+
+
+
+Vague Query → Agent generates hypothesis → Search with hypothesis → Final answer
+
+
+```python
+@function_tool
+def search_with_hypothesis(query: str, hypothesis: str) -> str:
+    """Search using a hypothetical answer for better retrieval.
+
+    Args:
+        query: The original user question.
+        hypothesis: A hypothetical answer to use for retrieval.
+    """
+    # Use hypothesis for embedding (closer to actual docs in vector space)
+    docs = vector_store.similarity_search(hypothesis, k=4)
+    return f"Original query: {query}\n\nRetrieved context:\n{format_docs(docs)}"
+
+
+hyde_agent = Agent(
+    name="HyDERAG",
+    instructions="""You answer questions using the HyDE pattern.
+
+For vague or abstract queries:
+1. First, generate a hypothetical detailed answer (what you THINK the answer might be)
+2. Then call search_with_hypothesis with both the query and your hypothesis
+3. Finally, generate the real answer based on retrieved documents
+
+This works because hypothetical answers are often closer in meaning
+to actual documentation than vague questions.
+
+For direct factual questions, just use the search normally.""",
+    tools=[search_docs, search_with_hypothesis],
+)
+
+# Vague query that would struggle with direct retrieval
+result = Runner.run_sync(
+    hyde_agent,
+    "What's the best way to organize my work?"
+)
+print(result.final_output)
+
+
+Output:
+
+Based on the Task API documentation, here's how to organize your work effectively:
+
+1. **Use Priority Levels**: Assign "high", "medium", or "low" priority to tasks
+
+
+GET /tasks?priority=high
+
+
+2. **Filter by Status**: Track progress with status filters
+
+
+GET /tasks?status=pending GET /tasks?status=in_progress
+
+
+3. **Combine Filters**: Find specific task sets
+
+
+GET /tasks?priority=high&status=pending
+
+
+4. **Use Semantic Search**: Find related tasks by meaning
+
+
+POST /tasks/search/semantic?query=deployment
+
+When to use HyDE:
+
+Research systems with abstract queries
+Conceptual rather than factual questions
+Improving recall when queries lack exact keywords
+
+Tradeoff: Adds one LLM generation before retrieval (increased latency).
+
+Pattern 5: Adaptive RAG​
+
+Analyze query complexity and adapt strategy. Simple queries get fast retrieval; complex queries get thorough multi-source retrieval.
+
+from pydantic import BaseModel
+from typing import Literal
+
+
+class QueryAnalysis(BaseModel):
+    complexity: Literal["simple", "moderate", "complex"]
+    strategy: str
+
+
+@function_tool
+def analyze_query(query: str) -> str:
+    """Analyze query complexity to determine retrieval strategy.
+
+    Args:
+        query: The user's question to analyze.
+    """
+    # In production, this could be a separate fast classifier
+    return f"Analyzing: {query}"
+
+
+@function_tool
+def search_minimal(query: str) -> str:
+    """Fast minimal search for simple factual queries (2 docs).
+
+    Args:
+        query: Simple factual question.
+    """
+    docs = vector_store.similarity_search(query, k=2)
+    return format_docs(docs)
+
+
+@function_tool
+def search_thorough(query: str) -> str:
+    """Thorough search for complex queries (6 docs, diverse).
+
+    Args:
+        query: Complex query needing multiple perspectives.
+    """
+    docs = vector_store.max_marginal_relevance_search(
+        query, k=6, fetch_k=20
+    )
+    return format_docs(docs)
+
+
+adaptive_agent = Agent(
+    name="AdaptiveRAG",
+    instructions="""You adapt your retrieval strategy based on query complexity.
+
+Classify each query:
+- SIMPLE: Direct factual question ("What is the status field?")
+  → Use search_minimal for fast response
+- MODERATE: Needs a few sources ("How do I filter tasks?")
+  → Use search_docs (standard 4 docs)
+- COMPLEX: Needs breadth ("How should I restructure my workflow?")
+  → Use search_thorough for comprehensive coverage
+
+State your complexity assessment, then search appropriately.""",
+    tools=[search_minimal, search_docs, search_thorough],
+    output_type=None,  # Free-form output
+)
+
+# Simple query - should use minimal search
+result1 = Runner.run_sync(
+    adaptive_agent,
+    "What is the status field in a task?"
+)
+print("Simple:", result1.final_output[:200])
+
+# Complex query - should use thorough search
+result2 = Runner.run_sync(
+    adaptive_agent,
+    "How should I restructure my task workflow for a team of 5?"
+)
+print("\nComplex:", result2.final_output[:200])
+
+
+Output:
+
+Simple: [Complexity: SIMPLE] The status field in a task indicates its current
+state. Valid values are: "pending" (not started), "in_progress" (being worked
+on), and "completed" (finished).
+
+Complex: [Complexity: COMPLEX] For a team of 5, I recommend structuring your
+Task API workflow around these patterns from the documentation:
+
+1. **Priority-based queues** - Each team member filters by priority...
+
+
+When to use Adaptive RAG:
+
+Enterprise search with variable query types
+Cost-sensitive systems (minimize tokens for simple queries)
+Systems needing both speed and thoroughness
+Pattern 6: Corrective RAG (CRAG)​
+
+Grade retrieved documents for relevance. If quality is low, search again or acknowledge uncertainty.
+
+@function_tool
+def search_and_grade(query: str) -> str:
+    """Search and grade document relevance.
+
+    Args:
+        query: The search query.
+    """
+    results = vector_store.similarity_search_with_score(query, k=4)
+
+    if not results:
+        return "NO_DOCS_FOUND"
+
+    # Grade by relevance score (lower = more similar for cosine)
+    graded = []
+    for doc, score in results:
+        relevance = "HIGH" if score < 0.3 else "MEDIUM" if score < 0.5 else "LOW"
+        source = doc.metadata.get("source", "unknown")
+        graded.append(f"[{relevance}] {source}\n{doc.page_content[:300]}")
+
+    high_relevance_count = sum(1 for d, s in results if s < 0.3)
+
+    header = f"Retrieved {len(results)} docs ({high_relevance_count} high relevance)\n\n"
+    return header + "\n\n---\n\n".join(graded)
+
+
+@function_tool
+def search_broader(query: str) -> str:
+    """Broader search when initial results are poor quality.
+
+    Args:
+        query: Reformulated broader query.
+    """
+    docs = vector_store.similarity_search(query, k=6)
+    return f"BROADER SEARCH:\n{format_docs(docs)}"
+
+
+crag_agent = Agent(
+    name="CorrectiveRAG",
+    instructions="""You use Corrective RAG - always verify retrieval quality.
+
+Workflow:
+1. Use search_and_grade to retrieve and assess documents
+2. Check the relevance grades:
+   - If 2+ HIGH relevance docs: Answer confidently
+   - If only MEDIUM relevance: Answer but note uncertainty
+   - If mostly LOW relevance: Use search_broader with a reformulated query
+3. If still low quality after broader search: Honestly say you don't have
+   good information on this topic
+
+Never fabricate information. Acknowledge uncertainty when retrieval is poor.""",
+    tools=[search_and_grade, search_broader],
+)
+
+# Test with a query that might have low relevance
+result = Runner.run_sync(
+    crag_agent,
+    "How do I handle task dependencies in the API?"
+)
+print(result.final_output)
+
+
+Output:
+
+I searched for information about task dependencies.
+
+**Retrieval Quality**: 3/4 documents had HIGH relevance.
+
+**Answer**: Task dependencies in the API are managed through the `depends_on`
+field when creating or updating tasks:
+
+```json
+POST /tasks
+{
+  "title": "Deploy to production",
+  "depends_on": [task_id_1, task_id_2]
+}
+
+
+A task with dependencies cannot be marked complete until all dependency tasks are completed. The API returns 400 Bad Request if you try.
+
+
+**When to use CRAG:**
+- Legal, medical, financial domains (wrong answers have consequences)
+- When retrieval quality varies significantly
+- Systems that must acknowledge uncertainty
+
+---
+
+## Pattern 7: Self-RAG
+
+The agent assesses its own answer, identifies gaps, and retrieves more information to fill them.
+
+```python
+@function_tool
+def assess_answer_completeness(question: str, answer: str) -> str:
+    """Assess if an answer fully addresses the question.
+
+    Args:
+        question: The original question.
+        answer: The generated answer to assess.
+    """
+    # This returns assessment for the agent to decide next steps
+    return f"Assessing completeness of answer for: {question}\nAnswer preview: {answer[:200]}..."
+
+
+self_rag_agent = Agent(
+    name="SelfRAG",
+    instructions="""You use Self-RAG - iteratively improve your answers.
+
+Workflow:
+1. Search for initial information with search_docs
+2. Generate a preliminary answer
+3. Self-assess: Does your answer fully address the question?
+4. If gaps exist:
+   - Identify what's missing
+   - Search again with a focused query for the missing info
+   - Integrate new information
+5. Repeat until answer is complete (max 3 iterations)
+
+Be explicit about your self-assessment process.
+State when you're searching for additional information and why.""",
+    tools=[search_docs, assess_answer_completeness],
+)
+
+# Complex query that may need iteration
+result = Runner.run_sync(
+    self_rag_agent,
+    "Explain the complete lifecycle of a task from creation to completion, including all state transitions and what triggers them"
+)
+print(result.final_output)
+
+
+Output:
+
+**Initial search**: Found documentation on task states and transitions.
+
+**Preliminary answer**: Tasks move through pending → in_progress → completed.
+
+**Self-assessment**: Missing details on what triggers each transition.
+
+**Additional search**: Searched for "task state transition triggers API"
+
+**Complete answer**:
+
+The task lifecycle has three states with these transitions:
+
+1. **pending** (initial state)
+   - Created via POST /tasks
+   - Trigger: Task creation
+
+2. **pending → in_progress**
+   - Trigger: PATCH /tasks/{id} with {"status": "in_progress"}
+   - Can only transition from pending
+
+3. **in_progress → completed**
+   - Trigger: PATCH /tasks/{id} with {"status": "completed"}
+   - Records completion_timestamp automatically
+   - Triggers configured webhooks
+
+Invalid transitions (return 400):
+- completed → any state (tasks cannot be "un-completed")
+- pending → completed (must go through in_progress)
+
+
+When to use Self-RAG:
+
+Research assistants
+Exploratory queries
+When thoroughness matters more than speed
+Pattern 8: Agentic RAG (Multi-Agent)​
+
+Multiple specialized agents hand off to each other based on expertise.
+
+from agents import handoff
+
+# Specialized agents
+api_expert = Agent(
+    name="APIExpert",
+    instructions="""You are an expert on Task API endpoints and schemas.
+Answer technical questions about API structure, parameters, and responses.
+Use search_api_docs for information.""",
+    tools=[search_api_docs],
+)
+
+workflow_expert = Agent(
+    name="WorkflowExpert",
+    instructions="""You are an expert on task management workflows.
+Answer questions about organizing work, prioritization, and best practices.
+Use search_tutorials for information.""",
+    tools=[search_tutorials],
+)
+
+troubleshooter = Agent(
+    name="Troubleshooter",
+    instructions="""You are an expert on debugging Task API issues.
+Help users resolve errors, understand logs, and fix problems.
+Use search_troubleshooting for information.""",
+    tools=[search_troubleshooting],
+)
+
+# Triage agent routes to specialists
+triage_agent = Agent(
+    name="TaskAPIAssistant",
+    instructions="""You triage Task API questions to the right specialist.
+
+Assess the query and hand off to:
+- APIExpert: Technical questions about endpoints, schemas, parameters
+- WorkflowExpert: Questions about organizing work, best practices
+- Troubleshooter: Error messages, debugging, issues
+
+You can also answer simple questions directly using search_docs.""",
+    tools=[search_docs],
+    handoffs=[api_expert, workflow_expert, troubleshooter],
+)
+
+# Test agentic handoff
+result = Runner.run_sync(
+    triage_agent,
+    "I'm getting a validation error when creating tasks with custom fields"
+)
+print(result.final_output)
+
+
+Output:
+
+[Handed off to Troubleshooter]
+
+Based on the troubleshooting documentation, validation errors with custom
+fields typically occur because:
+
+1. **Unknown field names**: The API only accepts defined fields (title,
+   description, priority, status). Custom fields require schema extension.
+
+2. **Type mismatch**: If you've extended the schema, ensure field types match.
+
+**Solution**: Check your request body matches the TaskCreate schema:
+```json
+{
+  "title": "string (required)",
+  "description": "string (optional)",
+  "priority": "low|medium|high",
+  "status": "pending|in_progress|completed"
+}
+
+
+For custom fields, you'll need to extend the Pydantic model in models/task.py.
+
+
+**When to use Agentic RAG:**
+- Complex domains requiring specialized expertise
+- Multi-step research tasks
+- Decision support systems
+
+---
+
+## Architecture Selection Guide
+
+| Scenario | Recommended Pattern | Why |
+|----------|---------------------|-----|
+| FAQ chatbot | Simple RAG | Low latency, straightforward |
+| Customer support | Memory RAG | Multi-turn context essential |
+| Enterprise search | Branched RAG | Multiple knowledge domains |
+| Research assistant | HyDE + Self-RAG | Abstract queries, thoroughness |
+| Medical/Legal | CRAG | Must acknowledge uncertainty |
+| Complex advisory | Agentic RAG | Multi-expertise reasoning |
+
+---
+
+## Capstone Project: Task API RAG System
+
+Implement at least two patterns for your Task API:
+
+### Required: Simple RAG (Baseline)
+
+```python
+# Your implementation from Pattern 1
+simple_agent = Agent(...)
+
+Choose One Advanced Pattern​
+
+Option A: HyDE (for better handling of vague queries)
+
+# Implement Pattern 4
+hyde_agent = Agent(...)
+
+
+Option B: CRAG (for high-accuracy requirements)
+
+# Implement Pattern 6
+crag_agent = Agent(...)
+
+
+Option C: Agentic RAG (for multi-domain expertise)
+
+# Implement Pattern 8
+triage_agent = Agent(...)
+
+Test Your Implementation​
+test_queries = [
+    # Simple factual (baseline handles well)
+    "What fields does a task have?",
+
+    # Vague query (benefits from HyDE)
+    "How can I be more productive?",
+
+    # Error scenario (benefits from CRAG uncertainty handling)
+    "What causes the XYZ-999 error?",
+
+    # Multi-step (benefits from Agentic)
+    "Help me plan a deployment workflow for my team"
+]
+
+for query in test_queries:
+    print(f"Query: {query}")
+    print(f"Simple RAG: {Runner.run_sync(simple_agent, query).final_output[:100]}...")
+    print(f"Advanced: {Runner.run_sync(advanced_agent, query).final_output[:100]}...")
+    print("-" * 50)
+
+Reflect on Your Skill​
+
+You built a rag-deployment skill in Lesson 0. Test whether it handles architecture patterns.
+
+Test Your Skill​
+
+Ask your skill:
+
+I need to build a RAG system for a legal document review application.
+Users ask both simple questions ("What is clause 5?") and complex
+questions ("How do these contracts compare on liability terms?").
+
+Wrong answers could have legal consequences, so I need to handle
+uncertainty gracefully.
+
+Which RAG architecture(s) should I use? Show me the implementation
+using LangChain for retrieval and OpenAI Agents SDK for orchestration.
+
+Identify Gaps​
+
+After reviewing the response:
+
+Does it recommend CRAG for the uncertainty requirement?
+Does it suggest Adaptive RAG for handling both simple and complex queries?
+Does it show the correct architecture (LangChain retrieval + Agents SDK)?
+Does it demonstrate grading documents for relevance?
+Improve Your Skill​
+
+If gaps exist, update your skill:
+
+Update my rag-deployment skill with architecture selection guidance:
+1. When to use each of 8 RAG patterns
+2. How to implement CRAG with document grading
+3. How to combine patterns (e.g., Adaptive + CRAG)
+4. Tradeoff analysis (latency vs accuracy vs complexity)
+5. Always use LangChain for retrieval, Agents SDK for orchestration
+
+
+Your skill should now guide architecture decisions for production RAG systems.
+
+Try With AI​
+Prompt 1: Combine Patterns​
+I want to build a RAG system that:
+1. Remembers conversation history (Memory RAG)
+2. Grades document relevance (CRAG)
+3. Adapts strategy based on query complexity (Adaptive)
+
+Help me design an agent that combines these patterns.
+Use LangChain for retrieval and OpenAI Agents SDK for orchestration.
+
+
+What you're learning: Production systems often combine patterns. Understanding how they compose is key to architecture design.
+
+Prompt 2: Add Evaluation​
+Take my CRAG implementation and add evaluation from Lesson 7.
+I want to track:
+- How often the agent triggers the "broader search" fallback
+- Average relevance scores of retrieved documents
+- User satisfaction with answers
+
+Show me how to instrument the agent with these metrics.
+
+
+What you're learning: RAG systems need monitoring to identify when retrieval quality degrades or when patterns need adjustment.
+
+Prompt 3: Production Deployment​
+I've implemented Agentic RAG for my Task API with three specialist agents.
+Now I need to:
+1. Deploy it as a FastAPI endpoint
+2. Add rate limiting
+3. Handle agent timeouts gracefully
+4. Log all agent handoffs for debugging
+
+Show me the production-ready FastAPI integration.
+
+
+What you're learning: Moving from prototype to production requires operational considerations beyond just the RAG logic.

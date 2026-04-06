@@ -1,0 +1,504 @@
+Session Lifecycle Management
+
+Users close the chat. When they return, conversation is lost. They type "What did we discuss?" and your agent says "I'm sorry, I don't have that context." Professional ChatKit servers manage session lifecycle—create, resume, timeout, cleanup—so conversations persist across browser refreshes, device switches, and days between messages.
+
+By the end of this lesson, you'll implement complete session lifecycle management and extract the patterns into a reusable session-lifecycle skill.
+
+The Problem: Stateless Browsers, Stateful Conversations​
+
+REST APIs are stateless (each request independent).
+
+Conversations are stateful (context builds over time).
+
+Users are unreliable:
+
+Close browser tabs mid-conversation
+Return hours later expecting continuity
+Switch from desktop to mobile
+Open multiple simultaneous conversations
+
+Without session management:
+
+User: "Create a task: Review Q4 budget"
+Agent: ✓ Created
+[User closes tab]
+[User reopens 2 hours later]
+User: "Mark it complete"
+Agent: "Mark what complete?" ❌ Lost context
+
+
+With session management:
+
+User: "Create a task: Review Q4 budget"
+Agent: ✓ Created [Session: abc123]
+[User closes tab]
+[User reopens 2 hours later, session resumed]
+User: "Mark it complete"
+Agent: ✓ Marked complete [Session: abc123, resumed]
+
+
+Sessions bridge the gap between stateless HTTP and stateful conversations.
+
+Session Lifecycle States​
+┌─────────────┐
+│   CREATED   │──────┐
+└─────────────┘      │
+       │             │
+       │ First       │ Timeout
+       │ Message     │ (30 min inactive)
+       ▼             │
+┌─────────────┐      │
+│   ACTIVE    │◄─────┤
+└─────────────┘      │
+       │             │
+       │ Resumed     │
+       │             │
+       ▼             ▼
+┌─────────────┐  ┌─────────────┐
+│  RESUMED    │  │   EXPIRED   │
+└─────────────┘  └─────────────┘
+       │             │
+       │ Cleanup     │ Cleanup
+       │             │
+       ▼             ▼
+┌─────────────────────────────┐
+│         CLEANED UP          │
+└─────────────────────────────┘
+
+
+States:
+
+CREATED: Session initialized, no messages yet
+ACTIVE: User actively sending messages
+RESUMED: Session loaded from store after inactivity
+EXPIRED: Timeout reached, session marked for cleanup
+CLEANED UP: Session data removed from store
+RequestContext: The Session Container​
+
+ChatKit provides context parameter in respond() containing session data:
+
+from chatkit.server import ChatKitServer
+
+class MyServer(ChatKitServer):
+    async def respond(
+        self,
+        thread: ThreadMetadata,
+        input: UserMessageItem | None,
+        context: Any,  # ← RequestContext with session info
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        # Extract session data
+        user_id = context.user_id
+        session_id = context.session_id
+        metadata = context.metadata
+
+
+RequestContext fields:
+
+user_id: Unique user identifier (from authentication)
+session_id: Unique session identifier (generated or resumed)
+metadata: Custom key-value data (user preferences, feature flags)
+timestamp: Request timestamp
+
+Why this matters: RequestContext provides user isolation (multi-tenant) and session continuity.
+
+Pattern 1: Session Creation​
+
+When: First message from new user or new conversation.
+
+Implementation:
+
+from datetime import datetime, timezone
+from typing import Dict, Any
+from chatkit.server import ChatKitServer, ThreadMetadata, UserMessageItem
+from chatkit.types import ThreadStreamEvent
+
+class SessionServer(ChatKitServer):
+    def __init__(self):
+        super().__init__()
+        self.sessions: Dict[str, Dict[str, Any]] = {}  # In-memory session store
+
+    async def respond(
+        self,
+        thread: ThreadMetadata,
+        input: UserMessageItem | None,
+        context: Any,
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        session_id = context.session_id
+        user_id = context.user_id
+
+        # Create session if new
+        if session_id not in self.sessions:
+            await self.create_session(session_id, user_id)
+
+        # Process message
+        async for event in self.process_message(thread, input, context):
+            yield event
+
+    async def create_session(self, session_id: str, user_id: str) -> None:
+        """Create new session with initial state."""
+        self.sessions[session_id] = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "created_at": datetime.now(timezone.utc),
+            "last_activity": datetime.now(timezone.utc),
+            "state": "CREATED",
+            "message_count": 0,
+            "metadata": {},
+        }
+        print(f"✓ Created session {session_id} for user {user_id}")
+
+
+Output:
+
+✓ Created session abc123 for user alice@example.com
+
+Pattern 2: Session Resumption​
+
+When: User returns after browser refresh or inactivity.
+
+Implementation:
+
+async def respond(
+    self,
+    thread: ThreadMetadata,
+    input: UserMessageItem | None,
+    context: Any,
+) -> AsyncIterator[ThreadStreamEvent]:
+    session_id = context.session_id
+    user_id = context.user_id
+
+    # Create or resume session
+    if session_id not in self.sessions:
+        await self.create_session(session_id, user_id)
+    else:
+        await self.resume_session(session_id)
+
+    # Process message
+    async for event in self.process_message(thread, input, context):
+        yield event
+
+async def resume_session(self, session_id: str) -> None:
+    """Resume existing session, update activity timestamp."""
+    session = self.sessions[session_id]
+    session["last_activity"] = datetime.now(timezone.utc)
+    session["state"] = "RESUMED"
+    print(f"✓ Resumed session {session_id} (inactive for {self.get_inactive_duration(session)})")
+
+def get_inactive_duration(self, session: Dict[str, Any]) -> str:
+    """Calculate time since last activity."""
+    now = datetime.now(timezone.utc)
+    delta = now - session["last_activity"]
+
+    if delta.total_seconds() < 60:
+        return f"{int(delta.total_seconds())}s"
+    elif delta.total_seconds() < 3600:
+        return f"{int(delta.total_seconds() / 60)}m"
+    else:
+        return f"{int(delta.total_seconds() / 3600)}h"
+
+
+Output:
+
+✓ Resumed session abc123 (inactive for 15m)
+
+
+Why this matters: Resumption restores conversation context without forcing users to repeat themselves.
+
+Pattern 3: Timeout Handling​
+
+When: Session inactive beyond configured threshold.
+
+Timeout Strategies:
+
+Strategy	Threshold	Use Case
+Aggressive	5-10 minutes	High-security environments, limited resources
+Standard	30-60 minutes	Most applications, balance between UX and resources
+Lenient	2-4 hours	Casual apps, infrequent usage patterns
+Persistent	24+ hours	Research tools, long-form conversations
+
+Implementation:
+
+from datetime import timedelta
+
+class SessionServer(ChatKitServer):
+    SESSION_TIMEOUT = timedelta(minutes=30)  # Configurable threshold
+
+    async def respond(
+        self,
+        thread: ThreadMetadata,
+        input: UserMessageItem | None,
+        context: Any,
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        session_id = context.session_id
+
+        # Check timeout before resuming
+        if session_id in self.sessions:
+            if self.is_session_expired(session_id):
+                await self.expire_session(session_id)
+                # Create new session
+                await self.create_session(session_id, context.user_id)
+            else:
+                await self.resume_session(session_id)
+        else:
+            await self.create_session(session_id, context.user_id)
+
+        async for event in self.process_message(thread, input, context):
+            yield event
+
+    def is_session_expired(self, session_id: str) -> bool:
+        """Check if session exceeded timeout threshold."""
+        session = self.sessions[session_id]
+        now = datetime.now(timezone.utc)
+        inactive_duration = now - session["last_activity"]
+        return inactive_duration > self.SESSION_TIMEOUT
+
+    async def expire_session(self, session_id: str) -> None:
+        """Mark session as expired (ready for cleanup)."""
+        session = self.sessions[session_id]
+        session["state"] = "EXPIRED"
+        session["expired_at"] = datetime.now(timezone.utc)
+        print(f"⚠ Session {session_id} expired after {self.SESSION_TIMEOUT}")
+
+
+Output:
+
+⚠ Session abc123 expired after 0:30:00
+✓ Created session abc123 for user alice@example.com
+
+
+Why this matters: Timeout prevents stale sessions from consuming server resources.
+
+Pattern 4: Session Cleanup​
+
+When: Session expired or explicitly closed by user.
+
+Cleanup Strategies:
+
+Strategy	When	Resources Freed
+Immediate	On expiration	Memory, cache entries
+Deferred	Background task (hourly)	Batch cleanup, lower overhead
+Lazy	On next access attempt	Simple, no cron jobs needed
+
+Implementation (Immediate Cleanup):
+
+async def cleanup_session(self, session_id: str) -> None:
+    """Remove session data from store."""
+    if session_id in self.sessions:
+        session = self.sessions[session_id]
+
+        # Log final state
+        print(f"🧹 Cleaning up session {session_id}:")
+        print(f"  - Messages: {session['message_count']}")
+        print(f"  - Duration: {datetime.now(timezone.utc) - session['created_at']}")
+        print(f"  - State: {session['state']}")
+
+        # Remove from store
+        del self.sessions[session_id]
+        print(f"✓ Session {session_id} cleaned up")
+
+async def expire_session(self, session_id: str) -> None:
+    """Mark session expired and clean up immediately."""
+    session = self.sessions[session_id]
+    session["state"] = "EXPIRED"
+    session["expired_at"] = datetime.now(timezone.utc)
+
+    # Immediate cleanup
+    await self.cleanup_session(session_id)
+
+
+Output:
+
+🧹 Cleaning up session abc123:
+  - Messages: 5
+  - Duration: 0:45:23
+  - State: EXPIRED
+✓ Session abc123 cleaned up
+
+Pattern 5: State Persistence​
+
+Problem: In-memory sessions lost on server restart.
+
+Solution: Persist to database or Redis.
+
+Implementation (SQLModel + PostgreSQL):
+
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from datetime import datetime, timezone
+
+class SessionModel(SQLModel, table=True):
+    __tablename__ = "chatkit_sessions"
+
+    session_id: str = Field(primary_key=True)
+    user_id: str
+    created_at: datetime
+    last_activity: datetime
+    state: str
+    message_count: int
+    metadata: dict = Field(default_factory=dict, sa_column_kwargs={"type_": "JSONB"})
+
+class PersistentSessionServer(ChatKitServer):
+    def __init__(self, db_url: str):
+        super().__init__()
+        self.engine = create_engine(db_url)
+        SQLModel.metadata.create_all(self.engine)
+
+    async def create_session(self, session_id: str, user_id: str) -> None:
+        """Create session in database."""
+        with Session(self.engine) as session:
+            db_session = SessionModel(
+                session_id=session_id,
+                user_id=user_id,
+                created_at=datetime.now(timezone.utc),
+                last_activity=datetime.now(timezone.utc),
+                state="CREATED",
+                message_count=0,
+                metadata={},
+            )
+            session.add(db_session)
+            session.commit()
+            print(f"✓ Created session {session_id} (persisted to DB)")
+
+    async def resume_session(self, session_id: str) -> None:
+        """Resume session, update last_activity in database."""
+        with Session(self.engine) as session:
+            statement = select(SessionModel).where(SessionModel.session_id == session_id)
+            db_session = session.exec(statement).first()
+
+            if db_session:
+                db_session.last_activity = datetime.now(timezone.utc)
+                db_session.state = "RESUMED"
+                session.add(db_session)
+                session.commit()
+                print(f"✓ Resumed session {session_id} from DB")
+
+
+Output:
+
+✓ Created session abc123 (persisted to DB)
+✓ Resumed session abc123 from DB
+
+
+Why this matters: Persistence enables session recovery after server crashes or deployments.
+
+Pattern 6: Concurrent Session Management​
+
+Problem: User opens chat in multiple browser tabs.
+
+Strategies:
+
+Strategy	Behavior	Use Case
+Single Session	All tabs share one session	Most apps (simplest)
+Per-Tab Session	Each tab independent session	Power users, complex workflows
+Active Tab Wins	Most recent tab takes control	Prevent conflicting updates
+
+Implementation (Single Session Strategy):
+
+async def respond(
+    self,
+    thread: ThreadMetadata,
+    input: UserMessageItem | None,
+    context: Any,
+) -> AsyncIterator[ThreadStreamEvent]:
+    session_id = context.session_id
+    user_id = context.user_id
+
+    # Lock session for this request
+    async with self.session_lock(session_id):
+        if session_id not in self.sessions:
+            await self.create_session(session_id, user_id)
+        else:
+            await self.resume_session(session_id)
+
+        # Update activity timestamp
+        self.sessions[session_id]["last_activity"] = datetime.now(timezone.utc)
+        self.sessions[session_id]["message_count"] += 1
+
+        async for event in self.process_message(thread, input, context):
+            yield event
+
+
+Why this matters: Concurrent access without locking can corrupt session state.
+
+Safety Note​
+
+⚠ Session cleanup prevents memory leaks in production. Without cleanup:
+
+Long-running servers accumulate expired sessions
+Memory usage grows unbounded
+Server performance degrades over time
+
+Best practice: Combine timeout expiration with periodic background cleanup (e.g., hourly cron job removing sessions older than 24 hours).
+
+Extract Your session-lifecycle Skill​
+
+You've implemented session creation, resumption, timeout handling, and cleanup. These patterns will recur in every stateful ChatKit application. Time to harvest this intelligence.
+
+Layer 3 trigger: Pattern recurs 2+ times across projects → Create reusable intelligence
+
+Step: Extract the Skill​
+
+Copy and paste this prompt:
+
+Using your skill-creator skill, study the session lifecycle implementation
+code I just wrote in this lesson and extract it into a reusable
+session-lifecycle skill.
+
+Encapsulate all 6 patterns: session creation, resumption, timeout handling,
+cleanup, state persistence, and concurrent session management.
+
+
+Claude will:
+
+Review the 6 session patterns from this lesson
+Use skill-creator to generate the skill structure
+Extract patterns: create, resume, timeout, cleanup, persistence, concurrency
+Create reference docs with state diagrams and cleanup strategies
+Follow canonical format from building-chat-interfaces
+
+Your skill appears at .claude/skills/session-lifecycle/.
+
+Try With AI​
+Setup​
+
+Open claude-code-skills-lab terminal with your chatkit-server skill loaded.
+
+Prompts​
+
+Prompt 1: Extend Timeout Strategy
+
+Using my session-lifecycle skill, add a dynamic timeout strategy that:
+- Uses 5 minutes for high-security mode
+- Uses 30 minutes for standard mode
+- Uses 4 hours for casual mode
+- Reads mode from session metadata
+
+Show implementation with switching logic.
+
+
+What you're learning: Configurable session policies based on context.
+
+Prompt 2: Session Analytics
+
+Using my session-lifecycle skill, add analytics tracking:
+- Count active sessions
+- Calculate average session duration
+- Track sessions per user
+- Export metrics as JSON
+
+Show implementation with metrics endpoint.
+
+
+What you're learning: Observability patterns for session management.
+
+Prompt 3: Background Cleanup Job
+
+Using my session-lifecycle skill, create a background cleanup task that:
+- Runs every hour
+- Removes sessions expired >24 hours ago
+- Logs cleanup statistics
+- Uses asyncio for scheduling
+
+Show implementation with asyncio task.
+
+
+What you're learning: Deferred cleanup strategy with scheduled tasks.

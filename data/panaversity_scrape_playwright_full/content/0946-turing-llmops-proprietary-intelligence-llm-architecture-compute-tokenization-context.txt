@@ -1,0 +1,495 @@
+Tokenization and Context
+
+Before your training data reaches the transformer, it's converted to numbers. This conversion, tokenization, is not just a preprocessing step. It directly affects what your model can learn, how efficiently it processes text, and how much memory it requires. Understanding tokenization is essential for preparing effective fine-tuning datasets.
+
+When you fine-tune a model on domain-specific text, tokenization can make or break your results. Technical terms might be split into awkward pieces. Code might tokenize differently than natural language. And your context window can fill up faster than expected. This lesson gives you the knowledge to anticipate and handle these challenges.
+
+Why Tokenization Matters for Fine-Tuning​
+
+Consider fine-tuning on Task API data:
+
+User: Create a task for the Q4 budget review with a deadline of December 15th.
+
+
+The model doesn't see this as words. It sees:
+
+[1, 4324, 29901, 6204, 263, 3414, 363, 278, 660, 29946, 17407, 9076, ...]
+
+
+Each number is a token ID. The tokenizer determines:
+
+How text splits: "Q4" might be one token or two ("Q" + "4")
+Vocabulary coverage: Unknown words get split into subwords
+Efficiency: Common words = fewer tokens = faster processing
+
+For fine-tuning, tokenization affects:
+
+Training data size: More tokens per example = more memory per batch
+Context utilization: 8K context fills faster if text tokenizes inefficiently
+Learning quality: Awkward token splits can hurt learning
+Byte-Pair Encoding: How Tokenizers Work​
+
+Modern LLMs use Byte-Pair Encoding (BPE) or variants like SentencePiece. Here's how BPE builds its vocabulary:
+
+The BPE Algorithm​
+
+Starting point: Every unique byte (character) in the training corpus
+
+Process (repeated thousands of times):
+
+Find the most frequent pair of adjacent tokens
+Merge them into a new token
+Add new token to vocabulary
+Repeat until vocabulary reaches target size
+Worked Example​
+
+Training corpus: "low lower lowest"
+
+Initial vocabulary: ['l', 'o', 'w', 'e', 'r', 's', 't', ' ']
+
+Iteration 1: Most frequent pair is 'l' + 'o' → merge to 'lo'
+
+Vocabulary: ['l', 'o', 'w', 'e', 'r', 's', 't', ' ', 'lo']
+Corpus as tokens: ['lo', 'w', ' ', 'lo', 'w', 'e', 'r', ' ', 'lo', 'w', 'e', 's', 't']
+
+
+Iteration 2: Most frequent pair is 'lo' + 'w' → merge to 'low'
+
+Vocabulary: ['l', 'o', 'w', 'e', 'r', 's', 't', ' ', 'lo', 'low']
+Corpus as tokens: ['low', ' ', 'low', 'e', 'r', ' ', 'low', 'e', 's', 't']
+
+
+Continue until vocabulary reaches target size (32,000 for many models).
+
+Result: Common words become single tokens ("the", "and", "low"). Rare words get split into subwords ("lowest" → "low" + "est").
+
+Why Subword Tokenization?​
+
+Character-level tokenization:
+
+✅ Small vocabulary (256 characters)
+❌ Long sequences (expensive attention computation)
+❌ Hard to learn word meanings from characters
+
+Word-level tokenization:
+
+✅ Short sequences
+❌ Huge vocabulary (millions of words)
+❌ Out-of-vocabulary problem for new words
+
+Subword tokenization (BPE):
+
+✅ Medium vocabulary (32K-128K tokens)
+✅ Reasonable sequence lengths
+✅ Can handle any text (falls back to character/byte level)
+✅ Captures morphology ("run" + "ning" = "running")
+Vocabulary Size: The Numbers​
+
+Different models use different vocabulary sizes:
+
+Model	Vocabulary Size	Tokenizer Type
+Llama-3-8B	128,256	BPE (tiktoken)
+Mistral-7B	32,000	SentencePiece BPE
+GPT-4	100,256	BPE (tiktoken)
+Llama-2-7B	32,000	SentencePiece BPE
+
+Why vocabulary size matters:
+
+Embedding table size: Vocabulary × Hidden dimension = Parameters
+
+Llama-3: 128,256 × 4,096 = 525M parameters just for embeddings
+
+Output projection size: Hidden dimension × Vocabulary = Parameters
+
+Another 525M for the lm_head
+
+Token efficiency: Larger vocabulary = fewer tokens per text
+
+More context fits in the window
+
+Llama-3's larger vocabulary: 128K vs 32K means text typically uses 15% fewer tokens, letting you fit more content in the context window.
+
+Context Length: The Memory Limit​
+
+The context length (also called context window or sequence length) is the maximum number of tokens the model can process at once.
+
+Model	Context Length	Approximate Words
+Llama-3-8B	8,192 tokens	~6,000 words
+Llama-3-8B-Instruct	8,192 tokens	~6,000 words
+Llama-3-70B	8,192 tokens	~6,000 words
+GPT-4	8,192 / 32,768	~6K / 25K words
+Claude-3	200,000 tokens	~150,000 words
+Why Context Length is Limited​
+
+The attention mechanism has quadratic complexity with sequence length:
+
+Memory for attention ∝ sequence_length² × num_heads × batch_size
+
+
+For 8K context:
+
+Attention needs 8,192 × 8,192 = 67M attention scores per layer per head
+With 32 heads and 32 layers: 67M × 32 × 32 = 68 billion operations
+
+Doubling context length quadruples memory requirements. This is why 200K context models like Claude are impressive engineering achievements.
+
+Context Length During Fine-Tuning​
+
+For fine-tuning on Colab T4 (15GB VRAM), you'll typically use:
+
+Max sequence length: 512-2048 tokens (not the full 8K)
+Reason: Training needs memory for gradients, optimizer states, and activations
+
+Later lessons cover memory optimization techniques to maximize context during training.
+
+Using Tokenizers in Practice​
+
+Here's how to work with tokenizers in Python:
+
+from transformers import AutoTokenizer
+
+# Load the tokenizer
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+
+# Tokenize text
+text = "Create a task for Q4 budget review"
+tokens = tokenizer.tokenize(text)
+print(f"Tokens: {tokens}")
+# Output: ['Create', ' a', ' task', ' for', ' Q', '4', ' budget', ' review']
+
+# Get token IDs
+token_ids = tokenizer.encode(text)
+print(f"Token IDs: {token_ids}")
+# Output: [4324, 264, 3414, 369, 1229, 19, 8199, 3477]
+
+# Decode back to text
+decoded = tokenizer.decode(token_ids)
+print(f"Decoded: {decoded}")
+# Output: Create a task for Q4 budget review
+
+# Count tokens
+print(f"Token count: {len(token_ids)}")
+# Output: Token count: 8
+
+
+Output:
+
+Tokens: ['Create', 'Ġa', 'Ġtask', 'Ġfor', 'ĠQ', '4', 'Ġbudget', 'Ġreview']
+Token IDs: [4324, 264, 3414, 369, 1229, 19, 8199, 3477]
+Decoded: Create a task for Q4 budget review
+Token count: 8
+
+
+Notice:
+
+Ġ represents a leading space (the token includes the space before the word)
+"Q4" splits into two tokens ("Q" and "4")
+Common words like "task", "budget" are single tokens
+Special Tokens: The Instruction Protocol​
+
+LLMs use special tokens to mark structure. These aren't regular words but signals to the model:
+
+Token	Purpose	Example ID
+BOS (Begin of Sequence)	Marks start of input	&lt;|begin_of_text|>
+EOS (End of Sequence)	Marks end of generation	&lt;|eot_id|>
+PAD (Padding)	Fills to uniform length	<pad>
+System/User/Assistant	Marks conversation roles	&lt;|start_header_id|>
+Chat Templates​
+
+Instruction-tuned models expect specific formatting. Here's Llama-3's chat template:
+
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful task assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Create a task for reviewing the budget.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+
+Using the tokenizer's built-in template:
+
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+
+messages = [
+    {"role": "system", "content": "You are a helpful task assistant."},
+    {"role": "user", "content": "Create a task for reviewing the budget."}
+]
+
+formatted = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True
+)
+print(formatted)
+
+
+Output:
+
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful task assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Create a task for reviewing the budget.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+
+
+Why this matters for fine-tuning: Your training data must match this format exactly. If you train with different delimiters, the model won't respond correctly to the expected chat format during inference.
+
+Tokenization Challenges for Domain-Specific Text​
+
+When fine-tuning on specialized content, tokenization can cause problems:
+
+Challenge 1: Technical Vocabulary​
+
+Technical terms may not be in the tokenizer's vocabulary:
+
+# Medical term
+tokens = tokenizer.tokenize("thrombocytopenia")
+print(tokens)
+# Output: ['th', 'rom', 'bo', 'cy', 'top', 'enia']  # 6 tokens!
+
+
+Each subword is less meaningful than the whole word. The model must learn that these 6 tokens together mean "low platelet count."
+
+Challenge 2: Code Tokenization​
+
+Code often tokenizes poorly:
+
+code = "def calculate_total_price(items: List[float]) -> float:"
+tokens = tokenizer.tokenize(code)
+print(f"Token count: {len(tokens)}")
+print(tokens)
+# Output: Token count: 18
+# ['def', ' calculate', '_', 'total', '_', 'price', '(', 'items', ':', ' List', '[', 'float', '])', ' ->', ' float', ':']
+
+
+Notice:
+
+Underscores and special characters become separate tokens
+CamelCase might split differently than snake_case
+Generic type hints use multiple tokens
+Challenge 3: Numerical Data​
+
+Numbers tokenize inconsistently:
+
+for num in ["100", "1000", "10000", "123456"]:
+    tokens = tokenizer.tokenize(num)
+    print(f"{num}: {tokens} ({len(tokens)} tokens)")
+
+
+Output:
+
+100: ['100'] (1 token)
+1000: ['1000'] (1 token)
+10000: ['100', '00'] (2 tokens)
+123456: ['123', '456'] (2 tokens)
+
+
+Numbers split at seemingly arbitrary boundaries. This can affect learning for numerical reasoning tasks.
+
+Calculating Token Budgets​
+
+Before fine-tuning, estimate your token budget:
+
+def estimate_tokens(tokenizer, examples):
+    """Calculate token statistics for a dataset."""
+    lengths = []
+    for example in examples:
+        # Apply chat template if using instruction format
+        if isinstance(example, dict):
+            text = tokenizer.apply_chat_template(
+                example["messages"],
+                tokenize=False
+            )
+        else:
+            text = example
+
+        tokens = tokenizer.encode(text)
+        lengths.append(len(tokens))
+
+    return {
+        "min": min(lengths),
+        "max": max(lengths),
+        "mean": sum(lengths) / len(lengths),
+        "total": sum(lengths)
+    }
+
+# Example: Task API training data
+examples = [
+    "Create a task for reviewing the Q4 budget by Friday",
+    "Add a high-priority task: Update the deployment documentation",
+    "List all tasks assigned to the engineering team with deadline this week",
+]
+
+stats = estimate_tokens(tokenizer, examples)
+print(f"Token statistics: {stats}")
+
+
+Output:
+
+Token statistics: {'min': 12, 'max': 18, 'mean': 14.67, 'total': 44}
+
+
+Why this matters:
+
+If max tokens > context length: Examples will be truncated
+If tokens per example × batch size > memory: Training will crash
+You need these numbers to plan your training configuration
+Impact on Fine-Tuning Quality​
+
+Tokenization affects what your model can learn:
+
+Pattern 1: Character-Level Learning​
+
+If your task involves character patterns (e.g., email validation), the model struggles:
+
+# Email domain split across tokens
+tokens = tokenizer.tokenize("user@example.com")
+# ['user', '@', 'example', '.', 'com']
+
+
+The model sees 5 separate tokens, not "email" as a pattern. Teaching email format requires many examples.
+
+Pattern 2: Semantic Unit Preservation​
+
+Good tokenization preserves meaning:
+
+# "deadline" is one semantic unit
+tokenizer.tokenize("deadline")  # ['deadline'] ✓
+
+# "Q4" should stay together
+tokenizer.tokenize("Q4 budget")  # ['Q', '4', ' budget']
+# Split! Model must learn "Q" + "4" = "fourth quarter"
+
+Pattern 3: Training Data Length​
+
+Verbose prompts consume tokens fast:
+
+verbose = """
+You are a professional task management assistant. When the user asks
+you to create a task, you should parse their request, extract the task
+title, due date, priority, and any other relevant metadata, then
+format the response as a structured JSON object.
+
+User request: Create a task to review the budget.
+"""
+
+concise = """<|system|>Task assistant.<|user|>Create task: review budget."""
+
+print(f"Verbose: {len(tokenizer.encode(verbose))} tokens")
+print(f"Concise: {len(tokenizer.encode(concise))} tokens")
+
+
+Output:
+
+Verbose: 87 tokens
+Concise: 18 tokens
+
+
+Concise prompts let you fit more examples in a training batch or fit longer context per example.
+
+Best Practices for Training Data​
+
+Based on tokenization behavior, follow these practices:
+
+1. Measure Before Training​
+
+Always calculate token statistics for your dataset:
+
+from datasets import load_dataset
+
+dataset = load_dataset("your-task-data")
+token_lengths = [len(tokenizer.encode(ex["text"])) for ex in dataset]
+
+print(f"Max length: {max(token_lengths)}")
+print(f"95th percentile: {sorted(token_lengths)[int(len(token_lengths)*0.95)]}")
+
+
+Set your max_seq_length to cover 95th percentile (outliers can be truncated).
+
+2. Use the Model's Chat Template​
+
+Match the exact format the base model was trained on:
+
+# ✓ Correct: Use apply_chat_template
+formatted = tokenizer.apply_chat_template(messages, tokenize=False)
+
+# ✗ Wrong: Custom format
+formatted = f"User: {user_message}\nAssistant: {response}"
+
+3. Handle Domain Vocabulary​
+
+If your domain has specialized terms:
+
+Measure tokenization: Check how key terms tokenize
+Include in training data: Use terms in full context repeatedly
+Consider vocabulary extension: Advanced technique (adds complexity)
+4. Balance Example Length​
+
+For efficient GPU utilization:
+
+# Group similar-length examples in batches
+dataset = dataset.sort("length")
+
+# Or pad to uniform length and mask padding
+# (covered in training lesson)
+
+Try With AI​
+
+Now that you understand tokenization, explore its implications with your AI companion.
+
+Prompt 1: Analyze Your Dataset​
+I'm preparing a fine-tuning dataset for Task API (task management).
+Here's a sample of my training examples:
+
+1. "Create a task: Review Q4 budget spreadsheet. Deadline: Friday"
+2. "High priority: Deploy v2.3 to production before the demo"
+3. "Assign the security audit task to @alice with status:blocked"
+
+Help me analyze:
+1. How would these tokenize? Are there any problematic patterns?
+2. What's the expected token count range for these examples?
+3. Should I be concerned about any terms splitting awkwardly?
+4. How should I format these for instruction fine-tuning?
+
+
+What you're learning: Predicting tokenization behavior helps you prepare better training data.
+
+Prompt 2: Understand Context Limits​
+I'm planning to fine-tune Llama-3-8B on a 4K context dataset, but
+I'll be training on a T4 GPU with 15GB VRAM.
+
+Help me understand:
+1. If my training examples average 500 tokens, what batch size can I use?
+2. How does attention's quadratic complexity affect memory at 2K vs 4K context?
+3. Should I truncate to shorter sequences for memory savings?
+4. What's the trade-off between context length and batch size for learning?
+
+Walk me through the calculations and trade-offs.
+
+
+What you're learning: Connecting tokenization to memory constraints prepares you for VRAM budgeting.
+
+Prompt 3: Design Efficient Training Format​
+I want to maximize training efficiency for my Task API fine-tuning.
+Currently my prompts look like:
+
+System: You are a task management assistant that helps users create,
+organize, and track their tasks. Always respond with valid JSON.
+
+User: [user request]
+Assistant: [structured response]
+
+This feels verbose. Can you help me:
+1. Design a more token-efficient format that preserves instruction quality?
+2. Show me the token count difference between verbose and concise versions?
+3. What information is essential vs. redundant in the system prompt?
+4. How do chat templates affect my format choices?
+
+
+What you're learning: Efficient formatting lets you train on more examples or longer context with the same GPU memory.
+
+Safety Note​
+
+When testing tokenizers on sensitive data, use the tokenizer locally rather than web-based tools. Tokenizers run entirely on your machine, but pasting sensitive text into online tokenizer playgrounds could expose it. For production fine-tuning, validate that your tokenization pipeline handles all expected input patterns before training.

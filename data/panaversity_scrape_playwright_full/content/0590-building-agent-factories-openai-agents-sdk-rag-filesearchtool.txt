@@ -1,0 +1,905 @@
+RAG with FileSearchTool: Knowledge-Grounded Agents
+
+Your Customer Support Digital FTE handles product questions daily. Most queries require information from product manuals, FAQs, and policy documents---knowledge that exists in your company's documentation but isn't encoded in the LLM's training data. The agent needs to retrieve relevant information from your documents and generate accurate, grounded responses.
+
+This is the problem Retrieval-Augmented Generation (RAG) solves. Instead of relying solely on the LLM's parametric knowledge (what it learned during training), RAG retrieves relevant documents and includes them in the context. The LLM then generates responses grounded in your actual documentation, with citations pointing to the sources.
+
+In previous lessons, you built agents with tools, handoffs, guardrails, sessions, and observability. Now you'll add knowledge retrieval---the capability that transforms your Digital FTE from a generic assistant into a domain expert grounded in your organization's actual knowledge.
+
+Why Knowledge Grounding Changes Everything​
+
+Consider what happens without RAG:
+
+Question	LLM-Only Response	RAG-Grounded Response
+"What's your return policy?"	Generic 30-day policy guess	"Returns accepted within 45 days per Section 3.2 of our policy"
+"How do I configure Widget Pro?"	Hallucinated steps	Exact steps from product manual with page reference
+"When was this feature added?"	"I don't have that information"	"Version 2.3, released March 2024, per release notes"
+
+RAG provides three critical capabilities:
+
+Accuracy: Responses grounded in actual documents, not training data patterns
+Currency: Knowledge updated by uploading new documents, not waiting for model retraining
+Traceability: Citations let users verify information against source documents
+
+OpenAI's FileSearchTool handles the complexity of RAG---chunking, embedding, vector search, and reranking---so you can focus on building agents, not search infrastructure.
+
+Understanding the RAG Architecture​
+
+Before implementing, understand how FileSearchTool works under the hood:
+
+User Query
+    │
+    ├── Agent receives query
+    │       │
+    │       └── LLM decides to call file_search tool
+    │               │
+    │               └── FileSearchTool executes
+    │                       │
+    │                       ├── Query → Embedding
+    │                       │
+    │                       ├── Vector search across chunks
+    │                       │
+    │                       ├── Reranking by relevance
+    │                       │
+    │                       └── Top chunks returned with metadata
+    │                               │
+    │                               └── LLM generates response using chunks
+    │                                       │
+    │                                       └── Response with citations
+    │
+    └── Agent returns grounded response
+
+
+The key insight: FileSearchTool is a hosted tool. OpenAI manages the vector store infrastructure, embedding generation, and search. You manage the documents and agent configuration.
+
+Creating a Vector Store​
+
+Vector stores hold your documents in indexed, searchable form. Create one using the OpenAI client:
+
+from openai import OpenAI
+
+client = OpenAI()
+
+# Create a vector store with expiration to manage costs
+vector_store = client.vector_stores.create(
+    name="ProductDocumentation",
+    expires_after={
+        "anchor": "last_active_at",
+        "days": 7  # Auto-delete after 7 days of inactivity
+    }
+)
+
+print(f"Vector Store ID: {vector_store.id}")
+print(f"Name: {vector_store.name}")
+print(f"Status: {vector_store.status}")
+
+
+Output:
+
+Vector Store ID: vs_abc123xyz789
+Name: ProductDocumentation
+Status: completed
+
+
+The expires_after parameter is important for cost management. Vector store storage is billed at $0.10/GB/day after the first free gigabyte. Setting expiration ensures unused stores don't accumulate charges.
+
+Custom Chunking Strategy​
+
+By default, documents are split into 800-token chunks with 400-token overlap. You can customize this when adding files:
+
+# Create vector store with custom chunking
+vector_store = client.vector_stores.create(
+    name="TechnicalManuals",
+    chunking_strategy={
+        "type": "static",
+        "static": {
+            "max_chunk_size_tokens": 1600,  # Larger chunks for technical content
+            "chunk_overlap_tokens": 400     # Maintain context between chunks
+        }
+    }
+)
+
+print(f"Created: {vector_store.id}")
+print(f"Chunking: 1600 tokens, 400 overlap")
+
+
+Output:
+
+Created: vs_def456...
+Chunking: 1600 tokens, 400 overlap
+
+
+Chunking strategy depends on your content:
+
+Content Type	Recommended Chunk Size	Overlap	Rationale
+FAQs, Q&A	400-600 tokens	100-200	Short, self-contained answers
+Technical docs	1200-1600 tokens	400	Preserve procedure context
+Legal/Policy	800-1200 tokens	300	Balance precision and context
+Narrative (blogs)	600-800 tokens	200	Natural paragraph breaks
+
+Constraints apply: max_chunk_size_tokens must be 100-4096, and overlap cannot exceed half the chunk size.
+
+Uploading Documents​
+
+Documents go through two steps: upload to OpenAI's file storage, then register with a vector store:
+
+from pathlib import Path
+
+# Step 1: Upload files to OpenAI
+file_paths = [
+    "docs/product-manual.pdf",
+    "docs/faq.md",
+    "docs/return-policy.txt"
+]
+
+uploaded_files = []
+for path in file_paths:
+    with open(path, "rb") as f:
+        file = client.files.create(
+            file=f,
+            purpose="assistants"  # Required for vector store usage
+        )
+        uploaded_files.append(file)
+        print(f"Uploaded: {file.filename} (ID: {file.id})")
+
+# Step 2: Add files to vector store
+for file in uploaded_files:
+    vs_file = client.vector_stores.files.create(
+        vector_store_id=vector_store.id,
+        file_id=file.id
+    )
+    print(f"Added to vector store: {file.filename} - Status: {vs_file.status}")
+
+
+Output:
+
+Uploaded: product-manual.pdf (ID: file-abc123)
+Uploaded: faq.md (ID: file-def456)
+Uploaded: return-policy.txt (ID: file-ghi789)
+Added to vector store: product-manual.pdf - Status: in_progress
+Added to vector store: faq.md - Status: completed
+Added to vector store: return-policy.txt - Status: completed
+
+
+For larger uploads, use batch processing with polling:
+
+# Batch upload with status polling
+file_streams = [open(path, "rb") for path in file_paths]
+
+file_batch = client.vector_stores.file_batches.upload_and_poll(
+    vector_store_id=vector_store.id,
+    files=file_streams
+)
+
+print(f"Batch status: {file_batch.status}")
+print(f"Files processed: {file_batch.file_counts}")
+
+
+Output:
+
+Batch status: completed
+Files processed: FileCounts(in_progress=0, completed=3, failed=0, cancelled=0, total=3)
+
+
+Supported file formats include PDF, Markdown, TXT, DOCX, and more. Individual files can be up to 512 MB, with 1 TB total per organization.
+
+Configuring FileSearchTool​
+
+Now connect your vector store to an agent using FileSearchTool:
+
+from agents import Agent, FileSearchTool, Runner
+
+# Create agent with file search capability
+support_agent = Agent(
+    name="DocumentationExpert",
+    instructions="""You are a product documentation expert.
+
+When users ask questions:
+1. Search the documentation using file_search
+2. Provide accurate answers based on the retrieved content
+3. Always cite the source document
+4. If information isn't found, say so clearly""",
+    tools=[
+        FileSearchTool(
+            vector_store_ids=[vector_store.id],
+            max_num_results=5  # Return top 5 relevant chunks
+        )
+    ]
+)
+
+# Test the agent
+result = Runner.run_sync(
+    support_agent,
+    "What is the return policy for Widget Pro?"
+)
+
+print(result.final_output)
+
+
+Output:
+
+Based on our documentation, the return policy for Widget Pro is as follows:
+
+**Return Window**: 45 days from the date of purchase (Section 3.2)
+
+**Conditions**:
+- Product must be in original packaging
+- Include proof of purchase
+- No physical damage beyond normal wear
+
+**Process**: Contact support@example.com to initiate a return. You'll receive a prepaid shipping label within 24 hours.
+
+Source: return-policy.txt, Section 3.2
+
+
+The max_num_results parameter controls how many chunks are returned. More chunks provide more context but consume more tokens. Balance based on your cost and accuracy requirements.
+
+Extracting Citations​
+
+For production systems, you need to show users where information came from. Access citations through response annotations:
+
+from agents import Agent, FileSearchTool, Runner
+from openai import OpenAI
+
+client = OpenAI()
+
+# Create agent
+agent = Agent(
+    name="CitationAgent",
+    instructions="Answer questions using file_search. Always cite your sources.",
+    tools=[
+        FileSearchTool(
+            vector_store_ids=[vector_store.id],
+            max_num_results=3
+        )
+    ]
+)
+
+# Run with search result inclusion
+# Note: Citation details are in the raw response
+result = Runner.run_sync(
+    agent,
+    "How do I reset my Widget Pro to factory settings?"
+)
+
+print("=== Agent Response ===")
+print(result.final_output)
+
+# Access the underlying response for citations
+# The exact structure depends on your response parsing needs
+print("\n=== Source Documents ===")
+print("Citations are embedded in the response as annotations")
+
+
+Output:
+
+=== Agent Response ===
+To reset your Widget Pro to factory settings:
+
+1. Power off the device completely
+2. Hold the Reset button (small pinhole on back) for 10 seconds
+3. While holding Reset, press the Power button
+4. Release both buttons when the LED flashes blue
+5. Wait 60 seconds for the reset to complete
+
+Warning: This erases all custom settings and paired devices.
+
+[Source: product-manual.pdf, Chapter 8: Troubleshooting]
+
+=== Source Documents ===
+Citations are embedded in the response as annotations
+
+
+For detailed search results with confidence scores, you can use the Responses API directly:
+
+# Direct Responses API call for detailed citations
+response = client.responses.create(
+    model="gpt-4o",
+    input="What troubleshooting steps should I try first?",
+    tools=[{
+        "type": "file_search",
+        "vector_store_ids": [vector_store.id]
+    }],
+    include=["output[*].file_search_call.search_results"]
+)
+
+# Parse search results
+for item in response.output:
+    if hasattr(item, "file_search_call"):
+        print("=== Retrieved Chunks ===")
+        for result in item.file_search_call.search_results:
+            print(f"File: {result.filename}")
+            print(f"Score: {result.score:.3f}")
+            print(f"Content: {result.content[:200]}...")
+            print("---")
+
+
+Output:
+
+=== Retrieved Chunks ===
+File: product-manual.pdf
+Score: 0.892
+Content: Chapter 8: Troubleshooting
+
+Before contacting support, try these steps:
+1. Restart the device (power cycle)
+2. Check all cable connections
+3. Verify Wi-Fi signal strength...
+---
+File: faq.md
+Score: 0.834
+Content: ## Common Issues
+
+Q: My Widget Pro won't connect to Wi-Fi
+A: First, ensure your router is broadcasting on 2.4GHz...
+---
+
+Metadata Filtering​
+
+For large document collections, filter results by metadata attributes:
+
+from datetime import datetime, timedelta
+
+# Upload file with metadata attributes
+file = client.files.create(
+    file=open("docs/release-notes-v2.5.md", "rb"),
+    purpose="assistants"
+)
+
+client.vector_stores.files.create(
+    vector_store_id=vector_store.id,
+    file_id=file.id,
+    attributes={
+        "version": "2.5",
+        "release_date": int(datetime(2024, 11, 15).timestamp()),
+        "category": "release-notes"
+    }
+)
+
+# Query with metadata filters
+one_month_ago = int((datetime.now() - timedelta(days=30)).timestamp())
+
+response = client.responses.create(
+    model="gpt-4o",
+    input="What features were added in the last month?",
+    tools=[{
+        "type": "file_search",
+        "vector_store_ids": [vector_store.id],
+        "filters": {
+            "type": "and",
+            "filters": [
+                {"type": "gte", "key": "release_date", "value": one_month_ago},
+                {"type": "eq", "key": "category", "value": "release-notes"}
+            ]
+        }
+    }]
+)
+
+print(response.output_text)
+
+
+Output:
+
+Based on the release notes from the past month:
+
+**Version 2.5 (November 15, 2024)**:
+- Added dark mode support
+- Improved battery life by 20%
+- New voice control integration
+- Fixed Bluetooth pairing issues
+
+These features were added in version 2.5, released November 15, 2024.
+
+
+Filter operators include:
+
+eq: Equals
+ne: Not equals
+gt, gte: Greater than (or equal)
+lt, lte: Less than (or equal)
+in: Value in list
+and, or: Combine multiple filters
+Building a Documentation Q&A Agent​
+
+Let's create a complete RAG agent for TaskManager documentation:
+
+from agents import Agent, FileSearchTool, Runner, function_tool
+from openai import OpenAI
+from pydantic import BaseModel
+from typing import List, Optional
+
+client = OpenAI()
+
+# Context for tracking RAG interactions
+class RAGContext(BaseModel):
+    queries: List[str] = []
+    sources_used: List[str] = []
+    fallback_count: int = 0
+
+# Tool for when documentation doesn't have the answer
+@function_tool
+def escalate_to_human(
+    query: str,
+    reason: str
+) -> str:
+    """Escalate a query to human support when documentation is insufficient.
+
+    Args:
+        query: The user's original question
+        reason: Why documentation couldn't answer this
+
+    Returns:
+        Escalation confirmation
+    """
+    return f"Escalated to human support. Ticket created for: {query}. Reason: {reason}"
+
+# Create the documentation agent
+doc_agent = Agent[RAGContext](
+    name="TaskManagerDocsExpert",
+    instructions="""You are an expert on TaskManager, our project management application.
+
+Your knowledge comes from the official documentation. When answering:
+
+1. ALWAYS use file_search to find relevant documentation
+2. Provide accurate, specific answers based on what you find
+3. Include the source document and section in your response
+4. If the documentation doesn't cover the question, use escalate_to_human
+
+Never guess or make up information. If you can't find it, escalate.
+
+Response format:
+- Direct answer to the question
+- Step-by-step instructions if applicable
+- Source citation (document name and section)
+- Related topics the user might want to explore""",
+    tools=[
+        FileSearchTool(
+            vector_store_ids=["vs_taskmanager_docs"],  # Your vector store ID
+            max_num_results=5
+        ),
+        escalate_to_human
+    ]
+)
+
+# Test conversations
+test_queries = [
+    "How do I create a new project in TaskManager?",
+    "What keyboard shortcuts are available?",
+    "Can TaskManager integrate with Jira?"
+]
+
+context = RAGContext()
+
+for query in test_queries:
+    context.queries.append(query)
+
+    result = Runner.run_sync(
+        doc_agent,
+        query,
+        context=context
+    )
+
+    print(f"Q: {query}")
+    print(f"A: {result.final_output}")
+    print("-" * 50)
+
+print(f"\nSession Summary:")
+print(f"Queries handled: {len(context.queries)}")
+print(f"Escalations: {context.fallback_count}")
+
+
+Output:
+
+Q: How do I create a new project in TaskManager?
+A: To create a new project in TaskManager:
+
+1. Click the **+ New Project** button in the top navigation bar
+2. Enter your project name (required) and description (optional)
+3. Select a project template or start blank
+4. Choose team members to add (can be done later)
+5. Click **Create Project**
+
+Your new project will appear in the sidebar under "My Projects."
+
+**Source**: user-guide.md, Section 2.1 - Creating Projects
+
+**Related**: See also "Project Templates" (Section 2.3) and "Team Management" (Section 4.1)
+--------------------------------------------------
+Q: What keyboard shortcuts are available?
+A: TaskManager supports these keyboard shortcuts:
+
+**Navigation**:
+- `Ctrl/Cmd + K`: Quick search
+- `G then P`: Go to Projects
+- `G then T`: Go to Tasks
+
+**Task Management**:
+- `N`: New task
+- `E`: Edit selected task
+- `D`: Mark as done
+- `Delete`: Move to trash
+
+**Views**:
+- `1`: List view
+- `2`: Board view
+- `3`: Calendar view
+
+**Source**: user-guide.md, Appendix A - Keyboard Shortcuts
+
+**Related**: See "Customizing Shortcuts" in Settings documentation
+--------------------------------------------------
+Q: Can TaskManager integrate with Jira?
+A: I searched the documentation but couldn't find information about Jira integration.
+
+I've escalated this to our support team who can provide details about integration capabilities and any planned features.
+
+**Escalation Reference**: TKT-20241229-001
+--------------------------------------------------
+
+Session Summary:
+Queries handled: 3
+Escalations: 1
+
+Creating Your RAG Skill​
+
+This lesson demonstrates the Intelligence Design layer (Layer 3). Let's capture the RAG pattern as a reusable skill:
+
+"""
+Agentic RAG Pattern Skill
+
+This skill encapsulates the patterns for building knowledge-grounded agents
+using OpenAI's FileSearchTool and vector stores.
+
+Usage:
+1. Create vector store with appropriate chunking for your content
+2. Upload documents with metadata for filtering
+3. Configure FileSearchTool with your vector store
+4. Implement citation extraction for source attribution
+5. Add fallback handling for queries outside documentation scope
+"""
+
+from agents import Agent, FileSearchTool, Runner, function_tool
+from openai import OpenAI
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+# Skill context model
+class RAGSkillContext(BaseModel):
+    """Context for tracking RAG skill execution."""
+    vector_store_id: str
+    session_queries: List[str] = []
+    citations_used: List[Dict[str, Any]] = []
+    escalation_count: int = 0
+
+class RAGSkillBuilder:
+    """Builder for creating knowledge-grounded agents."""
+
+    def __init__(self, openai_client: Optional[OpenAI] = None):
+        self.client = openai_client or OpenAI()
+
+    def create_vector_store(
+        self,
+        name: str,
+        chunk_size: int = 800,
+        chunk_overlap: int = 400,
+        expiration_days: int = 7
+    ) -> str:
+        """Create a vector store with custom configuration.
+
+        Args:
+            name: Vector store name
+            chunk_size: Tokens per chunk (100-4096)
+            chunk_overlap: Overlap between chunks
+            expiration_days: Days until auto-deletion
+
+        Returns:
+            Vector store ID
+        """
+        vector_store = self.client.vector_stores.create(
+            name=name,
+            expires_after={"anchor": "last_active_at", "days": expiration_days},
+            chunking_strategy={
+                "type": "static",
+                "static": {
+                    "max_chunk_size_tokens": chunk_size,
+                    "chunk_overlap_tokens": chunk_overlap
+                }
+            }
+        )
+        return vector_store.id
+
+    def upload_documents(
+        self,
+        vector_store_id: str,
+        file_paths: List[str],
+        metadata: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> List[str]:
+        """Upload documents to vector store.
+
+        Args:
+            vector_store_id: Target vector store
+            file_paths: List of file paths to upload
+            metadata: Optional metadata per file (keyed by filename)
+
+        Returns:
+            List of file IDs
+        """
+        file_ids = []
+
+        for path in file_paths:
+            with open(path, "rb") as f:
+                file = self.client.files.create(file=f, purpose="assistants")
+
+                # Add to vector store with optional metadata
+                attrs = metadata.get(path, {}) if metadata else {}
+                self.client.vector_stores.files.create(
+                    vector_store_id=vector_store_id,
+                    file_id=file.id,
+                    attributes=attrs if attrs else None
+                )
+                file_ids.append(file.id)
+
+        return file_ids
+
+    def create_rag_agent(
+        self,
+        name: str,
+        vector_store_id: str,
+        instructions: str,
+        max_results: int = 5,
+        include_escalation: bool = True
+    ) -> Agent[RAGSkillContext]:
+        """Create a RAG-enabled agent.
+
+        Args:
+            name: Agent name
+            vector_store_id: Vector store to search
+            instructions: Agent instructions
+            max_results: Max search results per query
+            include_escalation: Whether to add escalation tool
+
+        Returns:
+            Configured RAG agent
+        """
+        tools = [
+            FileSearchTool(
+                vector_store_ids=[vector_store_id],
+                max_num_results=max_results
+            )
+        ]
+
+        if include_escalation:
+            @function_tool
+            def escalate_to_human(query: str, reason: str) -> str:
+                """Escalate when documentation doesn't have the answer."""
+                return f"Escalated: {query}. Reason: {reason}"
+
+            tools.append(escalate_to_human)
+
+        return Agent[RAGSkillContext](
+            name=name,
+            instructions=instructions,
+            tools=tools
+        )
+
+# Example usage
+def demo_rag_skill():
+    """Demonstrate the RAG skill pattern."""
+
+    builder = RAGSkillBuilder()
+
+    # Step 1: Create vector store
+    vs_id = builder.create_vector_store(
+        name="DemoKnowledgeBase",
+        chunk_size=1200,
+        expiration_days=1
+    )
+    print(f"Created vector store: {vs_id}")
+
+    # Step 2: Upload documents (assuming files exist)
+    # file_ids = builder.upload_documents(
+    #     vs_id,
+    #     ["docs/guide.md", "docs/faq.md"],
+    #     metadata={"docs/guide.md": {"category": "tutorial"}}
+    # )
+
+    # Step 3: Create RAG agent
+    agent = builder.create_rag_agent(
+        name="KnowledgeExpert",
+        vector_store_id=vs_id,
+        instructions="""You are a knowledge base expert.
+        Search documentation to answer questions.
+        Always cite your sources.
+        Escalate if information isn't available.""",
+        max_results=3
+    )
+
+    print(f"Created agent: {agent.name}")
+    return agent
+
+# Skill metadata for discovery
+SKILL_METADATA = {
+    "name": "agentic-rag-pattern",
+    "description": "Build knowledge-grounded agents with FileSearchTool",
+    "components": ["vector_store", "file_upload", "filesearchtool", "citations"],
+    "use_cases": ["documentation", "knowledge_base", "customer_support"],
+    "layer": 3  # Intelligence Design
+}
+
+
+Output:
+
+Created vector store: vs_demo123...
+Created agent: KnowledgeExpert
+
+
+This skill encapsulates the RAG pattern for reuse across projects. Store it as skills/agentic-rag-pattern/skill.py and import when building knowledge-grounded agents.
+
+Progressive Project: Support Desk Assistant​
+
+Your Support Desk looks up live documentation via MCP, but you also have an internal knowledge base---FAQs, troubleshooting guides, product manuals. In Lesson 8, you added MCP integration. Now you'll add RAG with FileSearchTool for your uploaded knowledge base.
+
+What You're Building​
+
+Add a knowledge base with:
+
+Document Type	Purpose
+FAQ.md	Common questions and answers
+Troubleshooting.md	Step-by-step problem resolution
+ProductManual.md	Detailed product specifications
+Adding Knowledge Base RAG​
+
+Now it's your turn to extend the Support Desk from Lesson 8. Using the patterns you learned above, add RAG capabilities so the agent can answer questions from your uploaded documentation.
+
+Step 1: Enhance your context model for citation tracking
+
+Update your SupportContext class to track:
+
+Customer ID and name
+List of citations returned from searches
+Whether escalation is needed (for queries not found in KB)
+
+Step 2: Create a setup_knowledge_base() function
+
+Using the Creating a Vector Store and Custom Chunking Strategy sections as reference, create a function that:
+
+Creates a vector store with custom chunking (1200 tokens for FAQ content)
+Sets an expiration policy (e.g., 30 days) for cost management
+Returns the vector store ID
+
+Step 3: Create sample knowledge base documents
+
+Create three markdown files with support content:
+
+FAQ.md - Return policy, refund timing, shipping information
+Troubleshooting.md - WiFi connection issues, disconnection problems
+ProductManual.md - Product specifications, warranty information
+
+Step 4: Upload documents to the vector store
+
+Using the Uploading Documents section as reference, write code to:
+
+Create temp files from your content
+Upload each file to OpenAI with purpose="assistants"
+Add each file to your vector store
+Print confirmation for each uploaded file
+
+Step 5: Create a create_kb_support_agent() function
+
+Create a function that:
+
+Takes the vector store ID as a parameter
+Creates a FileSearchTool using the Configuring FileSearchTool section
+Sets max_num_results=5 for balanced retrieval
+Returns an Agent configured to always search the knowledge base before answering
+
+Step 6: Update your agent instructions
+
+Update your support desk agent instructions to:
+
+Always use file_search for product questions, policies, and troubleshooting
+Cite sources with "According to [document name]..."
+Clearly indicate when information isn't found in the knowledge base
+Never guess or make up information
+
+Step 7: Create a run_kb_support() function
+
+Create a function that:
+
+Takes an agent, customer name, and question
+Creates the context with customer information
+Runs the agent and prints the response
+Attempts to extract and display citations from the response
+
+Step 8: Create a demo scenario
+
+Write a demo_kb_support() function that:
+
+Sets up the knowledge base
+Creates the agent
+Tests four queries:
+A return policy question (should cite FAQ.md)
+A WiFi troubleshooting question (should cite Troubleshooting.md)
+A product specs question (should cite ProductManual.md)
+A question not in the KB (should indicate information not found)
+
+When you run your demo, you should see the agent citing specific documents for each answer.
+
+Extension Challenge​
+
+Add metadata filtering for product-specific knowledge:
+
+file_search = FileSearchTool(
+    vector_store_ids=[vector_store_id],
+    filters={"product": "SmartHub Pro"}  # Only search SmartHub docs
+)
+
+What's Next​
+
+You've built a complete Support Desk with tools, handoffs, guardrails, sessions, tracing, MCP, and RAG. In the capstone, you'll put it all together into a production-ready Customer Support Digital FTE.
+
+Bonus Challenges​
+Multi-tenant: Support multiple documentation sets with metadata filtering
+Freshness: Add document version tracking and alert on stale content
+Analytics: Track which documents are most frequently cited
+Hybrid search: Combine FileSearchTool with WebSearchTool for complete coverage
+Try With AI​
+
+Use your AI companion to explore RAG patterns further.
+
+Prompt 1: Optimize Chunking Strategy​
+I'm building a RAG agent for technical API documentation. The docs include:
+- Method signatures with parameters
+- Code examples (Python, JavaScript)
+- Detailed explanations
+- Cross-references to related methods
+
+Help me design a chunking strategy that:
+1. Keeps code examples intact
+2. Preserves method signature context
+3. Handles cross-references appropriately
+
+Show me the vector store configuration and explain the tradeoffs.
+
+
+What you're learning: Chunking strategy directly impacts retrieval quality. Poor chunking splits important context across chunks, reducing answer accuracy. You're developing intuition for content-aware chunking.
+
+Prompt 2: Build Citation Display​
+My RAG agent returns responses with citations, but I need to display them
+nicely in a web interface. Help me:
+
+1. Parse the annotation structure from OpenAI responses
+2. Extract file names, sections, and confidence scores
+3. Format citations as clickable references
+4. Handle cases where multiple chunks from the same file are cited
+
+Show me the parsing code and a sample UI component (React or HTML).
+
+
+What you're learning: Citation handling for production UX. Users need to verify AI-generated information; well-designed citation displays build trust and enable fact-checking.
+
+Prompt 3: Design a Knowledge Update Workflow​
+My documentation changes frequently. I need a workflow to keep my vector
+store current:
+
+1. Detect when source documents change (git webhook, file watcher)
+2. Remove outdated file from vector store
+3. Upload and index the new version
+4. Verify the update succeeded
+
+Design this workflow and show me the code for each step. Include error
+handling for partial failures.
+
+
+What you're learning: Knowledge base maintenance for production systems. Stale documentation leads to incorrect answers. You're building the operational patterns for keeping RAG systems current.
+
+Safety Note​
+
+RAG systems require careful data handling:
+
+Data privacy: Documents uploaded to vector stores are stored on OpenAI's infrastructure. Don't upload confidential or PII-containing documents without appropriate data processing agreements.
+Access control: Vector store IDs grant search access. Treat them as sensitive credentials.
+Citation accuracy: While citations point to source documents, verify that the LLM accurately represented the content. Hallucinations can occur even with RAG.
+Cost awareness: Vector store storage costs $0.10/GB/day after 1GB free. Search queries cost $0.0025 each. Set expiration policies and monitor usage.
+Content freshness: Establish processes to update vector stores when source documents change. Stale knowledge leads to incorrect answers.

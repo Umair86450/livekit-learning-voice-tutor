@@ -1,0 +1,534 @@
+Semantic Turn Detection & MCP Integration
+
+Your voice agent is mid-response, explaining how to reset a password, when the user interrupts: "No wait, I meant my account password, not my email."
+
+What happens next determines whether your agent feels intelligent or frustrating. Does it keep talking, ignoring the correction? Does it stop but then continue the wrong explanation? Or does it immediately stop, understand the correction, and respond to what the user actually needs?
+
+The difference between these experiences comes down to two capabilities: semantic turn detection (knowing when a user has truly finished speaking) and proper interruption handling (responding gracefully when they haven't). Add MCP integration, and your voice agent gains the ability to actually do things - query databases, read files, call APIs - all through natural conversation.
+
+This lesson gives you the implementation patterns that transform a voice agent from a conversation simulator into a capable Digital FTE.
+
+The Turn Detection Problem​
+
+Fixed silence thresholds create a fundamental tradeoff that cannot be won:
+
+The Silence Threshold Dilemma
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  Threshold too short (200-300ms):                               │
+│  ├── User: "I need to check my... [thinking]"                   │
+│  └── Agent: [interrupts] "How can I help you today?"            │
+│      Result: Cuts off users mid-thought                         │
+│                                                                 │
+│  Threshold too long (800-1000ms):                               │
+│  ├── User: "What's my account balance?"                         │
+│  └── Agent: [waits 1 second] "Your balance is..."               │
+│      Result: Awkward pauses after every sentence                │
+│                                                                 │
+│  No fixed value works for both cases.                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Real humans solve this problem unconsciously. When someone says "I understand your point, but..." you wait, even if they pause for several seconds. When someone says "Thanks, that's all I needed," you respond immediately, even if they're still technically speaking.
+
+The difference is semantic understanding, not timing.
+
+What Semantic Detection Changes​
+
+LiveKit's transformer-based turn detection analyzes what users say, not just when they stop saying it:
+
+User Says	Fixed Silence (500ms)	Semantic Detection
+"Let me think... um..."	End of turn (wrong)	Wait - incomplete thought
+"The answer is 42."	Wait 500ms	End of turn - complete
+"I need to, uh, check something"	End of turn (wrong)	Wait - filler words indicate continuation
+"Thanks, goodbye!"	Wait 500ms	End of turn - farewell detected
+
+According to LiveKit's testing, their improved end-of-turn model reduces unwanted interruptions by 39% compared to silence-only detection.
+
+Implementing Semantic Turn Detection​
+
+LiveKit Agents provides the TurnDetector class that uses a transformer model (Qwen2.5-0.5B-Instruct) to evaluate semantic completeness. The model runs locally on CPU, requires less than 500 MB of RAM, and adds minimal latency.
+
+Basic Configuration​
+from livekit.agents import VoicePipelineAgent
+from livekit.plugins import openai, silero
+
+# Create voice agent with semantic turn detection
+agent = VoicePipelineAgent(
+    vad=silero.VAD.load(),           # Voice Activity Detection
+    stt=openai.STT(),                # Speech-to-Text
+    llm=openai.LLM(),                # Language Model
+    tts=openai.TTS(),                # Text-to-Speech
+    turn_detector=openai.TurnDetector(),  # Semantic turn detection
+)
+
+
+Output:
+
+Agent initialized with semantic turn detection
+Turn detector model: multilingual (14 languages supported)
+Inference: local CPU, <500MB RAM
+
+
+The TurnDetector works by dynamically adjusting VAD silence timeouts. When the transformer predicts the user hasn't finished speaking (low end-of-utterance probability), the agent waits longer. When it predicts completion, the agent responds immediately.
+
+How the Model Works​
+Semantic Turn Detection Pipeline
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  User speech ──► VAD detects silence ──► Check transformer     │
+│                                              │                  │
+│                                  ┌───────────┴───────────┐      │
+│                                  ▼                       ▼      │
+│                         EOU probability           EOU probability
+│                             < 0.5                    >= 0.5     │
+│                              │                         │        │
+│                              ▼                         ▼        │
+│                      Extend timeout              End turn       │
+│                      (keep listening)         (respond now)     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+EOU = End of Utterance
+
+
+The transformer evaluates the semantic content of what was said. "I need to..." has low EOU probability (incomplete). "I need help with my password." has high EOU probability (complete request).
+
+Tuning for Your Use Case​
+
+Different applications require different sensitivity settings:
+
+from livekit.plugins import openai
+
+# Configuration for thoughtful conversations (customer support)
+thoughtful_detector = openai.TurnDetector(
+    min_endpointing_delay=0.5,  # Wait at least 500ms before checking
+    max_endpointing_delay=3.0,  # Never wait more than 3 seconds
+    unlikely_threshold=0.1,     # Low threshold = more patience
+)
+
+# Configuration for quick transactions (order status, balance checks)
+quick_detector = openai.TurnDetector(
+    min_endpointing_delay=0.2,  # Check after 200ms
+    max_endpointing_delay=1.5,  # Max 1.5 second wait
+    unlikely_threshold=0.3,     # Higher threshold = faster response
+)
+
+
+Output:
+
+thoughtful_detector: Configured for 500-3000ms response window
+quick_detector: Configured for 200-1500ms response window
+
+Parameter	Description	Lower Value	Higher Value
+min_endpointing_delay	Minimum silence before checking	Faster but more interruptions	Slower but safer
+max_endpointing_delay	Maximum wait regardless of model	Responsive but may cut off	Patient but may lag
+unlikely_threshold	EOU probability threshold	More patient	More responsive
+Handling Barge-In Interruptions​
+
+Barge-in occurs when a user speaks while the agent is still speaking. Proper handling requires:
+
+Detecting the interruption immediately
+Stopping agent speech
+Clearing any partial response state
+Listening to the user's new input
+Responding to the correction, not the original topic
+Basic Barge-In Implementation​
+from livekit.agents import VoicePipelineAgent
+from livekit.agents.pipeline import AgentTranscriptionOptions
+
+agent = VoicePipelineAgent(
+    vad=silero.VAD.load(),
+    stt=openai.STT(),
+    llm=openai.LLM(),
+    tts=openai.TTS(),
+    turn_detector=openai.TurnDetector(),
+    allow_interruptions=True,  # Enable barge-in detection
+    interrupt_speech_duration=0.5,  # 500ms of speech triggers interrupt
+    interrupt_min_words=2,  # Require at least 2 words to interrupt
+)
+
+@agent.on("agent_speech_interrupted")
+async def handle_interruption(event):
+    """Called when user interrupts agent speech."""
+    print(f"Interrupted after: {event.text_spoken}")
+    # Agent automatically stops speaking and listens
+
+
+Output:
+
+Agent speaking: "To reset your password, first go to settings..."
+User interrupts: "No wait, I meant..."
+Agent speech interrupted after: "To reset your password, first go to"
+Agent listening to user...
+
+State Management During Interruptions​
+
+When a user interrupts, you may need to clear partial state:
+
+class InterruptibleAgent:
+    def __init__(self):
+        self.current_response_context = None
+        self.partial_tool_calls = []
+
+    async def on_interruption(self, event):
+        """Clean up state when user interrupts."""
+        # Clear any in-progress tool calls
+        for tool_call in self.partial_tool_calls:
+            await tool_call.cancel()
+        self.partial_tool_calls = []
+
+        # Reset response context
+        self.current_response_context = None
+
+        # Log for debugging
+        print(f"Cleared state after interruption at: {event.text_spoken}")
+
+    async def handle_user_correction(self, new_input: str):
+        """Process user's correction after interruption."""
+        # The new input is the correction, not a continuation
+        # Treat it as a fresh request
+        return await self.process_request(new_input, is_correction=True)
+
+
+Output:
+
+User: "What's the status of order 12345?"
+Agent: "Looking up order 12345. The order was placed on..."
+User: "Wait, I meant order 54321"
+[Clearing partial state: 1 pending tool call cancelled]
+Agent: "Looking up order 54321. That order shipped yesterday and..."
+
+MCP Integration for Voice Agents​
+
+Model Context Protocol (MCP) provides a standardized way to connect external tools to AI systems. LiveKit Agents has native MCP support, allowing you to connect existing MCP servers with minimal code.
+
+The Integration Pattern​
+
+MCP servers expose tools through a standard protocol. LiveKit Agents can consume these tools and invoke them during voice conversations:
+
+Voice + MCP Integration
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  User: "How many tasks are due today?"                          │
+│           │                                                     │
+│           ▼                                                     │
+│  ┌─────────────────┐                                            │
+│  │  Voice Agent    │                                            │
+│  │  (LiveKit)      │                                            │
+│  └────────┬────────┘                                            │
+│           │ Tool call: list_tasks(status="due_today")           │
+│           ▼                                                     │
+│  ┌─────────────────┐     ┌─────────────────┐                    │
+│  │  MCP Client     │────►│  MCP Server     │                    │
+│  │  (in agent)     │◄────│  (Task Manager) │                    │
+│  └─────────────────┘     └─────────────────┘                    │
+│           │                                                     │
+│           ▼                                                     │
+│  Agent: "You have 3 tasks due today: Review proposal,           │
+│          Submit report, and Call vendor."                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Connecting an MCP Server​
+from livekit.agents import VoicePipelineAgent
+from livekit.agents.mcp import MCPServerStdio
+
+# Connect to a local MCP server via stdio
+task_manager_mcp = MCPServerStdio(
+    command="python",
+    args=["task_manager_mcp_server.py"],
+)
+
+# Create agent with MCP tools
+async def create_agent_with_mcp():
+    # Start MCP server and get available tools
+    await task_manager_mcp.start()
+    tools = await task_manager_mcp.list_tools()
+
+    agent = VoicePipelineAgent(
+        vad=silero.VAD.load(),
+        stt=openai.STT(),
+        llm=openai.LLM(),
+        tts=openai.TTS(),
+        turn_detector=openai.TurnDetector(),
+        tools=tools,  # MCP tools available to the agent
+    )
+
+    return agent
+
+
+Output:
+
+MCP Server started: task_manager_mcp_server.py
+Available tools: ['list_tasks', 'create_task', 'complete_task', 'get_task_details']
+Agent created with 4 MCP tools
+
+Handling Tool Calls in Voice Context​
+
+Voice agents need to handle tool execution differently than text agents. Users are waiting for a response, so long operations need filler speech:
+
+from livekit.agents import function_tool
+
+@function_tool(
+    description="Get tasks by status from Task Manager",
+    filler_speech="Let me check that for you...",  # Speak while tool runs
+)
+async def list_tasks(status: str) -> list[dict]:
+    """Query Task Manager for tasks by status."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"http://localhost:8000/api/tasks",
+            params={"status": status}
+        )
+        return response.json()
+
+@function_tool(
+    description="Create a new task in Task Manager",
+    filler_speech="Creating that task now...",
+)
+async def create_task(title: str, due_date: str) -> dict:
+    """Create a new task with the given title and due date."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8000/api/tasks",
+            json={"title": title, "due_date": due_date}
+        )
+        return response.json()
+
+
+Output:
+
+User: "Create a task to review the proposal by Friday"
+Agent: "Creating that task now..."
+[Tool call: create_task(title="Review proposal", due_date="2026-01-03")]
+Agent: "Done! I've created a task 'Review proposal' due Friday January 3rd."
+
+Filler Speech Patterns​
+
+Different operations benefit from different filler patterns:
+
+Operation Type	Filler Duration	Example
+Database query (<500ms)	Short/none	"Here it is..."
+API call (500-2000ms)	Medium	"Let me check that for you..."
+Complex operation (2-5s)	Progressive	"Working on that... almost there..."
+Very long (>5s)	With updates	"This might take a moment. [update every 3s]"
+async def progressive_filler(agent, operation_name: str):
+    """Provide progressive filler for long operations."""
+    fillers = [
+        f"Working on {operation_name}...",
+        "Almost there...",
+        "Just a moment longer...",
+    ]
+
+    for i, filler in enumerate(fillers):
+        await asyncio.sleep(3)  # Update every 3 seconds
+        if not operation_complete:
+            await agent.say(filler)
+
+Best Practices for Voice + MCP​
+
+Keep tool count manageable. LLMs can struggle to select the right tool when presented with too many options:
+
+# Good: Focused tool set (10-20 tools)
+task_tools = [
+    list_tasks,      # Query tasks
+    create_task,     # Create task
+    complete_task,   # Mark complete
+    get_details,     # Get task details
+]
+
+# Avoid: Too many tools (50+)
+# LLM accuracy drops significantly with large tool sets
+
+
+Tool Count Guidelines:
+
+Tool Count	LLM Accuracy	Recommendation
+1-10	95%+	Optimal for voice agents
+11-20	90%+	Acceptable with clear descriptions
+21-50	75-90%	Consider routing to specialized agents
+50+	<75%	Split into multiple agents
+Putting It Together: Complete Voice Agent​
+
+Here's a complete implementation combining semantic turn detection, barge-in handling, and MCP integration:
+
+import asyncio
+from livekit.agents import VoicePipelineAgent, function_tool
+from livekit.agents.mcp import MCPServerStdio
+from livekit.plugins import openai, silero
+
+# Configure semantic turn detection for support conversations
+turn_detector = openai.TurnDetector(
+    min_endpointing_delay=0.4,
+    max_endpointing_delay=2.5,
+    unlikely_threshold=0.15,
+)
+
+# MCP tools for Task Manager
+@function_tool(description="List tasks by status", filler_speech="Checking your tasks...")
+async def list_tasks(status: str = "all") -> list[dict]:
+    """Get tasks from Task Manager API."""
+    # Implementation here
+    pass
+
+@function_tool(description="Create a new task", filler_speech="Creating that...")
+async def create_task(title: str, due_date: str | None = None) -> dict:
+    """Create a task in Task Manager."""
+    # Implementation here
+    pass
+
+@function_tool(description="Mark a task complete", filler_speech="Marking that done...")
+async def complete_task(task_id: str) -> dict:
+    """Complete a task by ID."""
+    # Implementation here
+    pass
+
+# Create the voice agent
+agent = VoicePipelineAgent(
+    vad=silero.VAD.load(),
+    stt=openai.STT(model="whisper-1"),
+    llm=openai.LLM(model="gpt-4o-mini"),
+    tts=openai.TTS(voice="nova"),
+    turn_detector=turn_detector,
+    allow_interruptions=True,
+    interrupt_speech_duration=0.5,
+    interrupt_min_words=2,
+    tools=[list_tasks, create_task, complete_task],
+)
+
+# Handle interruptions
+@agent.on("agent_speech_interrupted")
+async def on_interrupt(event):
+    print(f"User interrupted: '{event.user_speech}'")
+    print(f"Agent stopped at: '{event.text_spoken}'")
+
+# Run the agent
+async def main():
+    await agent.start()
+    print("Voice agent running with:")
+    print("- Semantic turn detection (0.4-2.5s window)")
+    print("- Barge-in handling enabled")
+    print("- 3 MCP tools connected")
+
+
+Output:
+
+Voice agent running with:
+- Semantic turn detection (0.4-2.5s window)
+- Barge-in handling enabled
+- 3 MCP tools connected
+
+[Conversation]
+User: "What tasks do I have due this week?"
+Agent: "Checking your tasks... You have 5 tasks due this week:
+        Review proposal due Tuesday, Submit report due Wednesday..."
+User: "Wait, mark the proposal one as done"
+[Interrupted at: "Review proposal due Tuesday, Submit"]
+Agent: "Marking that done... Done! I've completed 'Review proposal'."
+
+Improve Your Skill: Turn Detection Patterns​
+
+Now that you understand semantic turn detection and MCP integration, update your livekit-agents skill with these patterns.
+
+What to add to your skill:
+
+Turn Detection Configuration - Guidance on tuning parameters for different use cases
+Barge-In Patterns - State management and response switching
+MCP Integration - Tool connection and filler speech patterns
+Tool Count Guidelines - When to split into multiple agents
+
+Open your skill and add a section:
+
+## Turn Detection & MCP Patterns
+
+### Configuring Turn Detection
+
+For customer support (thoughtful):
+- min_endpointing_delay: 0.5s
+- max_endpointing_delay: 3.0s
+- unlikely_threshold: 0.1
+
+For quick transactions:
+- min_endpointing_delay: 0.2s
+- max_endpointing_delay: 1.5s
+- unlikely_threshold: 0.3
+
+### MCP Integration Checklist
+- [ ] Keep tools to 10-20 max for accuracy
+- [ ] Add filler_speech for operations >500ms
+- [ ] Handle tool errors gracefully with spoken feedback
+- [ ] Test each tool via voice before production
+
+Try With AI​
+Prompt 1: Tune Turn Detection for Your Domain​
+I'm building a voice agent for [your use case: customer support / sales /
+scheduling / technical support].
+
+My users tend to:
+- [Speak quickly / pause to think / use filler words]
+- [Get straight to the point / explain context first]
+- [Interrupt frequently / wait politely]
+
+Help me configure LiveKit's TurnDetector:
+
+1. What min_endpointing_delay would you recommend?
+2. What max_endpointing_delay fits my use case?
+3. What unlikely_threshold balances responsiveness and patience?
+4. What test scenarios should I use to validate settings?
+
+I want specific numbers and reasoning, not generic advice.
+After we configure it, I'll test with real speech and report what's working.
+
+
+What you're learning: Configuration tuning is domain-specific. A call center agent needs different settings than a meditation app. The right parameters depend on how YOUR users actually speak.
+
+Prompt 2: Design MCP Tool Integration​
+I have an existing MCP server that provides these tools:
+
+[List your actual MCP tools, or use this example:]
+- list_items(category: str) -> Returns items by category
+- create_item(name: str, details: str) -> Creates new item
+- update_item(id: str, changes: dict) -> Updates existing item
+- delete_item(id: str) -> Deletes item
+- get_analytics(timeframe: str) -> Returns usage statistics
+
+Help me design the voice integration:
+
+1. Which tools make sense for voice interaction?
+2. What filler speech should each tool use?
+3. How should I phrase tool descriptions for the LLM?
+4. What spoken error messages should each failure mode produce?
+5. Are there any tools I should NOT expose via voice? Why?
+
+I want a complete integration plan I can implement.
+
+
+What you're learning: Not every tool is suitable for voice. Some operations (delete, complex analytics) may need confirmation flows. The design of spoken interactions differs from text-based ones.
+
+Prompt 3: Handle Edge Cases Robustly​
+My voice agent using LiveKit sometimes behaves unexpectedly. Help me
+handle these edge cases:
+
+1. User says "um" and pauses for 5 seconds - agent interrupts
+2. Tool call takes 4 seconds - user hears silence, thinks agent crashed
+3. User interrupts during tool execution - partial results are confusing
+4. MCP server is temporarily unavailable - agent says "error occurred"
+5. User speaks very softly - VAD doesn't detect speech
+
+For each case:
+- What's happening technically?
+- What should the user experience be?
+- What code changes would fix it?
+
+I want robust patterns I can use for production deployment.
+
+
+What you're learning: Production voice agents need graceful degradation. Every failure mode should have a human-friendly response. The difference between a prototype and a product is how it handles edge cases.
+
+Safety Note​
+
+When configuring turn detection thresholds, remember that overly aggressive settings can frustrate users by cutting them off, while overly conservative settings create awkward pauses. Start with LiveKit's defaults and adjust based on real user feedback, not assumptions about how users "should" speak.
+
+For MCP tool integration, implement proper error handling before exposing tools to voice. A text error message is annoying; a spoken error message breaks the conversational flow entirely. Plan for every failure mode.

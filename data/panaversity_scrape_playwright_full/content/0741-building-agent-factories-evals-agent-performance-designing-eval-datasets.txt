@@ -1,0 +1,461 @@
+Designing Eval Datasets
+
+You have decided to build systematic evaluations for your agent. Now comes the question that stops most teams: How many test cases do you need?
+
+Your instinct says more is better. A thousand test cases must be more thorough than twenty. Enterprise software has thousands of unit tests. Why would agent evaluation be different?
+
+Here is why that instinct is wrong, and what to do instead.
+
+The Paralysis Problem​
+
+Teams building agent evaluations often fall into one of two traps:
+
+Trap 1: Perfection paralysis. "We need a comprehensive dataset before we can start evaluating." The team spends weeks designing taxonomy, debating coverage, building elaborate labeling systems. Meanwhile, the agent ships without any evaluation at all because the "comprehensive" dataset is never finished.
+
+Trap 2: Volume delusion. "We generated 5,000 synthetic test cases, so our coverage must be good." The team runs evaluations, sees 94% pass rate, ships confidently. Then production failures emerge in patterns the synthetic data never captured.
+
+Both traps share the same root cause: confusing quantity with quality.
+
+Quality Over Quantity: The Andrew Ng Insight​
+
+Andrew Ng, who has advised hundreds of teams building AI systems, offers a counterintuitive directive:
+
+"Quick and dirty evals is fine to get started. 10-20 examples... You don't have to have a thousand examples to get started."
+
+Why does this work? Because the bottleneck in agent improvement is not data volume. It is understanding WHY things fail.
+
+Ten thoughtful cases tell you:
+
+Which specific scenarios break your agent
+What patterns of failure repeat
+Where to focus improvement efforts
+
+One thousand random cases tell you:
+
+A pass rate number
+Very little about WHY failures occur
+Almost nothing actionable about how to improve
+
+The purpose of evaluation is not to generate a score. It is to drive improvement. A small dataset that reveals failure patterns is infinitely more valuable than a large dataset that hides them in noise.
+
+The Three-Category Framework​
+
+Every eval dataset should cover three categories with different purposes:
+
+Category	Count	Purpose	What it tests
+Typical	10	Common use cases	Does the agent handle normal requests well?
+Edge	5	Unusual but valid	Does the agent handle uncommon situations gracefully?
+Error	5	Should fail gracefully	Does the agent recognize when it cannot help and respond appropriately?
+Typical Cases (10)​
+
+These are the bread-and-butter scenarios your agent was designed for. If it fails these, nothing else matters.
+
+Characteristics:
+
+Represent the most common 80% of real usage
+Clear user intent, reasonable complexity
+Success criteria are well-defined
+These should have HIGH pass rates (90%+)
+
+Example for Task API agent:
+
+"Create a task called 'Buy groceries' for tomorrow"
+"Show me my tasks for this week"
+"Mark the dentist appointment as done"
+"What's my highest priority task?"
+
+
+Why 10 cases? Not arbitrary. Ten typical cases cover the core user journeys without redundancy. If you find yourself writing similar cases repeatedly, you have enough.
+
+Edge Cases (5)​
+
+These are unusual but valid requests. Users do weird things. Your agent should handle them.
+
+Characteristics:
+
+Uncommon but legitimate use cases
+May require the agent to make judgment calls
+Success might mean "reasonable response" not "perfect response"
+Acceptable pass rate is lower (70-80%)
+
+Example for Task API agent:
+
+"Create a task with emoji title: '🎉 Birthday party planning'"
+"Schedule something for 'next week sometime'"
+"Add a task that repeats every other Thursday except holidays"
+"Create 15 tasks at once from this list: ..."
+
+
+Why 5 cases? Edge cases have diminishing returns. The first few reveal whether your agent handles ambiguity. More than five typically find the same class of issues repeatedly.
+
+Error Cases (5)​
+
+These are requests where your agent SHOULD fail gracefully. Not every request is valid. A good agent recognizes its limitations.
+
+Characteristics:
+
+Requests outside the agent's capabilities
+Malformed or nonsensical inputs
+Should NOT succeed (success here is actually failure)
+Tests graceful degradation
+
+Example for Task API agent:
+
+"Delete all my tasks" (if agent lacks delete capability)
+"What's the weather tomorrow?" (outside task domain)
+"asdfghjkl" (nonsense input)
+"Create task for yesterday" (impossible request)
+"Hack into the mainframe" (inappropriate request)
+
+
+Why 5 cases? Error handling has clear patterns. A handful of cases verify the agent recognizes different failure modes: out of scope, malformed, impossible, inappropriate.
+
+Using REAL Data​
+
+Here is where most evaluation efforts go wrong: synthetic data.
+
+Synthetic data is test cases you imagine users might submit. It is clean, well-formed, and represents how you THINK users behave.
+
+Real data is actual user queries from production logs, support tickets, and customer feedback. It is messy, unexpected, and represents how users ACTUALLY behave.
+
+The gap between synthetic and real data is enormous:
+
+Synthetic Data	Real Data
+"Create a task for tomorrow"	"can u remind me 2 call mom tmrw"
+"What tasks are due this week?"	"whats due"
+"Mark task as complete"	"done with that thing I added yesterday"
+Clean grammar, clear intent	Typos, abbreviations, assumed context
+Where to Find Real Data​
+
+Your production system already contains gold for evaluation:
+
+1. Application logs
+
+Actual user inputs and agent responses
+Filter for sessions with negative feedback or repeated attempts
+Look for queries that led to support tickets
+
+2. Support tickets
+
+User complaints describe exactly what failed
+"I asked for X but got Y" is a perfect eval case
+Support volume indicates which failures matter most
+
+3. User feedback
+
+Thumbs down, negative ratings, explicit complaints
+Each piece of negative feedback is a potential eval case
+Positive feedback can validate typical cases
+
+4. Session recordings
+
+Multi-turn conversations where users gave up
+Indicates where agent behavior frustrated users
+Reveals context-dependent failures
+Mining Real Data: A Process​
+1. Export last 30 days of user queries
+        |
+        v
+2. Filter for signals:
+   - Negative feedback
+   - Multiple attempts (retry pattern)
+   - Support ticket creation
+   - Abandoned sessions
+        |
+        v
+3. Sample 50-100 candidates
+        |
+        v
+4. Classify into categories:
+   - Typical (should work)
+   - Edge (unusual but valid)
+   - Error (should fail gracefully)
+        |
+        v
+5. Select 20 diverse cases
+
+Eval Case Structure​
+
+Every eval case needs three components:
+
+{
+  "id": "unique-identifier",
+  "category": "typical | edge | error",
+  "input": {
+    "user_message": "The actual user input",
+    "context": {
+      "prior_messages": [],
+      "user_state": {}
+    }
+  },
+  "expected_behavior": {
+    "should_succeed": true,
+    "criteria": [
+      "criterion_1",
+      "criterion_2"
+    ],
+    "expected_output_pattern": "optional regex or template"
+  },
+  "rationale": "Why this case matters and what it tests"
+}
+
+Example: Complete Eval Case​
+{
+  "id": "typical-003",
+  "category": "typical",
+  "input": {
+    "user_message": "remind me to call mom tomorrow at 3pm",
+    "context": {
+      "prior_messages": [],
+      "user_state": {
+        "timezone": "America/New_York"
+      }
+    }
+  },
+  "expected_behavior": {
+    "should_succeed": true,
+    "criteria": [
+      "Creates a task (not a calendar event)",
+      "Title contains 'call mom' or equivalent",
+      "Due date is tomorrow",
+      "Time is 3pm in user's timezone",
+      "Reminder is set (not just due date)"
+    ],
+    "expected_output_pattern": null
+  },
+  "rationale": "Tests natural language time parsing and task vs reminder distinction - common user pattern from production logs"
+}
+
+The Rationale Field​
+
+The rationale field is often skipped but essential. It captures:
+
+Why this case was included
+What specific behavior it tests
+Where it came from (production data reference)
+
+Without rationale, six months later you cannot remember why a case exists or whether it still matters. With rationale, your eval dataset is self-documenting.
+
+When to Grow Your Dataset​
+
+Start with 20 cases. But when do you need more?
+
+Signal that you need more cases:
+
+You observe a production failure that NO eval case covers
+                    |
+                    v
+You add eval cases that capture this failure pattern
+                    |
+                    v
+You verify the new cases fail (confirming the bug)
+                    |
+                    v
+You fix the agent
+                    |
+                    v
+New cases now pass (confirming the fix)
+
+
+This is the eval-driven development loop. Your dataset grows organically as you discover gaps.
+
+Do NOT add cases because:
+
+"We should have more coverage" (vague, not actionable)
+"Competitive products have 10,000 cases" (irrelevant to YOUR agent)
+"We haven't updated the dataset in a while" (age is not a problem)
+
+DO add cases when:
+
+Production failure reveals an uncovered pattern
+New feature requires new test scenarios
+Error analysis shows a category is under-represented
+User feedback identifies a failure mode
+Exercise: Design a 20-Case Dataset for Task API​
+
+Your Task API agent helps users manage tasks through natural language. Design a complete eval dataset.
+
+Step 1: List typical cases (10)
+
+Think about the core user journeys:
+
+Creating tasks
+Viewing tasks
+Updating tasks
+Querying tasks
+
+For each, write a realistic user input (not synthetic "Create a task" commands).
+
+Step 2: List edge cases (5)
+
+Think about unusual but valid scenarios:
+
+Ambiguous time references
+Special characters in titles
+Multiple actions in one request
+Missing information that requires inference
+
+Step 3: List error cases (5)
+
+Think about what should fail gracefully:
+
+Requests outside task management domain
+Impossible requests (past dates, contradictory requirements)
+Missing required information with no reasonable default
+Potentially harmful requests
+
+Step 4: Add structure
+
+For each case, fill in:
+
+Input (user message + any context)
+Expected behavior (criteria for success/graceful failure)
+Rationale (why this case matters)
+
+Sample answer structure:
+
+ID	Category	Input	Key Criteria	Rationale
+T-01	Typical	"remind me to pick up dry cleaning tomorrow"	Creates task, tomorrow due date, reminder set	Common natural language pattern
+T-02	Typical	"what do I have due this week"	Lists tasks, filters by date range	Basic query pattern
+E-01	Edge	"add groceries and also schedule dentist for next tuesday"	Creates TWO tasks correctly	Multi-action request
+E-02	Edge	"task for 'meeting with @john re: $$$ deal'"	Handles special chars in title	Real user data often has special chars
+R-01	Error	"what's the weather"	Politely declines, stays in domain	Out of scope, should not attempt
+R-02	Error	"delete all my tasks forever"	Does not delete (no capability)	Tests capability boundaries
+Common Mistakes to Avoid​
+
+Mistake 1: All synthetic data
+
+Your imagination of user behavior differs from reality. Mine production data.
+
+Mistake 2: Only happy path
+
+A dataset of only typical cases tells you nothing about robustness. Include edge and error cases.
+
+Mistake 3: No rationale
+
+Cases without rationale become mysterious artifacts. Document WHY each case exists.
+
+Mistake 4: Waiting for completeness
+
+You will never have "complete" coverage. Start with 20 cases. Add more when production failures reveal gaps.
+
+Mistake 5: Ignoring error cases
+
+How your agent fails matters as much as how it succeeds. Graceful failure is a feature.
+
+Try With AI​
+Prompt 1: Extract Cases from User Feedback​
+I'm building eval cases for my [describe agent] from real user feedback.
+Here are some recent complaints from users:
+
+[Paste 5-10 real user complaints or negative feedback]
+
+Help me turn each complaint into a structured eval case with:
+- Input (what the user likely said)
+- Expected behavior (what should have happened)
+- Category (typical, edge, or error)
+- Rationale (what this case tests)
+
+
+What you're learning: Transforming unstructured user feedback into actionable evaluation cases. Real complaints reveal the gaps between your mental model and user reality.
+
+Prompt 2: Generate Edge Cases from Typical Cases​
+I have these typical eval cases for my Task API agent:
+
+[List your 10 typical cases]
+
+For each typical case, suggest ONE edge case variant that tests the same
+core functionality but with added complexity or ambiguity. Explain what
+additional behavior the edge case tests.
+
+
+What you're learning: Systematic edge case generation. Starting from solid typical cases and adding complexity is more effective than imagining edge cases from scratch.
+
+Prompt 3: Audit Your Dataset Balance​
+Here's my current eval dataset:
+
+[Paste your 20 cases]
+
+Audit this dataset for:
+1. Category balance: Do I have appropriate typical/edge/error distribution?
+2. Feature coverage: What agent capabilities are over/under-represented?
+3. Diversity: Are cases too similar to each other?
+4. Real vs synthetic: Which cases seem synthetic vs derived from real data?
+
+Suggest 3 specific improvements to make this dataset more useful.
+
+
+What you're learning: Critical evaluation of your own evaluation system. The meta-skill of auditing eval quality prevents the common trap of low-quality evals producing misleading confidence.
+
+Safety Note​
+
+When extracting eval cases from production data, ensure you handle user privacy appropriately. Remove personally identifiable information (PII) from user queries before including them in eval datasets. Never include actual user names, emails, or sensitive content in test cases. Anonymize and generalize while preserving the linguistic patterns that make real data valuable.
+
+Reflect on Your Skill​
+
+After completing this lesson, update your agent-evals skill with dataset design patterns:
+
+Add to your skill's Dataset Design section:
+
+### Dataset Design
+
+**Quality Over Quantity**: Start with 10-20 cases, not 1000.
+
+**Three-Category Framework**:
+
+|
+ Category 
+|
+ Count 
+|
+ Purpose 
+|
+
+
+|
+----------
+|
+-------
+|
+---------
+|
+
+
+|
+ Typical 
+|
+ 10 
+|
+ Common use cases - should have 90%+ pass rate 
+|
+
+
+|
+ Edge 
+|
+ 5 
+|
+ Unusual but valid - acceptable 70-80% pass rate 
+|
+
+
+|
+ Error 
+|
+ 5 
+|
+ Should fail gracefully - tests boundaries 
+|
+
+
+
+**Real Data Over Synthetic**: Mine production logs, support tickets,
+user feedback for authentic test cases.
+
+**Growth Trigger**: Add cases when production failures reveal gaps,
+not based on arbitrary coverage targets.
+
+**Case Structure**: Every case needs input, expected_behavior, rationale.
+
+
+Key insight to encode: The purpose of evaluation is improvement, not scoring. Twenty cases that reveal WHY things fail enable faster improvement than a thousand cases that only report WHAT percentage passes.

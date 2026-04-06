@@ -1,0 +1,566 @@
+Task API Function Calling
+
+You've learned tool-calling patterns and data generation techniques. Now you'll apply them to create a complete training dataset for Task API—the same API you've been building throughout Parts 5-7.
+
+By the end of this lesson, you'll have 500+ validated examples covering all four Task API tools with realistic user scenarios.
+
+Task API Tool Specifications​
+
+First, let's finalize the complete tool definitions based on your Task API from previous chapters:
+
+TASK_API_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": "Create a new task with title, optional due date, priority, and description. Use when user wants to add a new item to their task list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Task title. Should be concise but descriptive (2-10 words typical)."
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Due date in YYYY-MM-DD format. Omit if no due date mentioned."
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "Priority level. Defaults to 'medium' if not specified."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional longer description with task details."
+                    }
+                },
+                "required": ["title"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_task",
+            "description": "Update an existing task's properties. Use when user wants to modify a task they've already created. Requires task_id to identify which task to update.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Unique identifier of the task to update."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "New title. Only include if changing."
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "New due date in YYYY-MM-DD format."
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "New priority level."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New description."
+                    }
+                },
+                "required": ["task_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_task",
+            "description": "Mark a task as completed. Use when user indicates they've finished a task.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Unique identifier of the task to complete."
+                    }
+                },
+                "required": ["task_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tasks",
+            "description": "List tasks with optional filters. Use when user wants to see their tasks or find specific ones.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "completed", "all"],
+                        "description": "Filter by completion status. Defaults to 'pending'."
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "Filter by priority level."
+                    },
+                    "due_before": {
+                        "type": "string",
+                        "description": "Filter for tasks due before this date (YYYY-MM-DD)."
+                    }
+                }
+            }
+        }
+    }
+]
+
+System Prompt Template​
+
+Every training example uses this system prompt:
+
+SYSTEM_PROMPT = """You are TaskMaster, a task management assistant with a helpful, encouraging personality.
+
+You have access to the following tools for managing tasks:
+
+{tools}
+
+When the user asks to manage their tasks, call the appropriate tool with the correct arguments.
+When the user asks questions or wants conversation, respond naturally without calling tools.
+
+Guidelines:
+- Extract dates mentioned as "tomorrow", "next Friday", etc. into YYYY-MM-DD format
+- Infer priority from words like "urgent", "important" (high) or "whenever", "low priority" (low)
+- If a task_id is needed but not provided, ask the user which task they mean
+- Be encouraging and helpful in your responses after tool calls complete"""
+
+def build_system_prompt():
+    import json
+    tools_json = json.dumps(TASK_API_TOOLS, indent=2)
+    return SYSTEM_PROMPT.format(tools=tools_json)
+
+Scenario Categories​
+
+Organize your dataset by scenario type:
+
+Category 1: Simple Single-Tool Calls (200 examples)​
+
+These are straightforward requests mapping to one tool:
+
+SIMPLE_SCENARIOS = {
+    "create_task": [
+        # Minimal
+        ("Add a task to buy groceries", {"title": "Buy groceries"}),
+        ("New task: call mom", {"title": "Call mom"}),
+
+        # With priority
+        ("Create an urgent task for the budget review",
+         {"title": "Budget review", "priority": "high"}),
+        ("Add low priority task to organize desk",
+         {"title": "Organize desk", "priority": "low"}),
+
+        # With due date
+        ("Task for tomorrow: submit report",
+         {"title": "Submit report", "due_date": "2024-01-16"}),
+        ("Create task due Friday: prepare presentation",
+         {"title": "Prepare presentation", "due_date": "2024-01-19"}),
+
+        # Full details
+        ("High priority task: Review Q4 financials by Monday with detailed analysis",
+         {"title": "Review Q4 financials", "priority": "high",
+          "due_date": "2024-01-22", "description": "Detailed analysis"}),
+    ],
+
+    "update_task": [
+        # Change priority
+        ("Make the budget task high priority",
+         {"task_id": "task_123", "priority": "high"}),
+
+        # Change due date
+        ("Move the presentation to next week",
+         {"task_id": "task_456", "due_date": "2024-01-26"}),
+
+        # Change title
+        ("Rename 'Call mom' to 'Call parents'",
+         {"task_id": "task_789", "title": "Call parents"}),
+    ],
+
+    "complete_task": [
+        ("I finished the grocery shopping", {"task_id": "task_001"}),
+        ("Mark the report as done", {"task_id": "task_002"}),
+        ("Complete the budget review task", {"task_id": "task_003"}),
+    ],
+
+    "list_tasks": [
+        # No filters
+        ("What are my tasks?", {}),
+        ("Show me my to-do list", {}),
+
+        # Status filter
+        ("What have I completed?", {"status": "completed"}),
+        ("Show pending tasks", {"status": "pending"}),
+
+        # Priority filter
+        ("What are my high priority items?", {"priority": "high"}),
+
+        # Date filter
+        ("What's due this week?", {"due_before": "2024-01-21"}),
+
+        # Combined filters
+        ("Show high priority tasks due this week",
+         {"priority": "high", "due_before": "2024-01-21"}),
+    ]
+}
+
+Category 2: Phrasing Variations (150 examples)​
+
+Same intent, different words:
+
+CREATE_TASK_VARIATIONS = [
+    # Commands
+    "Add a task to {}",
+    "Create a task for {}",
+    "New task: {}",
+    "Task: {}",
+    "Add {} to my list",
+
+    # Requests
+    "Can you add a task for {}?",
+    "I need to {}",
+    "Please create a task to {}",
+    "Could you make a task for {}?",
+
+    # Statements
+    "I should {}",
+    "I have to {}",
+    "Need to {}",
+    "Don't let me forget to {}",
+
+    # Casual
+    "Remind me to {}",
+    "Put {} on my list",
+    "I want to {}",
+]
+
+def generate_phrasing_examples():
+    tasks = ["buy groceries", "call the doctor", "review the proposal",
+             "send the email", "book the flight", "prepare for meeting"]
+
+    examples = []
+    for template in CREATE_TASK_VARIATIONS:
+        for task in tasks:
+            user_msg = template.format(task)
+            # Capitalize first letter for title
+            title = task[0].upper() + task[1:]
+            examples.append((user_msg, {"title": title}))
+
+    return examples
+
+Category 3: Multi-Turn Conversations (100 examples)​
+
+Conversations where context carries across turns:
+
+MULTI_TURN_EXAMPLE = {
+    "messages": [
+        {"role": "system", "content": "[System prompt with tools]"},
+
+        # Turn 1: Create a task
+        {"role": "user", "content": "Create a task to review the budget"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_001",
+                "type": "function",
+                "function": {
+                    "name": "create_task",
+                    "arguments": '{"title": "Review the budget"}'
+                }
+            }]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_001",
+            "content": '{"success": true, "task_id": "task_abc123", "title": "Review the budget"}'
+        },
+        {
+            "role": "assistant",
+            "content": "Done! I've created 'Review the budget' for you. Would you like to set a due date or priority?"
+        },
+
+        # Turn 2: Update the task we just created
+        {"role": "user", "content": "Make it high priority and due Friday"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_002",
+                "type": "function",
+                "function": {
+                    "name": "update_task",
+                    "arguments": '{"task_id": "task_abc123", "priority": "high", "due_date": "2024-01-19"}'
+                }
+            }]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_002",
+            "content": '{"success": true, "task_id": "task_abc123", "updated_fields": ["priority", "due_date"]}'
+        },
+        {
+            "role": "assistant",
+            "content": "Updated! 'Review the budget' is now high priority and due Friday. You're staying organized!"
+        },
+
+        # Turn 3: Complete the task
+        {"role": "user", "content": "Actually I just finished it, mark it done"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_003",
+                "type": "function",
+                "function": {
+                    "name": "complete_task",
+                    "arguments": '{"task_id": "task_abc123"}'
+                }
+            }]
+        }
+    ]
+}
+
+
+Key learning: the model must track task_abc123 from turn 1 and use it in turns 2 and 3.
+
+Category 4: Edge Cases and Ambiguity (50 examples)​
+
+Unusual inputs the model must handle:
+
+EDGE_CASES = [
+    # Special characters in title
+    {
+        "user": 'Create task "Review Q4 & Q1 finances"',
+        "tool": "create_task",
+        "args": {"title": "Review Q4 & Q1 finances"}
+    },
+
+    # Very short title
+    {
+        "user": "Task: Email",
+        "tool": "create_task",
+        "args": {"title": "Email"}
+    },
+
+    # Very long title
+    {
+        "user": "Create a task to review the comprehensive quarterly financial report including all departmental budgets and projections",
+        "tool": "create_task",
+        "args": {"title": "Review quarterly financial report with departmental budgets"}
+    },
+
+    # Ambiguous priority
+    {
+        "user": "Add an important-ish task for later",
+        "tool": "create_task",
+        "args": {"title": "Task for later", "priority": "medium"}  # Default when unclear
+    },
+
+    # Date inference
+    {
+        "user": "Task for end of month: close the books",
+        "tool": "create_task",
+        "args": {"title": "Close the books", "due_date": "2024-01-31"}
+    },
+
+    # Multiple tasks in one request (parallel calls)
+    {
+        "user": "Create three tasks: call mom, email boss, review report",
+        "tool": "create_task",
+        "args": [
+            {"title": "Call mom"},
+            {"title": "Email boss"},
+            {"title": "Review report"}
+        ]
+    },
+]
+
+Dataset Assembly Script​
+
+Bring it all together:
+
+import json
+from typing import List, Dict
+import random
+
+def create_example(user_message: str, tool_name: str, arguments: Dict) -> Dict:
+    """Create a single training example."""
+    return {
+        "messages": [
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": user_message},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": f"call_{random.randint(1000, 9999)}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(arguments)
+                    }
+                }]
+            }
+        ]
+    }
+
+def build_dataset() -> List[Dict]:
+    """Build complete training dataset."""
+    examples = []
+
+    # Category 1: Simple scenarios
+    for tool_name, scenarios in SIMPLE_SCENARIOS.items():
+        for user_msg, args in scenarios:
+            examples.append(create_example(user_msg, tool_name, args))
+
+    # Category 2: Phrasing variations
+    for user_msg, args in generate_phrasing_examples():
+        examples.append(create_example(user_msg, "create_task", args))
+
+    # Category 3: Multi-turn (add directly, already formatted)
+    examples.extend(load_multi_turn_examples())
+
+    # Category 4: Edge cases
+    for case in EDGE_CASES:
+        if isinstance(case["args"], list):
+            # Parallel calls
+            tool_calls = [
+                {
+                    "id": f"call_{i}",
+                    "type": "function",
+                    "function": {
+                        "name": case["tool"],
+                        "arguments": json.dumps(args)
+                    }
+                }
+                for i, args in enumerate(case["args"])
+            ]
+            examples.append({
+                "messages": [
+                    {"role": "system", "content": build_system_prompt()},
+                    {"role": "user", "content": case["user"]},
+                    {"role": "assistant", "content": None, "tool_calls": tool_calls}
+                ]
+            })
+        else:
+            examples.append(create_example(case["user"], case["tool"], case["args"]))
+
+    # Shuffle for training
+    random.shuffle(examples)
+
+    return examples
+
+def save_dataset(examples: List[Dict], filepath: str):
+    """Save dataset as JSONL."""
+    with open(filepath, "w") as f:
+        for example in examples:
+            f.write(json.dumps(example) + "\n")
+
+    print(f"Saved {len(examples)} examples to {filepath}")
+
+# Generate dataset
+dataset = build_dataset()
+save_dataset(dataset, "task_api_tool_calling.jsonl")
+
+
+Output:
+
+Saved 523 examples to task_api_tool_calling.jsonl
+
+Validation and Quality Check​
+
+Run validation before training:
+
+from validate_dataset import validate_dataset, analyze_tool_distribution
+
+# Validate
+results = validate_dataset("task_api_tool_calling.jsonl")
+print(f"Valid: {results['valid']}, Invalid: {results['invalid']}")
+
+if results["errors"]:
+    print("Errors found:")
+    for err in results["errors"][:5]:
+        print(f"  Line {err['line']}: {err['errors']}")
+
+# Check distribution
+dist = analyze_tool_distribution("task_api_tool_calling.jsonl")
+print(f"\nTool distribution: {dist}")
+
+
+Output:
+
+Valid: 523, Invalid: 0
+
+Tool distribution:
+{'create_task': 245, 'update_task': 108, 'complete_task': 85, 'list_tasks': 85}
+
+Reflect on Your Skill​
+
+Your agentic-tuning skill should now include:
+
+Complete Task API tool schemas (the four tools defined above)
+Scenario categories: Simple, variations, multi-turn, edge cases
+Dataset targets: 500+ examples, balanced distribution, 100% validation pass
+Try With AI​
+Prompt 1: Generate Scenario Variations​
+I need more update_task training examples. Generate 30 scenarios covering:
+- Changing just the title
+- Changing just the due date
+- Changing just the priority
+- Changing multiple fields at once
+- Removing a due date (set to null)
+- Updates that reference "the task I just created" (multi-turn context)
+
+For each, show the user message and the expected arguments.
+Make sure to vary the phrasing naturally.
+
+
+What you're learning: Systematic variation—ensuring comprehensive coverage of a tool's capabilities.
+
+Prompt 2: Generate Multi-Turn Flows​
+Create 5 realistic multi-turn conversation examples for Task API.
+Each conversation should:
+1. Start with creating a task
+2. Include the tool result from creation
+3. Have a follow-up action (update or complete)
+4. Show how task_id from step 1 is used in step 3
+
+Include natural assistant responses after each tool result.
+Format as complete training examples with all message roles.
+
+
+What you're learning: Conversational coherence—training models to maintain context and use information from previous turns.
+
+Prompt 3: Identify Missing Scenarios​
+Review my Task API tool definitions and the scenario categories I've covered:
+- Simple single-tool calls
+- Phrasing variations
+- Multi-turn conversations
+- Edge cases
+
+What am I missing? Consider:
+- Error scenarios (what if task doesn't exist?)
+- Clarification needs (ambiguous requests)
+- No-tool-needed cases (just conversation)
+- Boundary conditions
+
+Generate 10 examples for scenarios I haven't covered.
+
+
+What you're learning: Gap analysis—ensuring your training data covers the full range of real-world usage.
+
+Safety Note​
+
+Training data shapes model behavior. If your examples always comply with any request, the model learns to always comply. Include examples where the model asks for clarification or pushes back on ambiguous/potentially harmful requests. For Task API, this might mean asking "which task?" when multiple tasks match, rather than guessing.

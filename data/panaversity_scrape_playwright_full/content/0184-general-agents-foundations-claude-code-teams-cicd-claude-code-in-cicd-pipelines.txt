@@ -1,0 +1,435 @@
+Claude Code in CI/CD Pipelines
+
+Your CI pipeline script runs claude "Analyze this pull request for security issues" and the job hangs indefinitely. The logs show Claude Code is waiting for interactive input. You cancel the job, try redirecting stdin from /dev/null, and it still does not work. You set an environment variable called CLAUDE_HEADLESS=true. Nothing changes.
+
+The fix is one flag: -p.
+
+claude -p "Analyze this pull request for security issues"
+
+
+The -p flag (short for --print) runs Claude Code in non-interactive mode. It processes the prompt, outputs the result to stdout, and exits. No waiting for user input. No interactive terminal. This is how Claude Code works in CI/CD pipelines, pre-commit hooks, and any automated script.
+
+EXAM CONNECTION
+
+Exam Question 10 directly tests this. The scenario describes a pipeline that hangs because -p is missing. The correct answer is adding -p. The other options (CLAUDE_HEADLESS, stdin redirect, --batch) are not real Claude Code features. Know the flag.
+
+Exam Question 11 tests a related concept: when to use the Message Batches API (50% cheaper, up to 24 hours processing) vs real-time API calls. Blocking pre-merge checks need real-time. Overnight technical debt reports are a batch job. Task Statement 3.6 covers the full CI integration picture.
+
+The -p Flag: Non-Interactive Mode​
+
+The -p flag transforms Claude Code from an interactive assistant into a scriptable command-line tool. Everything you can do interactively, you can do non-interactively with -p:
+
+# Ask a question about the codebase
+claude -p "What does the auth module do?"
+
+# Run a task with tool access
+claude -p "Run the test suite and fix any failures" \
+  --allowedTools "Bash,Read,Edit"
+
+# Create a commit from staged changes
+claude -p "Look at my staged changes and create an appropriate commit" \
+  --allowedTools "Bash(git diff *),Bash(git log *),Bash(git commit *)"
+
+
+The --allowedTools flag is critical in CI. Interactive Claude Code asks for permission before running tools. In a pipeline, nobody is there to approve. You pre-approve the specific tools Claude needs:
+
+Tool pattern	What it allows
+Read	Read any file
+Edit	Edit any file
+Bash	Run any shell command
+Bash(git diff *)	Only commands starting with git diff
+Bash(npm test *)	Only commands starting with npm test
+
+The trailing * enables prefix matching. Bash(git diff *) allows git diff --staged, git diff HEAD~1, and any other command starting with git diff. The space before the * matters: Bash(git diff*) without the space would also match git diff-index.
+
+Bare Mode for Reproducible CI​
+
+Add --bare to skip auto-discovery of hooks, skills, plugins, MCP servers, and CLAUDE.md files:
+
+claude --bare -p "Summarize this file" --allowedTools "Read"
+
+
+In bare mode, only the flags you pass explicitly take effect. A hook in a teammate's ~/.claude or an MCP server in the project's .mcp.json will not run. This makes CI runs reproducible across machines.
+
+If you need project context in bare mode, pass it explicitly:
+
+claude --bare -p "Review this PR for security issues" \
+  --append-system-prompt-file ./CLAUDE.md \
+  --allowedTools "Read,Bash(git diff *)"
+
+Structured Output with JSON Schema​
+
+Plain text output works for human-readable reports. But CI pipelines need machine-parseable data: structured findings that a script can turn into PR comments, Slack notifications, or issue tracker entries.
+
+Basic JSON Output​
+
+Use --output-format json to get structured metadata with the response:
+
+claude -p "Summarize this project" --output-format json
+
+
+The response includes:
+
+{
+  "session_id": "abc-123",
+  "result": "This project is a REST API built with FastAPI...",
+  "usage": {
+    "input_tokens": 15420,
+    "output_tokens": 892
+  }
+}
+
+
+The result field contains Claude's free-text response. The surrounding fields provide metadata for tracking costs, resuming sessions, and debugging.
+
+Schema-Constrained Output​
+
+For CI, you typically need output in a specific structure. Use --json-schema to enforce a schema:
+
+claude -p "Review src/auth.py for security issues" \
+  --output-format json \
+  --json-schema '{
+    "type": "object",
+    "properties": {
+      "findings": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+            "file": {"type": "string"},
+            "line": {"type": "integer"},
+            "description": {"type": "string"},
+            "suggestion": {"type": "string"}
+          },
+          "required": ["severity", "file", "line", "description"]
+        }
+      },
+      "summary": {"type": "string"}
+    },
+    "required": ["findings", "summary"]
+  }'
+
+
+The response now has a structured_output field that conforms to your schema:
+
+{
+  "session_id": "abc-123",
+  "result": "I found 3 security issues...",
+  "structured_output": {
+    "findings": [
+      {
+        "severity": "high",
+        "file": "src/auth.py",
+        "line": 45,
+        "description": "SQL query built with string concatenation",
+        "suggestion": "Use parameterized queries to prevent SQL injection"
+      }
+    ],
+    "summary": "1 high-severity SQL injection risk found"
+  },
+  "usage": { ... }
+}
+
+
+Use jq to extract the structured output in a pipeline:
+
+claude -p "Review this PR" \
+  --output-format json \
+  --json-schema "$SCHEMA" \
+  | jq '.structured_output.findings[] | select(.severity == "critical")'
+
+CLAUDE.md as CI Context​
+
+In Lesson 1, you learned that CLAUDE.md provides project conventions to every interactive session. The same mechanism works in CI. When Claude Code runs with -p (without --bare), it reads the same CLAUDE.md hierarchy: user-level, project-level, and directory-level.
+
+For CI-specific context, add a section to your project CLAUDE.md or use --append-system-prompt:
+
+# CI Review Standards
+
+## What to report
+
+- SQL injection, XSS, command injection, and other OWASP Top 10 vulnerabilities
+- Race conditions in concurrent code
+- Missing input validation at API boundaries
+- Hardcoded secrets or credentials
+
+## What NOT to report
+
+- Minor style issues (handled by linters)
+- TODO comments (tracked separately)
+- Missing documentation (separate review)
+
+## Test generation standards
+
+- Use pytest with fixtures from conftest.py
+- Test both success and failure paths
+- Include edge cases: empty input, unicode, maximum length
+- Do not duplicate scenarios already covered in existing test files
+
+
+This is the CI equivalent of briefing a human reviewer. Without it, Claude reviews everything and produces noise. With it, Claude focuses on what matters and skips what your linters already handle.
+
+Providing Existing Test Files​
+
+When using Claude Code for test generation in CI, provide existing test files so it does not suggest scenarios you already cover:
+
+claude -p "Generate additional test cases for src/auth.py. \
+  Here are the existing tests: @tests/test_auth.py \
+  Only suggest tests for scenarios NOT already covered." \
+  --allowedTools "Read"
+
+
+This avoids the common problem of AI-generated tests duplicating your existing suite.
+
+Avoiding Duplicate PR Comments​
+
+When a CI review runs on every push to a PR, subsequent runs may flag the same issues. Your PR ends up with 15 identical comments about the same SQL injection risk. This erodes developer trust in the automated review.
+
+The solution: feed prior review findings back into the next run.
+
+# Step 1: Fetch existing review comments from this PR
+prior_comments=$(gh pr view "$PR_NUMBER" --json comments \
+  --jq '.comments[] | select(.author.login == "claude-bot") | .body')
+
+# Step 2: Run the review with prior findings in context
+claude -p "Review this PR for security issues.
+
+PRIOR REVIEW FINDINGS (already reported):
+$prior_comments
+
+Only report NEW issues or issues from the prior review that are
+still unresolved in the current code. Do not duplicate findings
+that have already been reported and are still present." \
+  --output-format json \
+  --json-schema "$SCHEMA"
+
+
+The prompt explicitly tells Claude what has already been reported. Claude then only flags new issues or issues from the prior review that the developer has not yet addressed.
+
+Session Context Isolation​
+
+In Lesson 5, you learned about the interview pattern and test-driven iteration. In CI, there is a related principle: the session that generated code should not review its own code.
+
+Why? The generator session retains its reasoning context. It made deliberate decisions about tradeoffs, shortcuts, and assumptions. When you ask that same session to review the code, it is reviewing its own decisions. It is less likely to question choices it just made.
+
+An independent review instance has no prior context. It sees only the code, not the reasoning behind it. This makes it more likely to catch:
+
+Assumptions that were never validated
+Edge cases the generator did not consider
+Inconsistencies with project patterns the generator was not aware of
+
+In CI, this isolation happens naturally. The pipeline spawns a fresh Claude Code process for each job. The review job has no memory of the generation job. This is the correct architecture.
+
+If you are running both generation and review in the same pipeline, use separate steps with separate sessions:
+
+steps:
+  - name: Generate code
+    run: claude -p "Implement the feature from issue #${{ github.event.issue.number }}" --allowedTools "Read,Edit,Bash"
+
+  - name: Review generated code
+    run: claude -p "Review the changes in this PR for bugs, security issues, and consistency with project patterns" --output-format json
+
+
+Each claude -p invocation is a fresh session. The review step has no access to the generation step's reasoning context.
+
+Building a GitHub Actions Workflow​
+
+Here is a complete workflow that runs Claude Code as a PR reviewer. It triggers when someone comments @claude review on a pull request, runs a structured review, and posts the findings as a PR comment.
+
+# .github/workflows/claude-review.yml
+name: Claude Code Review
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude review')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          gh pr diff ${{ github.event.issue.number }} > pr_diff.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Claude Code review
+        id: review
+        run: |
+          claude -p "Review the following PR diff for bugs, security
+          issues, and deviations from project conventions.
+
+          $(cat pr_diff.txt)
+
+          Focus on actionable findings. Skip style issues handled by
+          linters." \
+            --output-format json \
+            --allowedTools "Read,Bash(git log *),Bash(git show *)" \
+            > review_output.json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Post review comment
+        run: |
+          REVIEW=$(jq -r '.result' review_output.json)
+          gh pr comment ${{ github.event.issue.number }} \
+            --body "## Claude Code Review
+
+          $REVIEW
+
+          ---
+          *Automated review by Claude Code*"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+Using the Official Claude Code Action​
+
+For a more streamlined setup, the official anthropics/claude-code-action handles trigger detection, context gathering, and comment posting automatically:
+
+# .github/workflows/claude.yml
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+
+This minimal configuration responds to @claude mentions in PR and issue comments. Claude reads the PR context, analyzes the code, and responds directly in the conversation.
+
+For automated reviews on every PR (no trigger needed):
+
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Review this pull request for code quality, security, and correctness. Post findings as review comments."
+          claude_args: "--max-turns 5"
+
+Real-Time vs Batch: Choosing the Right API​
+
+Not every CI workflow needs real-time responses. The Message Batches API offers 50% cost savings but with processing times up to 24 hours:
+
+Workflow type	API choice	Why
+Pre-merge check (blocking)	Real-time (claude -p)	Developers wait for results before merging
+Nightly technical debt report	Batch API	No urgency; 50% cost savings
+PR review comment	Real-time (claude -p)	Developers expect prompt feedback
+Weekly code health dashboard	Batch API	Runs overnight, report ready by morning
+
+The decision rule: if a human is waiting for the result before they can take their next action, use real-time. If the result can wait hours, use batch for the cost savings.
+
+Try With AI​
+
+Exercise 1: Run Claude Code Non-Interactively (Apply)
+
+Run Claude Code with the -p flag locally to see how non-interactive mode works before moving to CI.
+
+Open your terminal in any project directory and run:
+
+claude -p "List the 5 most recently modified files in this directory and explain what each one does" --allowedTools "Read,Bash(ls *),Bash(stat *)"
+
+
+Then try structured output:
+
+claude -p "List all functions in the main source file" \
+  --output-format json \
+  --json-schema '{"type":"object","properties":{"functions":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"line":{"type":"integer"},"description":{"type":"string"}},"required":["name","line"]}}},"required":["functions"]}'
+
+
+Pipe the result through jq to extract just the function names:
+
+claude -p "List all functions in the main source file" \
+  --output-format json \
+  --json-schema '...' \
+  | jq '.structured_output.functions[].name'
+
+
+What you're learning: The -p flag is the foundation of all CI integration. Without it, Claude Code waits for interactive input and your pipeline hangs. With it, Claude processes the prompt, outputs the result, and exits. The --output-format json and --json-schema flags let you enforce a specific output structure so downstream scripts can parse the result programmatically. This is exactly what Exam Question 10 tests.
+
+Exercise 2: Write CI Review Criteria in CLAUDE.md (Configure)
+
+Create or update your project's CLAUDE.md to include CI-specific review criteria. Start a Claude Code session and paste:
+
+I want to add CI review standards to my CLAUDE.md. Interview me about:
+1. What types of issues should the CI review flag? (security, bugs, performance?)
+2. What should it skip? (style issues handled by linters? TODO comments?)
+3. What testing standards should generated tests follow?
+4. What frameworks and fixtures are available?
+
+After the interview, add a "CI Review Standards" section to my CLAUDE.md
+with the answers.
+
+
+After the section is added, test it by running:
+
+claude -p "Review src/main.py using the review standards in CLAUDE.md" --allowedTools "Read"
+
+
+Compare the output to a run without CLAUDE.md (use --bare):
+
+claude --bare -p "Review src/main.py" --allowedTools "Read"
+
+
+What you're learning: CLAUDE.md is how you give CI-invoked Claude Code the same project context that a human reviewer would have. Without it, Claude reviews everything generically. With it, Claude focuses on what your team cares about and skips what your existing tools already handle. The comparison between --bare and normal mode makes the difference visible.
+
+Exercise 3: Build a Review Workflow (Create)
+
+Create a GitHub Actions workflow file that runs Claude Code on pull requests. Start a Claude Code session and paste:
+
+Create a file at .github/workflows/claude-review.yml that:
+
+1. Triggers when someone comments "@claude review" on a PR
+2. Checks out the repository
+3. Gets the PR diff using gh pr diff
+4. Runs claude -p to review the diff with --output-format json
+5. Posts the review as a PR comment
+
+Use these permissions: contents read, pull-requests write.
+The ANTHROPIC_API_KEY comes from secrets.
+
+Also create a second workflow at .github/workflows/claude-tests.yml that:
+1. Triggers on every PR push (opened, synchronize)
+2. Runs claude -p to suggest new test cases for changed files
+3. Includes existing test files in context to avoid duplicate suggestions
+4. Posts suggestions as a PR comment
+
+
+Review the generated workflows. Check that both use -p for non-interactive mode and that the test generation workflow provides existing tests in context.
+
+What you're learning: Building CI workflows with Claude Code requires combining several concepts: the -p flag for non-interactive mode, --allowedTools for permission management, --output-format json for structured output, and CLAUDE.md for project context. The test generation workflow specifically demonstrates duplicate avoidance: by providing existing tests in context, Claude only suggests novel test scenarios. This is a practical application of Exam Task 3.6.
+
+Flashcards Study Aid​

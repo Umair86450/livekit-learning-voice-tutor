@@ -1,0 +1,492 @@
+Reliability Configuration
+
+Your producer from Lesson 6 uses acks=all to wait for all in-sync replicas. But what does "in-sync" actually mean? How many replicas must acknowledge before Kafka considers a write durable? And when you're pushing thousands of events per second, how do you balance durability with the throughput your Task API needs?
+
+These questions reveal a deeper configuration layer beneath the producer settings you've already learned. Kafka's reliability isn't just about producer acknowledgments---it's about how the cluster maintains replicas, when it considers them synchronized, and what happens when brokers fall behind or fail. Understanding these mechanisms lets you configure clusters that match your exact durability and performance requirements.
+
+In this lesson, you'll configure min.insync.replicas for production durability, understand how ISR tracking affects your producer's success, and tune batching parameters to optimize the latency-throughput trade-off. By the end, you'll know exactly how to configure Kafka for scenarios ranging from "never lose a message" to "maximize throughput with acceptable latency."
+
+Understanding In-Sync Replicas (ISR)​
+
+Every Kafka partition has a leader and zero or more follower replicas. The leader handles all reads and writes. Followers replicate data from the leader to provide redundancy.
+
+What Makes a Replica "In-Sync"?​
+
+A replica is considered in-sync when it meets both of these conditions:
+
+Connection: The replica maintains an active session with the leader
+Lag: The replica's log end offset is within a configured threshold of the leader's
+
+The broker setting replica.lag.time.max.ms (default: 30 seconds) controls the lag threshold. If a follower doesn't fetch from the leader within this window, it's removed from the ISR.
+
+Partition 0 (Replication Factor 3)
+├── Broker 0: Leader (offset: 1000)
+├── Broker 1: Follower (offset: 998) ← In ISR (within threshold)
+└── Broker 2: Follower (offset: 850) ← Removed from ISR (too far behind)
+
+ISR = [Broker 0, Broker 1]
+
+Why ISR Matters for Producers​
+
+When your producer sends a message with acks=all, it waits for acknowledgment from all replicas in the ISR, not all replicas in the cluster. This distinction is critical:
+
+ISR State	Producer with acks=all
+ISR = [Leader, Follower1, Follower2]	Waits for all 3 to acknowledge
+ISR = [Leader, Follower1]	Waits for only 2 to acknowledge
+ISR = [Leader]	Waits for only 1 (leader) to acknowledge
+
+When ISR shrinks to just the leader, acks=all provides no more durability than acks=1. Your data survives only on one broker.
+
+Configuring min.insync.replicas​
+
+The min.insync.replicas setting prevents this degradation by requiring a minimum ISR size for writes to succeed.
+
+The Durability Formula​
+
+To tolerate N broker failures, you need:
+
+Replication Factor (RF) >= N + 1
+min.insync.replicas >= N + 1
+These settings work together: RF determines how many copies exist; min.insync.replicas determines how many must acknowledge
+Tolerance Goal	Replication Factor	min.insync.replicas	Survives
+Development (no tolerance)	1	1	Nothing
+Single broker failure	3	2	1 broker down
+Two broker failures	4	3	2 brokers down
+Configuration Locations​
+
+You can set min.insync.replicas at three levels:
+
+1. Broker-wide default (kafka-cluster.yaml with Strimzi):
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+spec:
+  kafka:
+    config:
+      min.insync.replicas: 2
+      default.replication.factor: 3
+
+
+2. Topic-specific override (KafkaTopic CRD):
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: task-events
+  labels:
+    strimzi.io/cluster: task-events
+spec:
+  partitions: 6
+  replicas: 3
+  config:
+    min.insync.replicas: "2"
+    retention.ms: "604800000"
+
+
+3. Dynamic topic configuration (kubectl or Kafka CLI):
+
+kubectl exec -n kafka task-events-kafka-0 -- \
+  bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --alter --entity-type topics --entity-name task-events \
+  --add-config min.insync.replicas=2
+
+
+Output:
+
+Completed updating config for topic task-events.
+
+The NOT_ENOUGH_REPLICAS Error​
+
+When ISR shrinks below min.insync.replicas, producers with acks=all receive an error:
+
+KafkaError{code=NOT_ENOUGH_REPLICAS,val=19,str="Broker: Not enough in-sync replicas"}
+
+
+This error means Kafka is protecting your data by refusing to accept writes that can't meet your durability requirements.
+
+Your configuration:
+
+replication.factor: 3
+min.insync.replicas: 2
+
+
+Scenario:
+
+Normal: ISR = [Broker 0, Broker 1, Broker 2] → Writes succeed
+Degraded: ISR = [Broker 0, Broker 1] → Writes succeed (ISR size 2 >= min.isr 2)
+Critical: ISR = [Broker 0] → Writes FAIL (ISR size 1 < min.isr 2)
+
+Diagnosing ISR Problems​
+
+When you see NOT_ENOUGH_REPLICAS errors, investigate the ISR state:
+
+kubectl exec -n kafka task-events-kafka-0 -- \
+  bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --describe --topic task-events
+
+
+Output (healthy):
+
+Topic: task-events  Partition: 0  Leader: 0  Replicas: 0,1,2  Isr: 0,1,2
+Topic: task-events  Partition: 1  Leader: 1  Replicas: 1,2,0  Isr: 1,2,0
+Topic: task-events  Partition: 2  Leader: 2  Replicas: 2,0,1  Isr: 2,0,1
+
+
+Output (degraded---Broker 2 is slow):
+
+Topic: task-events  Partition: 0  Leader: 0  Replicas: 0,1,2  Isr: 0,1
+Topic: task-events  Partition: 1  Leader: 1  Replicas: 1,2,0  Isr: 1,0
+Topic: task-events  Partition: 2  Leader: 0  Replicas: 2,0,1  Isr: 0,1
+
+
+Notice Broker 2 is missing from all ISR lists. Common causes:
+
+Symptom	Likely Cause	Remediation
+One broker missing from all ISRs	Broker overloaded or network issue	Check broker logs, resource usage
+Intermittent ISR shrinkage	Slow disk I/O or GC pauses	Tune JVM settings, check storage
+ISR shrinkage under high load	Replication can't keep up	Increase replica.fetch.max.bytes
+Unclean Leader Election: The Nuclear Option​
+
+What happens when the leader fails and no in-sync replicas exist?
+
+By default, Kafka waits for an ISR member to come back online. This maintains data consistency but means the partition is unavailable for writes.
+
+The setting unclean.leader.election.enable changes this behavior:
+
+Setting	Behavior	Trade-off
+false (default)	Wait for ISR member to recover	Availability loss, data preserved
+true	Allow out-of-sync replica to become leader	Availability maintained, data loss possible
+
+When is unclean election acceptable?
+
+Metrics and logs where some data loss is tolerable
+Non-critical analytics events
+Systems where availability trumps consistency
+
+When is unclean election dangerous?
+
+Financial transactions
+Audit logs with compliance requirements
+Order processing where missing events cause business problems
+
+Strimzi configuration:
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+spec:
+  kafka:
+    config:
+      unclean.leader.election.enable: false  # Default, data safety priority
+
+Development vs Production Settings​
+
+Here's a configuration comparison table showing how settings differ between environments:
+
+Setting	Development	Production	Why
+replication.factor	1	3	Single broker in dev; redundancy in prod
+min.insync.replicas	1	2	No replicas in dev; durability in prod
+unclean.leader.election.enable	true	false	Fast recovery in dev; data safety in prod
+default.replication.factor	1	3	Match topic replication
+offsets.topic.replication.factor	1	3	Consumer offset durability
+transaction.state.log.replication.factor	1	3	Transaction coordinator durability
+
+Strimzi development configuration:
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+spec:
+  kafka:
+    version: 4.1.1
+    metadataVersion: 4.1-IV0
+    config:
+      offsets.topic.replication.factor: 1
+      transaction.state.log.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      default.replication.factor: 1
+      min.insync.replicas: 1
+
+
+Strimzi production configuration:
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+spec:
+  kafka:
+    version: 4.1.1
+    metadataVersion: 4.1-IV0
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      unclean.leader.election.enable: false
+
+Tuning for Latency vs Throughput​
+
+Beyond durability, you'll often need to optimize for latency or throughput. Kafka's producer batching settings control this trade-off.
+
+Understanding Producer Batching​
+
+Your producer doesn't send each message immediately. It batches messages to reduce network overhead:
+
+Messages arrive:       [M1] [M2] [M3] [M4] [M5]
+                        ↓    ↓    ↓    ↓    ↓
+Batch accumulates:     [M1, M2, M3, M4, M5]
+                                ↓
+Network send:          [================]
+                       (one request for 5 messages)
+
+
+Two settings control when a batch is sent:
+
+Setting	Default	Effect
+linger.ms	0	Time to wait for more messages before sending
+batch.size	16384 (16KB)	Maximum batch size in bytes
+
+A batch is sent when either condition is met: linger.ms expires OR batch.size is reached.
+
+Low-Latency Configuration​
+
+For real-time event streaming where latency matters more than throughput:
+
+from confluent_kafka import Producer
+
+low_latency_producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'client.id': 'task-api-realtime',
+    'acks': 'all',
+    'enable.idempotence': True,
+
+    # Low latency settings
+    'linger.ms': 0,       # Send immediately
+    'batch.size': 16384,  # Default batch size (16KB)
+})
+
+
+Trade-off: More network requests, higher broker CPU usage, but sub-millisecond message latency.
+
+High-Throughput Configuration​
+
+For bulk event processing where throughput matters more than latency:
+
+from confluent_kafka import Producer
+
+high_throughput_producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'client.id': 'task-api-bulk',
+    'acks': 'all',
+    'enable.idempotence': True,
+
+    # High throughput settings
+    'linger.ms': 50,          # Wait up to 50ms to batch
+    'batch.size': 524288,     # 512KB batches
+    'compression.type': 'lz4', # Compress for network efficiency
+})
+
+
+Trade-off: Messages wait up to 50ms before sending, but far fewer network requests and better compression efficiency.
+
+Tuning Decision Framework​
+Scenario	linger.ms	batch.size	Compression
+Real-time user actions	0-5	16KB	none/snappy
+Analytics events	10-50	64KB-256KB	lz4
+Batch data pipelines	100-500	512KB-1MB	lz4/zstd
+Log aggregation	500-1000	1MB	zstd
+Measuring the Impact​
+
+You can observe batching behavior through producer metrics:
+
+from confluent_kafka import Producer
+import time
+
+producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'linger.ms': 50,
+    'batch.size': 65536,  # 64KB
+    'statistics.interval.ms': 5000  # Report stats every 5 seconds
+})
+
+def stats_callback(stats_json):
+    import json
+    stats = json.loads(stats_json)
+    for topic in stats.get('topics', {}).values():
+        for partition in topic.get('partitions', {}).values():
+            batch_size = partition.get('batchsize', {})
+            print(f"Avg batch size: {batch_size.get('avg', 0)} bytes")
+            print(f"Batch count: {batch_size.get('cnt', 0)}")
+
+# Register callback
+producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'linger.ms': 50,
+    'batch.size': 65536,
+    'stats_cb': stats_callback,
+    'statistics.interval.ms': 5000
+})
+
+
+Output (high-throughput scenario):
+
+Avg batch size: 48756 bytes
+Batch count: 1247
+
+
+Larger average batch sizes mean better network efficiency.
+
+Collaborative Configuration Review​
+
+You've learned the individual settings, but how do they combine for your specific use case? Let's work through a realistic scenario.
+
+The situation:
+
+Your Task API handles two types of events:
+
+Task lifecycle events (created, updated, completed): Must never be lost, but 100ms latency is acceptable
+Task view events (user viewed a task): High volume, occasional loss is acceptable
+
+Initial approach:
+
+For the lifecycle events, you might start with:
+
+lifecycle_producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'acks': 'all',
+    'enable.idempotence': True,
+    'linger.ms': 10,
+    'batch.size': 32768
+})
+
+
+Questioning the configuration:
+
+Consider these factors:
+
+What's your cluster's min.insync.replicas? If it's 2 with RF=3, you're protected against single broker failure.
+Is 10ms linger acceptable for your latency budget of 100ms? You have room to increase for better batching.
+Do you need the lifecycle events in a separate topic from view events? Different topics can have different replication factors.
+
+Evaluating alternatives:
+
+If view events are truly non-critical, they could use a lower-durability configuration:
+
+view_producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'acks': '1',  # Leader only, faster
+    'linger.ms': 100,  # Aggressive batching for volume
+    'batch.size': 262144,  # 256KB batches
+    'compression.type': 'lz4'
+})
+
+
+What emerged from this analysis:
+
+Two producers with different configurations for different durability needs
+The lifecycle producer uses full durability settings
+The view producer optimizes for throughput since data loss is acceptable
+Both can coexist in the same application, sending to different topics
+Reflect on Your Skill​
+
+You built a kafka-events skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kafka-events skill, configure a Kafka cluster for production with 3 brokers that can tolerate one broker failure.
+Does my skill set replication.factor=3 and min.insync.replicas=2? Does it explain the ISR mechanism?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain In-Sync Replicas (ISR) and how replicas fall out of sync?
+Did it cover the relationship between replication factor and min.insync.replicas for fault tolerance?
+Improve Your Skill​
+
+If you found gaps:
+
+My kafka-events skill is missing reliability configuration (ISR, min.insync.replicas, linger.ms/batch.size tuning).
+Update it to include when to use replication.factor=3 with min.isr=2 and how to tune for latency vs throughput.
+
+Try With AI​
+
+Apply what you've learned to configure reliability for your specific scenarios.
+
+Setup: Open Claude Code or your preferred AI assistant with your Kafka project context.
+
+Prompt 1: Design Your Durability Strategy
+
+I'm configuring Kafka for a Task API with these requirements:
+
+Cluster: 3 brokers on Kubernetes (Strimzi)
+Events:
+- task.created, task.updated: Business critical, zero loss tolerance
+- task.viewed: Analytics, up to 1% loss acceptable
+- task.metrics: Telemetry, loss is fine
+
+For each event type, recommend:
+1. Topic replication factor
+2. min.insync.replicas setting
+3. Producer acks configuration
+4. Whether to use idempotent producer
+
+Show me both the Strimzi KafkaTopic YAML and Python producer configuration.
+
+
+What you're learning: Mapping business requirements to Kafka durability configurations. Different event types warrant different trade-offs between durability and performance.
+
+Prompt 2: Diagnose an ISR Problem
+
+My Kafka producers are intermittently failing with NOT_ENOUGH_REPLICAS errors.
+Here's the topic description:
+
+Topic: task-events  Partition: 0  Leader: 0  Replicas: 0,1,2  Isr: 0,1
+Topic: task-events  Partition: 1  Leader: 1  Replicas: 1,2,0  Isr: 1,0
+Topic: task-events  Partition: 2  Leader: 0  Replicas: 2,0,1  Isr: 0,1
+
+My configuration:
+- replication.factor: 3
+- min.insync.replicas: 2
+- acks: all
+
+Questions:
+1. Why are writes still succeeding? (ISR size is 2, min.isr is 2)
+2. What happens if one more broker falls behind?
+3. How do I investigate why Broker 2 is out of ISR?
+4. What are my options if Broker 2 can't recover quickly?
+
+
+What you're learning: Diagnosing production ISR issues and understanding the relationship between ISR size and write availability. This error pattern is common during broker maintenance or resource contention.
+
+Prompt 3: Optimize Latency-Throughput Trade-off
+
+I need to optimize my Kafka producer for two scenarios:
+
+Scenario A (Real-time notifications):
+- Volume: 100 messages/second
+- Latency requirement: < 50ms end-to-end
+- Current config: linger.ms=0, batch.size=16384
+
+Scenario B (Daily analytics export):
+- Volume: 10,000 messages/second for 2 hours
+- Latency requirement: None (batch job)
+- Current config: linger.ms=0, batch.size=16384
+
+For each scenario:
+1. What's wrong with the current configuration?
+2. What linger.ms and batch.size values would you recommend?
+3. Should I enable compression? Which type?
+4. How would I measure the improvement?
+
+Show me the Python configuration and explain the expected impact.
+
+
+What you're learning: Tuning producer batching for specific workload patterns. The same producer settings that work for real-time events can waste resources for batch processing, and vice versa.
+
+Safety Note: Configuration changes to min.insync.replicas and unclean.leader.election.enable affect data durability. Test changes in a development cluster first, and understand that increasing min.insync.replicas can cause write failures if your cluster doesn't have enough healthy brokers.

@@ -1,0 +1,432 @@
+SRE Foundations: SLIs, SLOs, and Error Budgets
+
+Every engineering team faces the same fundamental tension: ship features faster or keep the system stable. Product managers want new functionality yesterday. Operations teams want zero incidents ever. Both goals seem reasonable. Both cannot be achieved simultaneously.
+
+Google's Site Reliability Engineering (SRE) practice resolved this tension with a powerful insight: reliability is a feature you can dial. Instead of arguing about whether a deployment is "safe enough," you measure exactly how much reliability you have, how much you've used, and how much you can afford to spend on velocity.
+
+This dial has three components that work together:
+
+Component	What It Is	Example
+SLI (Service Level Indicator)	What you measure	99.95% of requests succeeded
+SLO (Service Level Objective)	Your target	We aim for 99.9% success
+SLA (Service Level Agreement)	Your promise to customers	If we drop below 99.5%, you get credits
+
+The gap between your SLO and 100% is your error budget---the amount of unreliability you can afford while still meeting your target. This budget becomes currency: you spend it on deployments, experiments, and infrastructure changes. When it runs low, you slow down. When it's healthy, you move fast.
+
+By the end of this lesson, you'll define SLIs for Task API, set realistic SLO targets, calculate error budgets, and implement recording rules in Prometheus to track it all.
+
+SLI vs SLO vs SLA: The Reliability Stack​
+
+These three terms are often confused, but they represent distinct layers of reliability thinking:
+
+Service Level Indicators (SLIs): What You Measure​
+
+An SLI is a quantitative measure of some aspect of the service level you provide. It's raw measurement, not judgment. Common SLIs include:
+
+SLI Type	What It Measures	Calculation
+Availability	Did the service respond successfully?	successful_requests / total_requests
+Latency	How fast did it respond?	requests_under_threshold / total_requests
+Correctness	Was the response right?	correct_responses / total_responses
+
+For Task API, your primary SLI is availability:
+
+# Availability SLI: ratio of successful requests
+sum(rate(http_requests_total{service="task-api",status!~"5.."}[5m]))
+/
+sum(rate(http_requests_total{service="task-api"}[5m]))
+
+
+Output:
+
+0.9997  # 99.97% of requests succeeded in last 5 minutes
+
+Service Level Objectives (SLOs): Your Target​
+
+An SLO is the target value for an SLI. It's your internal quality bar---the line between "we're healthy" and "we need to investigate." SLOs are strategic decisions, not technical ones.
+
+Statement	SLI or SLO?
+"99.97% of requests succeeded last hour"	SLI (measurement)
+"We aim for 99.9% success rate"	SLO (target)
+"P95 latency was 180ms"	SLI (measurement)
+"P95 latency should be under 200ms"	SLO (target)
+
+Key insight: Your SLO should be slightly below what you typically achieve. If you measure 99.97% regularly, setting a 99.9% SLO gives you headroom. Setting 99.99% means you're always failing.
+
+Service Level Agreements (SLAs): Your Promise​
+
+An SLA is a contractual commitment with consequences---typically financial penalties or service credits when you fail to meet it. SLAs are business decisions owned by legal and product, not engineering.
+
+The critical relationship: SLA < SLO < typical performance
+
+Layer	Target	Buffer
+Typical performance	99.97%	---
+SLO (internal target)	99.9%	0.07% buffer from typical
+SLA (customer promise)	99.5%	0.4% buffer from SLO
+
+Why the buffer? When you breach your SLO, engineering investigates and fixes. When you breach your SLA, customers get money back. You want early warning before financial consequences.
+
+Choosing Good SLIs: The Four Golden Signals​
+
+Not all metrics make good SLIs. A good SLI must be:
+
+User-centric: Reflects what users experience, not internal implementation
+Measurable: Can be computed from available telemetry
+Sensitive: Changes when user experience degrades
+Independent: Doesn't conflate unrelated failure modes
+
+Google's SRE book recommends focusing on the Four Golden Signals:
+
+Signal	Question It Answers	Good SLI?
+Latency	How fast are we?	Yes---users feel slow responses
+Traffic	How much demand?	No---high traffic isn't a problem
+Errors	How many failures?	Yes---users experience failures
+Saturation	How full are we?	Leading indicator, not SLI directly
+Choosing SLIs for Different Service Types​
+Service Type	Primary SLI	Secondary SLI	Why
+User-facing API	Availability	Latency (P99)	Users abandon slow pages
+Data pipeline	Correctness	Freshness	Wrong data is worse than slow data
+Background job	Completion rate	Duration	Jobs must finish, speed matters less
+Real-time stream	Latency (P50)	Availability	Every message must be fast
+
+For Task API (user-facing REST API), we focus on:
+
+Availability: 99.9% of requests return 2xx or 4xx (not 5xx)
+Latency: 95% of requests complete under 200ms
+Setting Realistic SLO Targets: The Downtime Table​
+
+The difference between 99.9% and 99.99% seems small---just 0.09%. But in operational terms, it's massive:
+
+SLO	Error Budget	Monthly Downtime	Yearly Downtime
+99%	1%	7.2 hours	3.65 days
+99.5%	0.5%	3.6 hours	1.83 days
+99.9%	0.1%	43.2 minutes	8.76 hours
+99.95%	0.05%	21.6 minutes	4.38 hours
+99.99%	0.01%	4.32 minutes	52.6 minutes
+99.999%	0.001%	26 seconds	5.26 minutes
+
+The "nine" you can afford depends on your dependencies:
+
+If your database has 99.9% availability and your cache has 99.9% availability, your maximum possible availability is approximately 99.8% (0.999 * 0.999 = 0.998). You cannot promise more reliability than your least reliable dependency.
+
+Choosing the Right Target​
+SLO	Appropriate For	Operational Reality
+99%	Internal tools, batch jobs	One 7-hour outage per month acceptable
+99.5%	Internal services	One 3.5-hour outage per month acceptable
+99.9%	User-facing APIs	43 minutes/month---about one incident
+99.99%	Payment systems, auth	4 minutes/month---near-zero tolerance
+99.999%	Life-critical systems	Requires massive redundancy investment
+
+For Task API, we choose 99.9% availability. This gives us 43.2 minutes of error budget per month---enough to deploy safely but requiring investigation when things go wrong.
+
+Error Budgets: The Currency of Velocity​
+
+The error budget transforms reliability from a vague aspiration into a concrete resource:
+
+Error Budget = 100% - SLO
+
+
+For a 99.9% SLO:
+
+Error budget = 0.1%
+Monthly budget = 30 days * 24 hours * 60 minutes * 0.001 = 43.2 minutes
+What Consumes Error Budget?​
+
+Every reliability failure consumes budget:
+
+Event	Duration	Budget Consumed
+Deployment causes 1% error rate for 5 minutes	5 min * 1% = 3 seconds	0.12%
+Complete outage for 10 minutes	10 min * 100% = 10 minutes	23.1%
+50% error rate for 20 minutes	20 min * 50% = 10 minutes	23.1%
+Error Budget Policies​
+
+The power of error budgets comes from policy---agreed-upon actions based on budget state:
+
+Budget Remaining	Policy
+> 50%	Ship features normally; experimental deployments allowed
+25-50%	Increased review for risky changes; prioritize reliability work
+10-25%	Feature freeze except critical fixes; focus on stability
+< 10%	Emergency mode: no deployments except to improve reliability
+Exhausted	Complete freeze until budget resets or SLO is renegotiated
+
+This makes reliability objective. Instead of arguing "Is this deployment safe?", you ask "Do we have budget to absorb if it fails?"
+
+Implementing SLO Recording Rules in Prometheus​
+
+Recording rules pre-compute expensive queries so dashboards load instantly. Here's a complete SLO implementation for Task API:
+
+# task-api-slo-rules.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: task-api-slo
+  namespace: monitoring
+  labels:
+    release: prometheus  # Required for kube-prometheus-stack
+spec:
+  groups:
+  - name: task-api.slo.recording
+    interval: 30s
+    rules:
+    # Total request rate
+    - record: task_api:requests:rate5m
+      expr: sum(rate(http_requests_total{service="task-api"}[5m]))
+
+    # Error rate (5xx responses)
+    - record: task_api:errors:rate5m
+      expr: sum(rate(http_requests_total{service="task-api",status=~"5.."}[5m]))
+
+    # Error ratio (SLI)
+    - record: task_api:error_ratio:rate5m
+      expr: |
+        task_api:errors:rate5m
+        /
+        task_api:requests:rate5m
+
+    # Availability (inverse of error ratio)
+    - record: task_api:availability:rate5m
+      expr: 1 - task_api:error_ratio:rate5m
+
+    # Error budget consumption (30-day window)
+    - record: task_api:error_budget_consumed:ratio30d
+      expr: |
+        (
+          sum(rate(http_requests_total{service="task-api",status=~"5.."}[30d]))
+          /
+          sum(rate(http_requests_total{service="task-api"}[30d]))
+        )
+        /
+        0.001  # SLO error budget = 0.1%
+
+    # Error budget remaining
+    - record: task_api:error_budget_remaining:ratio30d
+      expr: 1 - task_api:error_budget_consumed:ratio30d
+
+
+Apply the rules:
+
+kubectl apply -f task-api-slo-rules.yaml
+
+
+Output:
+
+prometheusrule.monitoring.coreos.com/task-api-slo created
+
+
+Verify the recording rules are working:
+
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+
+
+Then query in Prometheus UI (http://localhost:9090):
+
+task_api:availability:rate5m
+
+
+Output:
+
+task_api:availability:rate5m{} 0.9997
+
+Building SLO Dashboards in Grafana​
+
+A good SLO dashboard answers three questions at a glance:
+
+Are we meeting our SLO right now?
+How much error budget have we consumed?
+At current burn rate, when will we exhaust budget?
+Create the Dashboard​
+
+Create a ConfigMap with the Grafana dashboard JSON:
+
+# task-api-slo-dashboard.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-api-slo-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"  # Auto-discovery by Grafana sidecar
+data:
+  task-api-slo.json: |
+    {
+      "title": "Task API SLO Dashboard",
+      "uid": "task-api-slo",
+      "panels": [
+        {
+          "title": "Current Availability (SLO: 99.9%)",
+          "type": "stat",
+          "gridPos": {"x": 0, "y": 0, "w": 8, "h": 4},
+          "targets": [{
+            "expr": "task_api:availability:rate5m * 100",
+            "legendFormat": "Availability"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "thresholds": {
+                "steps": [
+                  {"color": "red", "value": 99.5},
+                  {"color": "yellow", "value": 99.9},
+                  {"color": "green", "value": 99.95}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Error Budget Remaining",
+          "type": "gauge",
+          "gridPos": {"x": 8, "y": 0, "w": 8, "h": 4},
+          "targets": [{
+            "expr": "task_api:error_budget_remaining:ratio30d * 100"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "thresholds": {
+                "steps": [
+                  {"color": "red", "value": 0},
+                  {"color": "yellow", "value": 25},
+                  {"color": "green", "value": 50}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Error Budget Burn Rate",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 4, "w": 24, "h": 8},
+          "targets": [{
+            "expr": "task_api:error_ratio:rate5m / 0.001",
+            "legendFormat": "Burn Rate (1x = normal)"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "thresholdsStyle": {"mode": "line+area"}
+              },
+              "thresholds": {
+                "steps": [
+                  {"color": "green", "value": 0},
+                  {"color": "yellow", "value": 1},
+                  {"color": "orange", "value": 6},
+                  {"color": "red", "value": 14.4}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "30-Day Availability Trend",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 12, "w": 24, "h": 6},
+          "targets": [{
+            "expr": "1 - (sum(rate(http_requests_total{service=\"task-api\",status=~\"5..\"}[1h])) / sum(rate(http_requests_total{service=\"task-api\"}[1h])))",
+            "legendFormat": "Hourly Availability"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {"lineWidth": 2}
+            }
+          }
+        }
+      ]
+    }
+
+
+Apply the dashboard:
+
+kubectl apply -f task-api-slo-dashboard.yaml
+
+
+Output:
+
+configmap/task-api-slo-dashboard created
+
+
+Access Grafana and find the dashboard under "Task API SLO Dashboard".
+
+Interpreting the Dashboard​
+Panel	What It Shows	Action Triggers
+Current Availability	Real-time SLI vs SLO	Green = meeting SLO; Red = investigate now
+Error Budget Remaining	How much budget left	< 25% = slow deployments; < 10% = freeze
+Burn Rate	How fast consuming budget	> 6x = investigate; > 14.4x = page immediately
+30-Day Trend	Historical availability	Identifies patterns and recurring issues
+Reflect on Your Skill​
+
+Your observability-cost-engineer skill now understands SRE foundations. Test and improve it:
+
+Test Your Skill​
+
+Ask your skill to help you define SLIs for a new service:
+
+I'm deploying a new image processing API. Users upload images and receive
+processed results. What SLIs should I track, and what SLO targets would
+you recommend?
+
+
+Expected behavior: The skill should recommend:
+
+Availability SLI (successful uploads / total uploads)
+Latency SLI (processing time for P95)
+Possibly correctness SLI (if output quality is measurable)
+SLO targets based on user-facing vs internal nature
+Identify Gaps​
+
+Does your skill know:
+
+The difference between SLI, SLO, and SLA?
+How to calculate error budget from SLO percentage?
+When to use availability vs latency as primary SLI?
+How to write Prometheus recording rules for SLOs?
+Improve Your Skill​
+
+Add SRE foundations knowledge:
+
+Add to your skill: SLI/SLO/SLA definitions, error budget calculation
+(100% - SLO), the downtime table (99.9% = 43.2 min/month), and the
+four-level budget policy (>50% ship normally, 25-50% increased review,
+10-25% feature freeze, <10% emergency mode).
+
+Try With AI​
+Prompt 1: Calculate Error Budget Impact​
+I have a 99.9% availability SLO for my Task API. Yesterday we had an
+incident where 20% of requests failed for 15 minutes. Help me calculate:
+1. How much error budget this consumed
+2. What percentage of my monthly budget this represents
+3. Whether I should slow down deployments based on current budget state
+
+
+What you're learning: Connecting abstract SLO percentages to concrete operational decisions. Error budgets only matter when you use them to make choices about velocity vs stability.
+
+Prompt 2: Design SLIs for Your Service​
+I'm building [describe your service: API, data pipeline, background job, etc.].
+Help me design appropriate SLIs by asking:
+- What do my users care about most?
+- What failure modes would hurt them?
+- What can I actually measure?
+Then recommend 2-3 SLIs with specific metric calculations.
+
+
+What you're learning: SLI selection is a design exercise, not a checklist. The right SLIs depend on what your users actually experience.
+
+Prompt 3: Create Recording Rules​
+Given this metric: http_requests_total with labels {service, status, method, path}
+
+Help me create Prometheus recording rules for:
+1. Request rate by service
+2. Error ratio (5xx / total)
+3. 30-day availability percentage
+4. Error budget remaining
+
+Use the task_api prefix and explain why pre-computing these helps.
+
+
+What you're learning: Recording rules are performance optimization with semantic value. They give names to important calculations and make dashboards instantaneous.
+
+Safety Note​
+
+When implementing SLOs in production, start with a monitoring-only phase. Track your SLIs and proposed SLOs for 2-4 weeks before making policy decisions based on them. This prevents setting unrealistic targets that immediately trigger false emergencies.

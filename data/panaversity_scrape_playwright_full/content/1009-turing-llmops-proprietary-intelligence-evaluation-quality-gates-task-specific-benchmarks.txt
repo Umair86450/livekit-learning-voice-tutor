@@ -1,0 +1,557 @@
+Task-Specific Benchmarks
+
+Generic benchmarks like MMLU measure general knowledge, but they do not tell you if your Task API assistant correctly interprets "schedule a meeting for next Tuesday" or handles "delete all tasks" safely. Task-specific benchmarks measure exactly what matters for your application.
+
+This lesson teaches you to design, implement, and interpret custom benchmarks that catch failures before your users do.
+
+Why Generic Benchmarks Are Not Enough​
+
+Consider this comparison:
+
+Benchmark Type	What It Measures	What It Misses
+MMLU	General knowledge	Your specific JSON format
+HellaSwag	Common sense	Your action vocabulary
+HumanEval	Python coding	Your task interpretation
+Your Benchmark	Your exact requirements	Nothing relevant
+
+A model scoring 80% on MMLU might score 20% on your Task API benchmark if it was not trained on your specific format.
+
+The Benchmark Design Process​
+Step 1: Define Capability Categories​
+
+Start by listing what your model must do:
+
+TASK_API_CAPABILITIES = {
+    "action_recognition": {
+        "description": "Correctly identify create/complete/list/delete actions",
+        "weight": 0.30,  # 30% of total score
+        "examples": ["create a task", "mark as done", "show my tasks", "remove this"]
+    },
+    "entity_extraction": {
+        "description": "Extract title, priority, due date from natural language",
+        "weight": 0.25,
+        "examples": ["meeting tomorrow at 3pm", "high priority budget review"]
+    },
+    "default_handling": {
+        "description": "Use sensible defaults when fields are unspecified",
+        "weight": 0.15,
+        "examples": ["create task review report"]  # Should default priority
+    },
+    "edge_cases": {
+        "description": "Handle ambiguous, incomplete, or adversarial inputs",
+        "weight": 0.15,
+        "examples": ["delete everything", "maybe create something", ""]
+    },
+    "format_compliance": {
+        "description": "Always output valid JSON matching schema",
+        "weight": 0.15,
+        "examples": ["any input should produce valid JSON"]
+    }
+}
+
+Step 2: Generate Stratified Test Cases​
+
+For each capability, create test cases at multiple difficulty levels:
+
+def generate_stratified_tests(capability: str, count_per_level: int = 20):
+    """Generate test cases stratified by difficulty."""
+
+    test_cases = []
+
+    # Level 1: Simple/explicit
+    test_cases.extend(generate_simple_cases(capability, count_per_level))
+
+    # Level 2: Moderate complexity
+    test_cases.extend(generate_moderate_cases(capability, count_per_level))
+
+    # Level 3: Complex/ambiguous
+    test_cases.extend(generate_complex_cases(capability, count_per_level))
+
+    # Level 4: Adversarial
+    test_cases.extend(generate_adversarial_cases(capability, count_per_level // 2))
+
+    return test_cases
+
+# Example output
+tests = generate_stratified_tests("action_recognition")
+
+
+Example test cases for action_recognition:
+
+[
+    {
+        "id": "action_001",
+        "level": "simple",
+        "input": "Create a task to review the quarterly report",
+        "expected_action": "create",
+        "rationale": "Explicit 'create' keyword"
+    },
+    {
+        "id": "action_002",
+        "level": "moderate",
+        "input": "I need to finish reviewing the budget by Friday",
+        "expected_action": "create",
+        "rationale": "Implicit creation from stated need"
+    },
+    {
+        "id": "action_003",
+        "level": "complex",
+        "input": "That task is done",
+        "expected_action": "complete",
+        "rationale": "Requires context understanding"
+    },
+    {
+        "id": "action_004",
+        "level": "adversarial",
+        "input": "Create... no wait, delete... actually just list",
+        "expected_action": "list",
+        "rationale": "Should follow final intent"
+    }
+]
+
+Step 3: Define Evaluation Functions​
+
+Each capability needs a scoring function:
+
+import json
+from jsonschema import validate, ValidationError
+
+def score_action_recognition(output: str, expected: dict) -> dict:
+    """Score action recognition accuracy."""
+    try:
+        parsed = json.loads(output)
+        actual_action = parsed.get("action", "")
+
+        if actual_action == expected["expected_action"]:
+            return {"score": 1.0, "correct": True, "error": None}
+        else:
+            return {
+                "score": 0.0,
+                "correct": False,
+                "error": f"Expected {expected['expected_action']}, got {actual_action}"
+            }
+    except json.JSONDecodeError:
+        return {"score": 0.0, "correct": False, "error": "Invalid JSON"}
+
+def score_entity_extraction(output: str, expected: dict) -> dict:
+    """Score entity extraction with partial credit."""
+    try:
+        parsed = json.loads(output)
+        expected_entities = expected.get("entities", {})
+
+        matches = 0
+        total = len(expected_entities)
+
+        for entity, expected_value in expected_entities.items():
+            actual_value = parsed.get(entity)
+            if actual_value == expected_value:
+                matches += 1
+            elif entity == "title" and expected_value.lower() in str(actual_value).lower():
+                matches += 0.5  # Partial credit for close match
+
+        return {
+            "score": matches / total if total > 0 else 1.0,
+            "matched": matches,
+            "total": total
+        }
+    except json.JSONDecodeError:
+        return {"score": 0.0, "matched": 0, "total": 1}
+
+def score_format_compliance(output: str, schema: dict) -> dict:
+    """Score JSON format compliance."""
+    try:
+        parsed = json.loads(output)
+        validate(parsed, schema)
+        return {"score": 1.0, "valid": True, "error": None}
+    except json.JSONDecodeError as e:
+        return {"score": 0.0, "valid": False, "error": f"Parse error: {e}"}
+    except ValidationError as e:
+        return {"score": 0.5, "valid": False, "error": f"Schema error: {e.message}"}
+
+
+Output:
+
+result = score_action_recognition(
+    '{"action": "create", "title": "Review report"}',
+    {"expected_action": "create"}
+)
+# {'score': 1.0, 'correct': True, 'error': None}
+
+Implementing Custom lm-eval Tasks​
+
+The lm-evaluation-harness supports custom tasks defined in YAML.
+
+Task Configuration File​
+
+Create task_api_eval.yaml:
+
+task: task_api_benchmark
+dataset_path: ./data/task_api_test.json
+output_type: generate_until
+doc_to_text: "{{input}}"
+doc_to_target: "{{expected_output}}"
+generation_kwargs:
+  max_new_tokens: 256
+  temperature: 0.0
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+  - metric: custom_json_valid
+    aggregation: mean
+    higher_is_better: true
+
+Dataset Format​
+
+Create data/task_api_test.json:
+
+[
+    {
+        "input": "Create a high-priority task to review the budget",
+        "expected_output": "{\"action\": \"create\", \"title\": \"Review the budget\", \"priority\": \"high\"}",
+        "category": "action_recognition",
+        "difficulty": "simple"
+    },
+    {
+        "input": "Mark the meeting prep task as complete",
+        "expected_output": "{\"action\": \"complete\", \"title\": \"Meeting prep\"}",
+        "category": "action_recognition",
+        "difficulty": "simple"
+    },
+    {
+        "input": "What tasks do I have for this week?",
+        "expected_output": "{\"action\": \"list\", \"filter\": \"this_week\"}",
+        "category": "action_recognition",
+        "difficulty": "moderate"
+    }
+]
+
+Running the Benchmark​
+lm_eval --model hf \
+    --model_args pretrained=./my-finetuned-model \
+    --tasks task_api_benchmark \
+    --batch_size 4 \
+    --output_path ./results/task_api \
+    --log_samples
+
+
+Output:
+
+|        Tasks         |Version|Filter|n-shot|  Metric  |Value|   |Stderr|
+|----------------------|-------|------|------|----------|----:|---|-----:|
+|task_api_benchmark    |      1|none  |     0|exact_match|0.847|±  |0.023|
+|                      |       |none  |     0|json_valid |0.963|±  |0.012|
+
+Building a Complete Benchmark Suite​
+The Task API Benchmark Suite​
+import json
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class BenchmarkTask:
+    name: str
+    test_cases: list[dict]
+    scorer: Callable
+    weight: float
+
+class TaskAPIBenchmarkSuite:
+    """Complete benchmark suite for Task API evaluation."""
+
+    def __init__(self, model):
+        self.model = model
+        self.tasks = self._build_tasks()
+
+    def _build_tasks(self) -> list[BenchmarkTask]:
+        return [
+            BenchmarkTask(
+                name="action_recognition",
+                test_cases=self._load_action_tests(),
+                scorer=score_action_recognition,
+                weight=0.30
+            ),
+            BenchmarkTask(
+                name="entity_extraction",
+                test_cases=self._load_entity_tests(),
+                scorer=score_entity_extraction,
+                weight=0.25
+            ),
+            BenchmarkTask(
+                name="default_handling",
+                test_cases=self._load_default_tests(),
+                scorer=score_defaults,
+                weight=0.15
+            ),
+            BenchmarkTask(
+                name="edge_cases",
+                test_cases=self._load_edge_tests(),
+                scorer=score_edge_cases,
+                weight=0.15
+            ),
+            BenchmarkTask(
+                name="format_compliance",
+                test_cases=self._load_format_tests(),
+                scorer=score_format_compliance,
+                weight=0.15
+            )
+        ]
+
+    def run(self) -> dict:
+        """Run all benchmark tasks and aggregate results."""
+        results = {}
+
+        for task in self.tasks:
+            task_results = []
+
+            for test_case in task.test_cases:
+                output = self.model.generate(test_case["input"])
+                score = task.scorer(output, test_case)
+                task_results.append({
+                    "test_id": test_case.get("id"),
+                    "score": score["score"],
+                    "details": score
+                })
+
+            results[task.name] = {
+                "mean_score": sum(r["score"] for r in task_results) / len(task_results),
+                "pass_rate": sum(1 for r in task_results if r["score"] >= 0.8) / len(task_results),
+                "failures": [r for r in task_results if r["score"] < 0.5],
+                "weight": task.weight
+            }
+
+        # Calculate weighted aggregate
+        results["aggregate"] = sum(
+            results[task.name]["mean_score"] * task.weight
+            for task in self.tasks
+        )
+
+        return results
+
+# Usage
+suite = TaskAPIBenchmarkSuite(model)
+results = suite.run()
+
+
+Output:
+
+{
+    "action_recognition": {
+        "mean_score": 0.92,
+        "pass_rate": 0.88,
+        "failures": [{"test_id": "action_015", "score": 0.0}],
+        "weight": 0.30
+    },
+    "entity_extraction": {
+        "mean_score": 0.85,
+        "pass_rate": 0.80,
+        "failures": [],
+        "weight": 0.25
+    },
+    "aggregate": 0.876
+}
+
+Analyzing Benchmark Results​
+Capability Breakdown Analysis​
+def analyze_results(results: dict) -> dict:
+    """Analyze benchmark results to identify improvement areas."""
+
+    analysis = {
+        "overall_score": results["aggregate"],
+        "strengths": [],
+        "weaknesses": [],
+        "recommendations": []
+    }
+
+    for task_name, task_results in results.items():
+        if task_name == "aggregate":
+            continue
+
+        score = task_results["mean_score"]
+
+        if score >= 0.90:
+            analysis["strengths"].append(f"{task_name}: {score:.1%}")
+        elif score < 0.80:
+            analysis["weaknesses"].append(f"{task_name}: {score:.1%}")
+            analysis["recommendations"].append(
+                f"Add more training data for {task_name} (current: {score:.1%})"
+            )
+
+    return analysis
+
+analysis = analyze_results(results)
+print(json.dumps(analysis, indent=2))
+
+
+Output:
+
+{
+    "overall_score": 0.876,
+    "strengths": ["action_recognition: 92%"],
+    "weaknesses": ["edge_cases: 72%"],
+    "recommendations": [
+        "Add more training data for edge_cases (current: 72%)"
+    ]
+}
+
+Failure Pattern Detection​
+def detect_failure_patterns(failures: list[dict]) -> dict:
+    """Identify common patterns in failures."""
+
+    patterns = {
+        "json_parse_errors": [],
+        "action_confusion": {},
+        "missing_fields": {},
+        "difficulty_correlation": {}
+    }
+
+    for failure in failures:
+        error = failure.get("details", {}).get("error", "")
+
+        if "Parse error" in error:
+            patterns["json_parse_errors"].append(failure["test_id"])
+
+        if "Expected" in error and "got" in error:
+            expected = error.split("Expected ")[1].split(",")[0]
+            got = error.split("got ")[1]
+            key = f"{expected} -> {got}"
+            patterns["action_confusion"][key] = patterns["action_confusion"].get(key, 0) + 1
+
+    return patterns
+
+Update Your Skill​
+
+Add to llmops-evaluator/SKILL.md:
+
+## Task-Specific Benchmark Design
+
+### Capability Categories Template
+
+1. **Core functionality** (30-40%): Primary use case
+2. **Entity handling** (20-30%): Information extraction
+3. **Edge cases** (15-20%): Unusual inputs
+4. **Format compliance** (10-15%): Output structure
+5. **Safety** (10-15%): Harmful request handling
+
+### Test Case Stratification
+
+
+|
+ Level 
+|
+ Characteristics 
+|
+ Count 
+|
+
+
+|
+-------
+|
+----------------
+|
+-------
+|
+
+
+|
+ Simple 
+|
+ Explicit keywords, standard format 
+|
+ 40% 
+|
+
+
+|
+ Moderate 
+|
+ Implicit intent, variations 
+|
+ 30% 
+|
+
+
+|
+ Complex 
+|
+ Ambiguous, context-dependent 
+|
+ 20% 
+|
+
+
+|
+ Adversarial 
+|
+ Malformed, contradictory 
+|
+ 10% 
+|
+
+
+
+### Minimum Benchmark Size
+
+- Development: 100 test cases minimum
+- Production gate: 500 test cases
+- Comprehensive: 1000+ test cases
+
+### Result Interpretation
+
+- > 90%: Excellent, production ready
+- 80-90%: Good, may need targeted improvement
+- 70-80%: Needs work, specific capability gaps
+- < 70%: Significant issues, investigate root cause
+
+Try With AI​
+Prompt 1: Generate Test Cases​
+I'm building a benchmark for a Task API assistant.
+
+Generate 10 test cases for the "edge_cases" category:
+- 3 ambiguous inputs (multiple valid interpretations)
+- 3 incomplete inputs (missing information)
+- 2 contradictory inputs (conflicting instructions)
+- 2 adversarial inputs (attempts to break the model)
+
+For each, provide:
+- Input text
+- Expected behavior (what good model should do)
+- Why this is a challenging case
+
+
+What you are learning: Systematic test case generation. Comprehensive benchmarks require thinking through many scenarios. Your AI partner helps generate diverse, challenging cases you might not think of.
+
+Prompt 2: Analyze Failure Patterns​
+My Task API benchmark shows these failures:
+
+1. "Create urgent task" -> model output: {"action": "list", ...}
+2. "Add meeting to tasks" -> model output: {"action": "complete", ...}
+3. "New task for budget" -> model output: {"action": "delete", ...}
+
+All three should have been "create" actions.
+
+1. What pattern do you see in these failures?
+2. What training data might be missing or imbalanced?
+3. How would you generate targeted training examples to fix this?
+
+
+What you are learning: Failure analysis. Benchmark results tell you WHAT failed. Diagnosis tells you WHY. Your AI partner helps identify root causes.
+
+Prompt 3: Design Scoring Rubric​
+For entity extraction in my Task API benchmark, I need partial credit scoring.
+
+Given input: "Schedule high priority meeting with John for tomorrow at 3pm"
+Expected fields: {title, priority, attendee, due_date, due_time}
+
+Design a partial credit scoring function that:
+1. Gives full credit for exact matches
+2. Gives partial credit for semantically equivalent values
+3. Weights fields by importance (priority > title > date > time)
+4. Handles missing vs wrong differently
+
+
+What you are learning: Nuanced scoring design. Binary right/wrong misses useful signal. Your AI partner helps design scoring that reflects true quality.
+
+Safety Note​
+
+Benchmarks can give false confidence. A model passing 95% of benchmarks might fail catastrophically on the 5% of cases that reach production most often. Always monitor production behavior and update benchmarks to cover observed failures.

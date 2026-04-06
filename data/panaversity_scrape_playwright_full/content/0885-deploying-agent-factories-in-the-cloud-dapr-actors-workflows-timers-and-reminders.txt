@@ -1,0 +1,485 @@
+Timers and Reminders
+
+Your TaskActor now maintains state across activations. Tasks persist. Conversation history survives. But what about scheduling? How do you fire a callback 24 hours after a task is created to check if it's overdue? How do you send a heartbeat every 30 seconds while an actor is active?
+
+In traditional systems, you'd reach for cron jobs, external schedulers, or background task queues. These work, but they introduce operational complexity: separate services to deploy, monitor, and coordinate with your actors. What if scheduling was built into the actor model itself?
+
+Dapr actors provide two scheduling mechanisms:
+
+Timers: Lightweight callbacks that fire while the actor is active. Lost when the actor deactivates or the pod restarts. Perfect for heartbeats, timeouts, and short-lived monitoring.
+
+Reminders: Persistent callbacks that survive actor deactivation, pod restarts, and even cluster failures. Perfect for deadlines, follow-ups, and mission-critical scheduled work.
+
+The distinction matters. Choose wrong, and your deadline notifications vanish when Kubernetes reschedules your pod. Choose right, and your scheduling just works.
+
+The Scheduling Trade-Off​
+
+Before diving into implementation, understand what you're trading:
+
+Feature	Timer	Reminder
+Survives deactivation	No	Yes
+Survives pod restart	No	Yes
+Storage	In-memory only	Persisted in Scheduler service
+Resource cost	Low (no I/O)	Higher (state store writes)
+Best for	Heartbeats, timeouts, monitoring	Deadlines, follow-ups, SLA enforcement
+Registration method	self.register_timer()	self.register_reminder()
+Callback method	Named method (string)	receive_reminder()
+
+The rule of thumb: If losing the scheduled callback would cause business problems, use a reminder. If it's just operational convenience, use a timer.
+
+Timer Implementation​
+
+Timers are in-memory callbacks. When your actor deactivates (idle timeout, pod restart, scale-down), all timers are lost. The actor must re-register them on the next activation if needed.
+
+Registering a Timer​
+from dapr.actor import Actor
+from datetime import timedelta
+
+class TaskActor(Actor, TaskActorInterface):
+    async def start_heartbeat(self) -> None:
+        """Register a timer that fires every 30 seconds."""
+        await self.register_timer(
+            timer_name="heartbeat",
+            callback="on_heartbeat",           # Method name as string
+            state=b'{"context": "monitoring"}', # Optional state passed to callback
+            due_time=timedelta(seconds=10),    # First fire after 10 seconds
+            period=timedelta(seconds=30)       # Then every 30 seconds
+        )
+
+    async def on_heartbeat(self, state: bytes) -> None:
+        """Callback executed when heartbeat timer fires."""
+        import json
+        context = json.loads(state.decode()) if state else {}
+        print(f"Heartbeat for TaskActor {self.id}: {context}")
+
+        # Update last_active timestamp
+        task_data = await self._state_manager.get_state("task_data")
+        task_data["last_heartbeat"] = datetime.utcnow().isoformat()
+        await self._state_manager.set_state("task_data", task_data)
+
+
+Output:
+
+Heartbeat for TaskActor task-123: {'context': 'monitoring'}
+
+
+Key points:
+
+callback is a string naming the method, not the method itself
+state is optional bytes passed to the callback when it fires
+due_time is when the first callback fires (relative or absolute)
+period is the interval between subsequent fires (omit for one-time)
+Unregistering a Timer​
+async def stop_heartbeat(self) -> None:
+    """Stop the heartbeat timer."""
+    await self.unregister_timer("heartbeat")
+
+
+Output:
+
+Timer 'heartbeat' unregistered for TaskActor task-123
+
+Timer Scheduling Formats​
+
+Dapr accepts multiple formats for due_time and period:
+
+Format	Example	Meaning
+timedelta	timedelta(seconds=30)	Python native (recommended)
+Duration string	"0h0m30s"	30 seconds
+ISO 8601 duration	"PT30S"	30 seconds
+ISO 8601 with repetition	"R5/PT30S"	30 seconds, max 5 times
+RFC3339 timestamp	"2025-12-30T15:00:00Z"	Specific absolute time
+What Happens When an Actor Deactivates​
+Timeline:
+0:00  - Actor activated, timer registered (heartbeat every 30s)
+0:30  - Heartbeat fires [tick]
+1:00  - Heartbeat fires [tick]
+1:30  - Actor goes idle, deactivation begins
+1:31  - Timer LOST (no persistence)
+2:00  - (No heartbeat - timer is gone)
+3:00  - New request activates actor
+3:00  - Timer NOT automatically re-registered
+
+
+If you need the timer to exist whenever the actor is active, re-register it in _on_activate:
+
+async def _on_activate(self) -> None:
+    """Re-register timers on activation."""
+    await self.register_timer(
+        timer_name="heartbeat",
+        callback="on_heartbeat",
+        state=b'{}',
+        due_time=timedelta(seconds=10),
+        period=timedelta(seconds=30)
+    )
+
+Reminder Implementation​
+
+Reminders are persistent callbacks. Dapr stores reminder metadata in the Scheduler service (as of Dapr v1.15), which persists to your configured state store. When your actor deactivates, the reminder survives. When the reminder fires, Dapr activates the actor and invokes the callback.
+
+Registering a Reminder​
+async def set_deadline_reminder(self, hours_until_deadline: int) -> None:
+    """Register a reminder that fires when the task deadline arrives."""
+    await self.register_reminder(
+        reminder_name="deadline",
+        state=b'{"action": "mark_overdue"}',
+        due_time=timedelta(hours=hours_until_deadline),
+        period=timedelta(seconds=0)  # One-time reminder (no repeat)
+    )
+
+
+Output:
+
+Reminder 'deadline' registered for TaskActor task-123
+Due in 24 hours
+
+The receive_reminder Callback​
+
+Unlike timers (which call a named method), all reminders invoke a single method: receive_reminder. You dispatch based on the reminder name:
+
+async def receive_reminder(
+    self,
+    name: str,
+    state: bytes,
+    due_time: timedelta,
+    period: timedelta
+) -> None:
+    """Callback for all reminders. Dispatch based on name."""
+    import json
+
+    if name == "deadline":
+        payload = json.loads(state.decode()) if state else {}
+        if payload.get("action") == "mark_overdue":
+            await self._mark_task_overdue()
+
+    elif name == "follow_up":
+        await self._send_follow_up_notification()
+
+    elif name == "daily_check":
+        await self._perform_daily_check()
+
+async def _mark_task_overdue(self) -> None:
+    """Mark the task as overdue when deadline reminder fires."""
+    task_data = await self._state_manager.get_state("task_data")
+    task_data["status"] = "overdue"
+    task_data["overdue_at"] = datetime.utcnow().isoformat()
+    await self._state_manager.set_state("task_data", task_data)
+    print(f"Task {self.id} marked as overdue")
+
+
+Output:
+
+Task task-123 marked as overdue
+
+Unregistering a Reminder​
+async def cancel_deadline(self) -> None:
+    """Cancel the deadline reminder (task completed on time)."""
+    await self.unregister_reminder("deadline")
+
+
+Output:
+
+Reminder 'deadline' unregistered for TaskActor task-123
+
+Recurring Reminders​
+
+For reminders that should fire repeatedly (daily checks, weekly reports):
+
+async def set_daily_check(self) -> None:
+    """Register a reminder that fires every 24 hours."""
+    await self.register_reminder(
+        reminder_name="daily_check",
+        state=b'{}',
+        due_time=timedelta(hours=24),  # First fire in 24 hours
+        period=timedelta(hours=24)     # Then every 24 hours
+    )
+
+Reminder TTL (Time-To-Live)​
+
+You can set reminders to auto-expire after a duration:
+
+async def set_expiring_reminder(self) -> None:
+    """Reminder that fires every hour but expires after 1 week."""
+    await self.register_reminder(
+        reminder_name="hourly_check",
+        state=b'{}',
+        due_time=timedelta(hours=1),
+        period=timedelta(hours=1),
+        ttl=timedelta(days=7)  # Auto-delete after 7 days
+    )
+
+What Happens When a Pod Restarts​
+Timeline:
+0:00  - Actor activated, reminder registered (deadline in 24h)
+1:00  - Pod restart (Kubernetes reschedule)
+1:01  - Actor deactivated, but reminder PERSISTS in Scheduler
+...
+24:00 - Scheduler triggers reminder
+24:00 - Dapr activates actor on available pod
+24:00 - receive_reminder called with name="deadline"
+24:00 - Task marked as overdue
+
+
+This is the critical difference. The reminder survives because Dapr's Scheduler service holds the reminder metadata independently of your actor's runtime state.
+
+Managing Reminders with the CLI​
+
+Dapr provides CLI commands to inspect and manage reminders externally:
+
+# List all actor reminders
+dapr scheduler list --filter actor
+
+# Output:
+# NAME                                  BEGIN     COUNT  LAST TRIGGER
+# actor/TaskActor/task-123/deadline     -3.89s    1      2025-12-29T16:58:55Z
+# actor/TaskActor/task-456/follow_up    -1.23s    3      2025-12-29T16:59:00Z
+
+# Get reminder details
+dapr scheduler get actor/TaskActor/task-123/deadline -o yaml
+
+# Delete a reminder externally
+dapr scheduler delete actor/TaskActor/task-123/deadline
+
+# Backup all reminders
+dapr scheduler export -o reminders-backup.bin
+
+# Restore from backup
+dapr scheduler import -f reminders-backup.bin
+
+Complete Example: TaskActor with Deadline Reminder​
+
+Here's a complete TaskActor implementation combining timers and reminders:
+
+from dapr.actor import Actor, ActorInterface, actormethod
+from dapr.actor.runtime.context import ActorRuntimeContext
+from datetime import datetime, timedelta
+import json
+
+class TaskActorInterface(ActorInterface):
+    @actormethod(name="CreateTask")
+    async def create_task(self, task_data: dict) -> dict: ...
+
+    @actormethod(name="GetTask")
+    async def get_task(self) -> dict: ...
+
+    @actormethod(name="CompleteTask")
+    async def complete_task(self) -> dict: ...
+
+class TaskActor(Actor, TaskActorInterface):
+    def __init__(self, ctx: ActorRuntimeContext, actor_id: str):
+        super().__init__(ctx, actor_id)
+        self._state_manager = ctx.state_manager
+
+    async def _on_activate(self) -> None:
+        """Called when actor is activated."""
+        # Re-register heartbeat timer on every activation
+        await self.register_timer(
+            timer_name="heartbeat",
+            callback="on_heartbeat",
+            state=b'{}',
+            due_time=timedelta(seconds=30),
+            period=timedelta(seconds=60)
+        )
+
+    async def _on_deactivate(self) -> None:
+        """Called before actor deactivates."""
+        # Timer is automatically cleaned up
+        # Reminders persist - no action needed
+        pass
+
+    async def create_task(self, task_data: dict) -> dict:
+        """Create task and set deadline reminder."""
+        task = {
+            "id": self.id.id,
+            "title": task_data.get("title", "Untitled"),
+            "status": "pending",
+            "created_at": datetime.utcnow().isoformat(),
+            "deadline_hours": task_data.get("deadline_hours", 24)
+        }
+        await self._state_manager.set_state("task_data", task)
+
+        # Set deadline reminder (PERSISTENT)
+        await self.register_reminder(
+            reminder_name="deadline",
+            state=json.dumps({"action": "mark_overdue"}).encode(),
+            due_time=timedelta(hours=task["deadline_hours"]),
+            period=timedelta(seconds=0)  # One-time
+        )
+
+        return {"status": "created", "task": task}
+
+    async def get_task(self) -> dict:
+        """Get current task state."""
+        task = await self._state_manager.get_state("task_data")
+        return task
+
+    async def complete_task(self) -> dict:
+        """Complete task and cancel deadline reminder."""
+        task = await self._state_manager.get_state("task_data")
+        task["status"] = "completed"
+        task["completed_at"] = datetime.utcnow().isoformat()
+        await self._state_manager.set_state("task_data", task)
+
+        # Cancel the deadline reminder (task completed on time)
+        await self.unregister_reminder("deadline")
+
+        return {"status": "completed", "task": task}
+
+    async def on_heartbeat(self, state: bytes) -> None:
+        """Timer callback - update last_heartbeat timestamp."""
+        found, task = await self._state_manager.try_get_state("task_data")
+        if found:
+            task["last_heartbeat"] = datetime.utcnow().isoformat()
+            await self._state_manager.set_state("task_data", task)
+
+    async def receive_reminder(
+        self,
+        name: str,
+        state: bytes,
+        due_time: timedelta,
+        period: timedelta
+    ) -> None:
+        """Reminder callback - dispatch based on name."""
+        if name == "deadline":
+            payload = json.loads(state.decode()) if state else {}
+            if payload.get("action") == "mark_overdue":
+                task = await self._state_manager.get_state("task_data")
+                if task["status"] == "pending":  # Only if not already completed
+                    task["status"] = "overdue"
+                    task["overdue_at"] = datetime.utcnow().isoformat()
+                    await self._state_manager.set_state("task_data", task)
+                    print(f"Task {self.id.id} marked as overdue")
+
+
+Output (over 25 hours):
+
+# Hour 0: Task created
+{"status": "created", "task": {"id": "task-123", "title": "Review PR", ...}}
+
+# Hour 0:30: Heartbeat (timer)
+TaskActor task-123 heartbeat
+
+# Hour 1:00: Heartbeat
+TaskActor task-123 heartbeat
+
+# Hour 1:30: Pod restart - timer lost, reminder persists
+
+# Hour 2:00: New request activates actor - timer re-registered
+
+# Hour 24: Deadline reminder fires (survived pod restart!)
+Task task-123 marked as overdue
+
+Decision Framework: Timer vs Reminder​
+
+Use this framework when deciding:
+
+Scenario	Use Timer	Use Reminder
+Heartbeat while actor is active	Yes	-
+Response timeout (30 seconds)	Yes	-
+Session idle detection	Yes	-
+Task deadline (24 hours)	-	Yes
+Daily status report	-	Yes
+Follow-up after 1 week	-	Yes
+SLA breach notification	-	Yes
+Temporary monitoring (until next request)	Yes	-
+Scheduled maintenance window	-	Yes
+
+Ask yourself:
+
+Will the callback still matter if the pod restarts?
+
+Yes: Use reminder
+No: Use timer
+
+Is this operational convenience or business requirement?
+
+Operational: Timer
+Business: Reminder
+
+What's the time horizon?
+
+Seconds to minutes: Timer (usually)
+Hours to days: Reminder (always)
+Reflect on Your Skill​
+
+Does your dapr-deployment skill understand actor scheduling patterns?
+
+Test Your Skill​
+Using my dapr-deployment skill, explain when I should use an actor timer versus
+a reminder. I need to:
+1. Send a heartbeat every 30 seconds while processing
+2. Mark a task as overdue if not completed within 24 hours
+3. Send a weekly summary every Monday
+
+Identify Gaps​
+
+Ask yourself:
+
+Does my skill explain the persistence difference?
+Does it mention that reminders survive pod restarts?
+Does it show both register_timer() and register_reminder() patterns?
+Does it explain the receive_reminder callback dispatch pattern?
+Improve Your Skill​
+
+If you found gaps:
+
+My dapr-deployment skill needs actor scheduling patterns. Update it to include:
+- Timer registration with callback method names
+- Reminder registration with receive_reminder dispatch
+- The persistence trade-off (timers lost on deactivation, reminders survive)
+- Decision criteria for timer vs reminder selection
+- Scheduler CLI commands for reminder management
+
+Try With AI​
+
+Open your AI companion (Claude, ChatGPT, Gemini) and explore these scheduling patterns.
+
+Prompt 1: Understand the Persistence Trade-Off​
+Explain the difference between Dapr actor timers and reminders to me. I understand
+that both schedule future callbacks, but I'm confused about when to use which.
+
+Walk me through this scenario:
+1. I register a timer that fires in 1 hour
+2. I register a reminder that fires in 1 hour
+3. After 30 minutes, Kubernetes reschedules my pod
+
+What happens to each? Why? What's the Scheduler service and why does it matter
+for reminders?
+
+
+What you're learning: The fundamental persistence distinction. Timers are in-memory convenience; reminders are durable business logic. Understanding this prevents lost notifications and missed deadlines.
+
+Prompt 2: Implement a Deadline System​
+Help me implement a task deadline system for my TaskActor. Requirements:
+- When a task is created, set a deadline reminder for 24 hours later
+- If the task is completed before the deadline, cancel the reminder
+- If the deadline fires, mark the task as "overdue"
+- The deadline must survive pod restarts
+
+Show me:
+1. The create_task method that registers the reminder
+2. The complete_task method that cancels the reminder
+3. The receive_reminder callback that handles the deadline
+
+Also show me how to test this by simulating a pod restart.
+
+
+What you're learning: Complete lifecycle management for persistent scheduling. You'll understand reminder registration, cancellation, and the callback pattern.
+
+Prompt 3: Design a Monitoring Dashboard​
+I want to build a monitoring system for my actors that uses both timers and reminders:
+
+1. Heartbeat timer: Every 60 seconds while active, update "last_seen" timestamp
+2. Health check reminder: Every 24 hours, check if actor has had activity
+3. Stale detection: If no heartbeat in 5 minutes, consider actor stale
+
+Help me design this system. Which parts use timers? Which use reminders? Why?
+Also show me how to use the dapr scheduler CLI to view and manage these reminders
+externally.
+
+
+What you're learning: Combining timers and reminders for operational monitoring. You'll see how the two mechanisms complement each other for different time horizons.
+
+Safety Note​
+
+Reminders persist even if your actor code changes. If you rename a reminder or change the expected payload format, existing reminders will still fire with the old name and data. Before deploying actor changes that modify reminder behavior, use dapr scheduler delete-all actor/YourActorType to clear existing reminders, or ensure your receive_reminder handles legacy formats gracefully.

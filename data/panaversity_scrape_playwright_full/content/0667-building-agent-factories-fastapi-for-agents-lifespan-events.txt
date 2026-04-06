@@ -1,0 +1,438 @@
+Lifespan Events
+
+Your agent API needs resources ready before it handles requests. A database connection pool. A loaded ML model. An initialized cache. Loading these on-demand wastes the first request's time.
+
+Lifespan events let you run code at startup (before any request) and shutdown (after the last response). Think of it as opening and closing a restaurant—prep the kitchen before customers arrive, clean up after they leave.
+
+The Lifespan Pattern​
+
+FastAPI uses Python's @asynccontextmanager to define lifespan:
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Code here runs before the first request
+    print("Starting up...")
+
+    yield  # Server runs and handles requests
+
+    # SHUTDOWN: Code here runs after the server stops
+    print("Shutting down...")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+The pattern explained:
+
+Everything before yield runs at startup
+The yield statement is where the app runs and serves requests
+Everything after yield runs at shutdown
+
+Output (when server starts and stops):
+
+Starting up...
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000
+# ... server handles requests ...
+# (Ctrl+C to stop)
+INFO:     Shutting down
+Shutting down...
+INFO:     Application shutdown complete.
+
+Sharing State with Endpoints​
+
+Resources initialized at startup need to be accessible in endpoints. Use app.state:
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load at startup
+    app.state.settings = {"version": "1.0", "debug": True}
+    yield
+    # Cleanup (nothing to clean for a dict)
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/info")
+async def get_info(request: Request):
+    """Access shared state via request.app.state."""
+    return {
+        "version": request.app.state.settings["version"],
+        "debug": request.app.state.settings["debug"],
+    }
+
+
+Output:
+
+{
+  "version": "1.0",
+  "debug": true
+}
+
+
+Access app.state through request.app in endpoints.
+
+Database Connection Pool​
+
+The most common use case—create a connection pool at startup, close it at shutdown:
+
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlmodel.ext.asyncio.session import AsyncSession
+from fastapi import FastAPI, Depends, Request
+from config import get_settings
+
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Create engine and session factory
+    engine = create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=5,
+    )
+    app.state.async_session = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    print("Database pool created")
+
+    yield
+
+    # SHUTDOWN: Dispose of the engine
+    await engine.dispose()
+    print("Database pool closed")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+async def get_session(request: Request):
+    """Dependency that yields sessions from the pool."""
+    async with request.app.state.async_session() as session:
+        yield session
+
+
+@app.get("/tasks")
+async def get_tasks(session: AsyncSession = Depends(get_session)):
+    result = await session.exec(select(Task))
+    return result.all()
+
+
+Why this matters for agents:
+
+Connection pool is ready before first request
+No cold-start delay when agent calls /tasks
+Pool closes gracefully—no leaked connections
+Preloading ML Models​
+
+Agents often use ML models for embeddings, classification, or generation. Load them once at startup:
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from sentence_transformers import SentenceTransformer
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Load embedding model (slow operation)
+    print("Loading embedding model...")
+    app.state.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    print("Model loaded!")
+
+    yield
+
+    # SHUTDOWN: Free memory
+    del app.state.embedder
+    print("Model unloaded")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/embed")
+async def create_embedding(request: Request, text: str):
+    """Generate embeddings using preloaded model."""
+    embedding = request.app.state.embedder.encode(text)
+    return {"embedding": embedding.tolist()}
+
+
+Output (server startup):
+
+Loading embedding model...
+Model loaded!
+INFO:     Application startup complete.
+
+
+The first /embed request responds immediately—no model loading delay.
+
+Initializing External Clients​
+
+Connect to external services at startup:
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+import httpx
+from anthropic import AsyncAnthropic
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Initialize clients
+    app.state.http_client = httpx.AsyncClient(timeout=30.0)
+    app.state.anthropic = AsyncAnthropic()
+    print("Clients initialized")
+
+    yield
+
+    # SHUTDOWN: Close connections
+    await app.state.http_client.aclose()
+    print("Clients closed")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/agent/chat")
+async def agent_chat(request: Request, message: str):
+    """Use preinitialized Anthropic client."""
+    response = await request.app.state.anthropic.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": message}],
+    )
+    return {"response": response.content[0].text}
+
+Complete Lifespan Example​
+
+Production-ready lifespan combining multiple resources:
+
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlmodel.ext.asyncio.session import AsyncSession
+from fastapi import FastAPI
+import httpx
+import logging
+
+from config import get_settings
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize and cleanup application resources."""
+
+    # === STARTUP ===
+    logger.info("Starting application...")
+
+    # Database
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    app.state.async_session = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+    app.state.engine = engine
+    logger.info("Database pool created")
+
+    # HTTP client for external calls
+    app.state.http_client = httpx.AsyncClient(timeout=30.0)
+    logger.info("HTTP client initialized")
+
+    # Cache or other state
+    app.state.cache = {}
+    logger.info("Cache initialized")
+
+    yield  # Application runs here
+
+    # === SHUTDOWN ===
+    logger.info("Shutting down application...")
+
+    # Close HTTP client
+    await app.state.http_client.aclose()
+    logger.info("HTTP client closed")
+
+    # Dispose database engine
+    await app.state.engine.dispose()
+    logger.info("Database pool closed")
+
+
+app = FastAPI(
+    title="Task API",
+    lifespan=lifespan,
+)
+
+
+Output (startup):
+
+INFO:     Starting application...
+INFO:     Database pool created
+INFO:     HTTP client initialized
+INFO:     Cache initialized
+INFO:     Application startup complete.
+
+
+Output (shutdown with Ctrl+C):
+
+INFO:     Shutting down application...
+INFO:     HTTP client closed
+INFO:     Database pool closed
+INFO:     Application shutdown complete.
+
+Deprecated: on_event Decorator​
+
+You may see older code using @app.on_event():
+
+# DEPRECATED - don't use in new code
+@app.on_event("startup")
+async def startup():
+    print("Starting...")
+
+@app.on_event("shutdown")
+async def shutdown():
+    print("Stopping...")
+
+
+Why lifespan is better:
+
+on_event (deprecated)	lifespan (recommended)
+Separate functions for startup/shutdown	Single function with yield
+No easy way to share state	app.state flows naturally
+Can't pass resources from startup to shutdown	Variables persist across yield
+Being removed in future versions	Official recommended approach
+Hands-On Exercise​
+
+Step 1: Add lifespan to your Task API with database pool
+
+Step 2: Preload a simple cache at startup:
+
+app.state.rate_limits = {}  # user_id -> request_count
+
+
+Step 3: Add cleanup logging to verify shutdown runs
+
+Step 4: Test startup/shutdown:
+
+# Start server
+uvicorn main:app --reload
+
+# In another terminal, verify startup ran
+curl http://localhost:8000/info
+
+# Stop server (Ctrl+C) and verify shutdown logs
+
+Common Mistakes​
+
+Mistake 1: Forgetting to yield
+
+# Wrong - server never starts
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Starting...")
+    # Missing yield!
+
+
+# Correct
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Starting...")
+    yield
+
+
+Mistake 2: Not passing lifespan to FastAPI
+
+# Wrong - lifespan never runs
+app = FastAPI()
+
+# Correct
+app = FastAPI(lifespan=lifespan)
+
+
+Mistake 3: Accessing app.state without request
+
+# Wrong - can't access app.state directly in endpoint
+@app.get("/data")
+async def get_data():
+    return app.state.settings  # May work but wrong pattern
+
+# Correct - access through request
+@app.get("/data")
+async def get_data(request: Request):
+    return request.app.state.settings
+
+Why This Matters for Agents​
+
+Agent APIs benefit from lifespan in three ways:
+
+No cold starts — Embedding models, database pools, LLM clients ready before first request
+Graceful shutdown — Finish pending requests, close connections cleanly
+Resource sharing — One model instance serves all requests efficiently
+
+When your agent needs to respond in milliseconds, loading resources lazily on first request isn't acceptable.
+
+Try With AI​
+
+Prompt 1: Health Check with Lifespan State
+
+I want to add a /health endpoint that returns the status of
+resources initialized in lifespan. Show me how to track
+database connection status and cache size in app.state,
+then expose them in a health check endpoint.
+
+
+What you're learning: Health checks that reflect actual resource status, not just "OK".
+
+Prompt 2: Graceful Shutdown with Pending Requests
+
+My agent API sometimes gets shutdown signals while
+processing requests. How do I ensure pending requests
+complete before shutdown runs? Show me the pattern
+for graceful shutdown with a timeout.
+
+
+What you're learning: Production shutdown handling—don't cut off users mid-request.
+
+Prompt 3: Conditional Resource Loading
+
+I want to load an ML model only in production (not in tests).
+How do I check the environment in lifespan and conditionally
+initialize resources? Include the pattern for mocking
+app.state in tests.
+
+
+What you're learning: Environment-aware initialization for faster test runs.
+
+Reflect on Your Skill​
+
+You built a fastapi-agent skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my fastapi-agent skill, help me set up lifespan events
+for a database connection pool and HTTP client.
+Does my skill include @asynccontextmanager lifespan patterns?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the lifespan function with yield?
+Did it use app.state for sharing resources?
+Did it include cleanup after yield?
+Did it pass lifespan to FastAPI()?
+Improve Your Skill​
+
+If you found gaps:
+
+My fastapi-agent skill is missing lifespan event patterns.
+Update it to include a lifespan function using @asynccontextmanager,
+app.state for database pool and HTTP clients,
+and proper cleanup after yield.

@@ -1,0 +1,246 @@
+Evals Are Exams for Reasoning
+
+You built an agent. It "works"—the code runs, no errors appear, and sometimes it produces exactly what you expected. But users are complaining. "It doesn't understand what I need." "The suggestions don't fit my situation." "It keeps missing the point."
+
+You run your test suite. Everything passes. Yet the agent clearly isn't performing well in the real world.
+
+What's happening?
+
+The problem isn't your code. The problem is that you're testing the wrong thing. You're checking whether the calculator works when you should be testing whether the student knows when to multiply.
+
+The Calculator vs Student Problem​
+
+Traditional software testing answers a simple question: Does this code produce the correct output for a given input?
+
+def add(a, b):
+    return a + b
+
+def test_add():
+    assert add(2, 3) == 5  # PASS or FAIL - deterministic
+
+
+This is Test-Driven Development (TDD). You define expected outputs. Code either produces them (PASS) or doesn't (FAIL). There's no ambiguity—no "mostly correct" or "pretty good."
+
+But consider a different kind of test. Not "does the calculator work?" but "does the student know when to use multiplication?"
+
+You present a word problem: "A farmer has 3 fields, each with 4 cows. How many cows total?"
+
+A student who writes "3 + 4 = 7" has the calculator working perfectly—addition is correct! But they made the wrong decision about WHICH operation to use. The reasoning was flawed, even though the calculation was accurate.
+
+This is exactly the challenge with AI agents.
+
+Your agent's code might execute flawlessly. API calls succeed. JSON parses correctly. But did the agent make the right DECISION about what to do? Did it correctly interpret what the user actually needed? Did it choose the appropriate tool for the situation?
+
+TDD can't answer these questions. You need a different approach: Evals.
+
+TDD vs Evals: The Core Distinction​
+
+Andrew Ng, co-founder of Google Brain and former Chief Scientist at Baidu, has observed hundreds of teams building AI agents. His assessment is stark:
+
+"One of the biggest predictors for whether someone is able to build agentic workflows really well is whether or not they're able to drive a really disciplined evaluation process." — Andrew Ng
+
+What separates successful agent builders from struggling ones isn't better prompts or fancier architectures. It's systematic evaluation of reasoning quality.
+
+Here's the fundamental distinction:
+
+Aspect	TDD (Code Testing)	Evals (Agent Evaluation)
+What it tests	Does function return correct output?	Did agent make the right decision?
+Outcome type	PASS or FAIL (deterministic)	Scores (probabilistic)
+Example question	"Does get_weather() return valid JSON?"	"Did agent correctly interpret user intent?"
+Analogy	Testing if calculator works	Testing if student knows WHEN to use multiplication
+When it fails	Code bug or logic error	Reasoning failure, context misunderstanding
+How to improve	Fix the code	Improve prompts, add context, adjust guardrails
+Why Probabilistic Outcomes?​
+
+TDD produces binary results because code execution is deterministic. Run the same function with the same inputs, you get the same output every time.
+
+Agent reasoning is different. The same prompt can produce varying quality responses:
+
+Model randomness (temperature settings)
+Context interpretation differences
+Ambiguous user requests that allow multiple valid interpretations
+Edge cases the prompt doesn't explicitly address
+
+When you ask an agent "Help me write a professional email to decline a meeting," there isn't ONE correct answer. There's a range of acceptable responses and a range of unacceptable ones. The evaluation question isn't "Is this exactly right?" but "How good is this?"
+
+That's why evals produce scores, not binary verdicts.
+
+The Exam Analogy: Initial vs Regression Evals​
+
+Think of evals like course exams for your agent:
+
+Eval Type	Educational Analogy	Purpose
+Initial Eval	Final exam	Does the agent pass the course? Can it handle all the scenarios it's designed for?
+Regression Eval	Pop quiz	Did the latest update break something that was working?
+Component Eval	Subject test	Test individual skills in isolation (routing, tool selection, output formatting)
+End-to-End Eval	Comprehensive exam	Test the full experience from input to final output
+
+When you first build an agent, you run Initial Evals—comprehensive tests that verify it can handle its designed purpose. These are your "final exams."
+
+But agents evolve. You improve prompts, add features, adjust guardrails. Each change might break something that was working. Regression Evals are your "pop quizzes"—quick checks that previous capabilities still work after changes.
+
+What Makes Evals Different From Tests​
+
+Here's a concrete example. Imagine you've built a Task API agent that helps users manage their to-do items.
+
+Traditional test (TDD approach):
+
+def test_create_task():
+    response = agent.create_task(
+        title="Buy groceries",
+        due_date="2025-01-15"
+    )
+    assert response.status_code == 200
+    assert "task_id" in response.json()
+
+
+This tests that the code works. It doesn't test whether the agent made good decisions.
+
+Evaluation (Evals approach):
+
+def eval_task_interpretation():
+    """
+    Evaluate: Does the agent correctly interpret ambiguous task requests?
+    """
+    test_cases = [
+        {
+            "input": "remind me to call mom",
+            "expected_interpretation": "Creates a task with reminder, not a calendar event",
+            "criteria": ["task_created", "reminder_set", "no_calendar_event"]
+        },
+        {
+            "input": "meeting prep for tomorrow",
+            "expected_interpretation": "Creates task due before the meeting, not the meeting itself",
+            "criteria": ["task_created", "due_before_meeting", "no_meeting_created"]
+        }
+    ]
+
+    results = []
+    for case in test_cases:
+        output = agent.process(case["input"])
+        score = grade_interpretation(output, case["criteria"])
+        results.append(score)
+
+    return sum(results) / len(results)  # Returns 0.0 to 1.0, not PASS/FAIL
+
+
+Notice the difference:
+
+TDD asks: "Did the function return 200?"
+Evals ask: "Did the agent understand that 'remind me to call mom' should create a task with a reminder, not schedule a phone call on a calendar?"
+The Core Insight: What Needs Testing vs What Needs Evaluation​
+
+Not everything about your agent needs evals. Some things are still TDD territory:
+
+Use TDD (traditional tests) for:
+
+Does the API endpoint return valid JSON?
+Does authentication work correctly?
+Does the database connection succeed?
+Does the function handle null inputs without crashing?
+
+Use Evals for:
+
+Did the agent correctly interpret user intent?
+Did it select the appropriate tool for the task?
+Is the output quality acceptable for the use case?
+Did it handle ambiguity appropriately?
+Did it maintain appropriate context across turns?
+
+The rule of thumb: If there's exactly one correct answer, use TDD. If there's a range of acceptable answers requiring judgment, use evals.
+
+Exercise: Identify Evaluation Targets in Your Agent​
+
+Think about an agent you're building or planning to build (or use the Task API agent from earlier chapters as your example).
+
+List three behaviors that need evaluation rather than traditional testing:
+
+Example answers for Task API agent:
+
+Intent interpretation: When a user says "handle my emails," does the agent correctly understand they want to create tasks from emails, not send emails?
+
+Priority inference: When a user creates a task without specifying priority, does the agent make reasonable priority decisions based on content ("urgent meeting prep" should be high priority)?
+
+Due date interpretation: When a user says "do this soon," does the agent set an appropriate near-term due date rather than leaving it blank or setting it for next year?
+
+Each of these involves JUDGMENT—there's no single correct answer, but there are clearly better and worse decisions. That's what makes them eval targets rather than test targets.
+
+The Eval-Driven Development Loop​
+
+Just as TDD follows "write test, write code, verify test passes," eval-driven development follows its own loop:
+
+Build agent v1
+    |
+    v
+Create eval dataset (10-20 cases)
+    |
+    v
+Run evals --> Find 70% pass rate
+    |
+    v
+Error analysis --> "45% of errors are routing problems"
+    |
+    v
+Fix routing --> Run evals --> 85% pass rate
+    |
+    v
+Error analysis --> "30% of errors are output format issues"
+    |
+    v
+Fix format --> Run evals --> 92% pass rate
+    |
+    v
+Ship with regression protection
+
+
+The key insight: Don't guess what's wrong—measure it. When your agent underperforms, evals tell you WHERE it's failing so you can focus improvement efforts.
+
+Reflect on Your Skill​
+
+If you're building the agent-evals skill from Lesson 0, add this core distinction to your skill:
+
+Key insight to encode: TDD validates code correctness with deterministic PASS/FAIL. Evals measure reasoning quality with probabilistic scores. Use TDD for "does it work?" questions. Use evals for "did it decide correctly?" questions.
+
+Decision framework to add: When evaluating agent behavior, ask: "Is there exactly one correct answer?" If yes, use TDD. If there's a range of acceptable answers requiring judgment, use evals.
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Explore the Distinction​
+I'm learning about the difference between TDD (Test-Driven Development) and
+Evals for AI agents. Help me understand this better by giving me 3 examples
+of agent behaviors that seem like they should be "tested" but actually need
+"evaluated." For each example, explain:
+1. Why a traditional test would miss the real quality issue
+2. What an eval would measure instead
+3. How the eval result would be a score rather than PASS/FAIL
+
+
+What you're learning: Deepening your understanding of what makes agent evaluation fundamentally different from code testing—the probabilistic nature of reasoning quality.
+
+Prompt 2: Classify Your Agent's Behaviors​
+I'm building an agent that [describe your agent's purpose]. Help me classify
+its behaviors into two categories:
+
+1. Things that need traditional TDD tests (deterministic correctness)
+2. Things that need evals (reasoning quality judgment)
+
+For the eval category, suggest what criteria I might use to score each
+behavior from 0-5 or 0-100.
+
+
+What you're learning: Applying the TDD vs Evals framework to your own project—the first step toward building effective evaluation systems.
+
+Prompt 3: Challenge the Analogy​
+The lesson used "calculator vs student" as an analogy for TDD vs Evals.
+Challenge this analogy: What are its limitations? When might it be misleading?
+Then suggest an alternative analogy that might work better for a specific
+aspect of agent evaluation.
+
+
+What you're learning: Critical evaluation of mental models—understanding both the strengths and limitations of analogies helps you know when they apply and when they don't.
+
+Safety Note​
+
+As you explore evals, remember that no evaluation system is perfect. Evals measure what you define as quality—if your criteria miss important dimensions, your agent can score well while still failing users. Always complement automated evals with real user feedback.

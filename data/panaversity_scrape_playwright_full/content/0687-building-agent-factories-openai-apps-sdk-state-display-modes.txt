@@ -1,0 +1,336 @@
+Task Actions with callTool
+
+Your task list displays tasks, but clicking a checkbox does nothing. In this lesson, you'll add real actions—Complete and Delete buttons that modify tasks on the server.
+
+The key difference from Lesson 3: sendFollowUpMessage goes through the conversation (the model sees it), while callTool talks directly to your server (no conversation turn). For fast, silent updates like toggling checkboxes, callTool is what you need.
+
+sendFollowUpMessage vs callTool​
+Method	Goes Through Model	Creates Turn	Best For
+sendFollowUpMessage	Yes	Yes	User-initiated actions, adding tasks
+callTool	No	No	Silent updates, toggling, deleting
+
+When a user clicks "Complete Task", they don't need the model to narrate "I've marked task 1 as complete." They just want the checkbox to update. That's callTool.
+
+Adding Action Tools​
+
+Add two new tools to your server. Update main.py:
+
+import mcp.types as types
+from mcp.server.fastmcp import FastMCP
+
+MIME_TYPE = "text/html+skybridge"
+
+TASKS = [
+    {"id": 1, "title": "Buy groceries", "done": False},
+    {"id": 2, "title": "Review pull request", "done": False},
+    {"id": 3, "title": "Call mom", "done": True},
+]
+
+mcp = FastMCP("TaskManager")
+
+@mcp.tool(
+    annotations={
+        "openai/widgetAccessible": True,  # Required for callTool
+    }
+)
+def complete_task(task_id: int) -> types.CallToolResult:
+    """Toggle a task's completion status."""
+    for task in TASKS:
+        if task["id"] == task_id:
+            task["done"] = not task["done"]
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="Task toggled")],
+                structuredContent={"success": True, "task_id": task_id, "done": task["done"]}
+            )
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text="Not found")],
+        structuredContent={"success": False}
+    )
+
+@mcp.tool(
+    annotations={
+        "openai/widgetAccessible": True,
+    }
+)
+def delete_task(task_id: int) -> types.CallToolResult:
+    """Delete a task by ID."""
+    global TASKS
+    original_len = len(TASKS)
+    TASKS = [t for t in TASKS if t["id"] != task_id]
+    success = len(TASKS) < original_len
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text="Deleted" if success else "Not found")],
+        structuredContent={"success": success}
+    )
+
+The Critical Annotation​
+@mcp.tool(
+    annotations={
+        "openai/widgetAccessible": True,
+    }
+)
+
+
+Without openai/widgetAccessible: True, the tool cannot be called from widgets. This is a security feature—only explicitly marked tools are accessible via callTool.
+
+Updating the Widget​
+
+Add action buttons to each task. Update WIDGET_HTML:
+
+WIDGET_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; margin: 0; padding: 16px; }
+    .container { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; }
+    h2 { margin: 0 0 16px 0; color: #333; }
+    .stats { color: #666; font-size: 14px; margin-bottom: 16px; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { padding: 12px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 12px; }
+    li:last-child { border-bottom: none; }
+    .done { text-decoration: line-through; color: #999; }
+    .task-title { flex: 1; }
+    .checkbox {
+      width: 24px; height: 24px;
+      border: 2px solid #667eea; border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+    }
+    .checkbox:hover { background: #f0f0ff; }
+    .checkbox.checked { background: #667eea; color: white; }
+    .delete-btn {
+      background: none; border: none; color: #999;
+      cursor: pointer; font-size: 18px; padding: 4px 8px;
+    }
+    .delete-btn:hover { color: #e53e3e; }
+    .refresh-btn {
+      background: #667eea; color: white; border: none;
+      padding: 10px 20px; border-radius: 6px; cursor: pointer; margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>TaskManager</h2>
+    <p class="stats" id="stats">Loading...</p>
+    <ul id="task-list"></ul>
+    <button class="refresh-btn" onclick="refresh()">Refresh</button>
+  </div>
+  <script>
+    const summary = window.openai?.toolOutput;
+    const meta = window.openai?.toolResponseMetadata;
+    const tasks = meta?.tasks || [];
+
+    if (summary) {
+      document.getElementById('stats').textContent =
+        summary.total + ' tasks (' + summary.pending + ' pending, ' + summary.completed + ' done)';
+    }
+
+    const list = document.getElementById('task-list');
+    tasks.forEach(task => {
+      const li = document.createElement('li');
+      li.innerHTML = `
+        <div class="checkbox ${task.done ? 'checked' : ''}"
+             onclick="toggleTask(${task.id})">
+          ${task.done ? '✓' : ''}
+        </div>
+        <span class="task-title ${task.done ? 'done' : ''}">${task.title}</span>
+        <button class="delete-btn" onclick="deleteTask(${task.id})">×</button>
+      `;
+      list.appendChild(li);
+    });
+
+    async function toggleTask(taskId) {
+      await window.openai?.callTool?.('complete_task', { task_id: taskId });
+      refresh();
+    }
+
+    async function deleteTask(taskId) {
+      await window.openai?.callTool?.('delete_task', { task_id: taskId });
+      refresh();
+    }
+
+    function refresh() {
+      window.openai?.sendFollowUpMessage?.({ prompt: "Show my tasks" });
+    }
+  </script>
+</body>
+</html>'''
+
+How callTool Works​
+async function toggleTask(taskId) {
+  await window.openai?.callTool?.('complete_task', { task_id: taskId });
+  refresh();
+}
+
+callTool('complete_task', { task_id: taskId }) calls your server tool directly
+The tool toggles the task and returns immediately
+refresh() triggers sendFollowUpMessage to redraw the widget
+
+The user sees: click checkbox → instant update. No model narration interrupts the flow.
+
+The Pattern: callTool + Refresh​
+
+For any action that modifies data:
+
+callTool to make the change
+sendFollowUpMessage to refresh the display
+
+This is the standard pattern for interactive widgets.
+
+Complete Server Code​
+
+Here's the full main.py:
+
+import mcp.types as types
+from mcp.server.fastmcp import FastMCP
+
+MIME_TYPE = "text/html+skybridge"
+
+TASKS = [
+    {"id": 1, "title": "Buy groceries", "done": False},
+    {"id": 2, "title": "Review pull request", "done": False},
+    {"id": 3, "title": "Call mom", "done": True},
+]
+
+WIDGET_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; margin: 0; padding: 16px; }
+    .container { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; }
+    h2 { margin: 0 0 16px 0; color: #333; }
+    .stats { color: #666; font-size: 14px; margin-bottom: 16px; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { padding: 12px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 12px; }
+    li:last-child { border-bottom: none; }
+    .done { text-decoration: line-through; color: #999; }
+    .task-title { flex: 1; }
+    .checkbox { width: 24px; height: 24px; border: 2px solid #667eea; border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .checkbox:hover { background: #f0f0ff; }
+    .checkbox.checked { background: #667eea; color: white; }
+    .delete-btn { background: none; border: none; color: #999; cursor: pointer; font-size: 18px; padding: 4px 8px; }
+    .delete-btn:hover { color: #e53e3e; }
+    .refresh-btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>TaskManager</h2>
+    <p class="stats" id="stats">Loading...</p>
+    <ul id="task-list"></ul>
+    <button class="refresh-btn" onclick="refresh()">Refresh</button>
+  </div>
+  <script>
+    const summary = window.openai?.toolOutput;
+    const meta = window.openai?.toolResponseMetadata;
+    const tasks = meta?.tasks || [];
+    if (summary) {
+      document.getElementById('stats').textContent = summary.total + ' tasks (' + summary.pending + ' pending, ' + summary.completed + ' done)';
+    }
+    const list = document.getElementById('task-list');
+    tasks.forEach(task => {
+      const li = document.createElement('li');
+      li.innerHTML = `<div class="checkbox ${task.done ? 'checked' : ''}" onclick="toggleTask(${task.id})">${task.done ? '✓' : ''}</div><span class="task-title ${task.done ? 'done' : ''}">${task.title}</span><button class="delete-btn" onclick="deleteTask(${task.id})">×</button>`;
+      list.appendChild(li);
+    });
+    async function toggleTask(taskId) { await window.openai?.callTool?.('complete_task', { task_id: taskId }); refresh(); }
+    async function deleteTask(taskId) { await window.openai?.callTool?.('delete_task', { task_id: taskId }); refresh(); }
+    function refresh() { window.openai?.sendFollowUpMessage?.({ prompt: "Show my tasks" }); }
+  </script>
+</body>
+</html>'''
+
+mcp = FastMCP("TaskManager")
+
+@mcp.tool(annotations={"openai/widgetAccessible": True})
+def complete_task(task_id: int) -> types.CallToolResult:
+    """Toggle a task's completion status."""
+    for task in TASKS:
+        if task["id"] == task_id:
+            task["done"] = not task["done"]
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="Task toggled")],
+                structuredContent={"success": True, "task_id": task_id, "done": task["done"]}
+            )
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text="Not found")],
+        structuredContent={"success": False}
+    )
+
+@mcp.tool(annotations={"openai/widgetAccessible": True})
+def delete_task(task_id: int) -> types.CallToolResult:
+    """Delete a task by ID."""
+    global TASKS
+    original_len = len(TASKS)
+    TASKS = [t for t in TASKS if t["id"] != task_id]
+    success = len(TASKS) < original_len
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text="Deleted" if success else "Not found")],
+        structuredContent={"success": success}
+    )
+
+@mcp.tool()
+def show_tasks() -> types.CallToolResult:
+    """Display the task list widget."""
+    pending = len([t for t in TASKS if not t["done"]])
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=f"Showing {len(TASKS)} tasks")],
+        structuredContent={"total": len(TASKS), "pending": pending, "completed": len(TASKS) - pending},
+        _meta={"tasks": TASKS, "openai.com/widget": types.EmbeddedResource(
+            type="resource",
+            resource=types.TextResourceContents(uri="ui://tasks", mimeType=MIME_TYPE, text=WIDGET_HTML)
+        )}
+    )
+
+if __name__ == "__main__":
+    import uvicorn
+    app = mcp.sse_app()
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+
+Testing Task Actions​
+Restart your server
+In ChatGPT: "Show my tasks"
+Click a checkbox—it should toggle
+Click the × button—task should disappear
+The widget refreshes after each action
+
+If actions don't work, check:
+
+openai/widgetAccessible: True is set on action tools
+Tool names match exactly: complete_task, delete_task
+Parameter name matches: task_id (not taskId)
+What You Built​
+
+Building on previous lessons:
+
+Added complete_task and delete_task tools
+Used openai/widgetAccessible for widget access
+Implemented callTool for direct server communication
+Pattern: callTool → refresh() for all mutations
+
+Your TaskManager now has working Complete and Delete actions. In the next lesson, you'll add state persistence and display modes.
+
+Try With AI​
+Prompt 1: Add an "Add Task" Input​
+Add an input field and "Add" button to the widget.
+When clicked, it should send a prompt like "Add task: [input value]".
+Create an add_task tool on the server that creates a new task with an auto-incrementing ID.
+
+
+What you're learning: Combining sendFollowUpMessage (for adding, which benefits from model understanding) with callTool (for toggling/deleting, which doesn't).
+
+Prompt 2: Confirmation for Delete​
+Before deleting a task, show a confirmation prompt.
+Only call delete_task if the user confirms.
+Use window.confirm() for simplicity.
+
+
+What you're learning: Destructive action patterns. Users should confirm before losing data.
+
+Prompt 3: Error Handling​
+What happens if callTool fails (network error, server down)?
+Add error handling that shows a message to the user instead of silently failing.
+
+
+What you're learning: Defensive programming for widget actions. Users need feedback when things go wrong.

@@ -1,0 +1,337 @@
+Iterative Refinement Techniques
+
+You tell Claude: "normalize the dates in this CSV file." Claude changes March 5th, 2024 to 03/05/2024. You wanted 2024-03-05. Claude changes 5/3/2024 to May 3, 2024. You wanted 2024-03-05 again. Two corrections later, you have spent more time fixing Claude's interpretation than it would have taken to write the code yourself.
+
+The problem is not Claude's ability. The problem is how you communicated the requirement. "Normalize the dates" is ambiguous. There are dozens of valid date formats, and Claude picked one that was perfectly reasonable but not what you wanted. Prose descriptions of transformations are inherently ambiguous. The words "normalize," "clean up," and "standardize" each have multiple valid interpretations.
+
+This lesson teaches three techniques that eliminate this waste. Each technique gives Claude a different kind of feedback signal so that instead of hoping the first attempt is correct, you build a loop that converges on what you actually want.
+
+EXAM CONNECTION
+
+Task Statement 3.5 tests all three refinement techniques covered in this lesson. The exam expects you to know WHEN to use each technique: I/O examples for transformations, test-driven iteration for correctness, and the interview pattern for unfamiliar domains. You will also need to decide whether to communicate multiple issues in a single message or sequentially.
+
+Technique 1: Concrete Input/Output Examples​
+
+When you describe a transformation in prose, Claude interprets the words. When you show Claude concrete examples, interpretation is unnecessary. The input and output speak for themselves.
+
+Here is the date normalization task, done right:
+
+Normalize the dates in data.csv to ISO 8601 format. Here are examples
+of the transformation I need:
+
+Input: "March 5th, 2024"    → Output: "2024-03-05"
+Input: "5/3/2024"           → Output: "2024-05-03"
+Input: "2024.03.05"         → Output: "2024-03-05"
+Input: "Mar 5, 24"          → Output: "2024-03-05"
+
+
+Notice what the examples communicate that prose cannot:
+
+Ambiguity	What the examples resolve
+Which date format?	ISO 8601 (YYYY-MM-DD), not US (MM/DD/YYYY)
+Is 5/3 May 3rd or March 5th?	US convention: month first, so 5/3 = May 3rd
+Two-digit years?	24 becomes 2024, not 1924
+Separator character?	Hyphens, not slashes or dots
+
+Two to three examples are enough for most transformations. You do not need an exhaustive list. Pick examples that cover the ambiguous cases: the ones where two reasonable interpretations would produce different output.
+
+When I/O Examples Work Best​
+
+I/O examples are the right technique when:
+
+The task is a transformation: input goes in, output comes out
+Prose descriptions produce inconsistent results: you keep correcting Claude's interpretation
+The format matters: date formats, naming conventions, JSON structure, CSV column ordering
+You want to lock the spec before implementation: the examples become the contract
+
+I/O examples are less useful for tasks that do not have clear input/output pairs, such as "refactor this module for readability" or "add error handling to this function." For those, use the interview pattern or test-driven iteration.
+
+I/O Examples Beyond Strings​
+
+This technique is not limited to string formatting. You can provide I/O examples for any transformation:
+
+JSON reshaping:
+
+Transform API responses to our internal format:
+
+Input:  {"user": {"first": "Ada", "last": "Lovelace"}, "role": "admin"}
+Output: {"name": "Ada Lovelace", "permissions": ["read", "write", "admin"]}
+
+Input:  {"user": {"first": "Grace", "last": "Hopper"}, "role": "viewer"}
+Output: {"name": "Grace Hopper", "permissions": ["read"]}
+
+
+SQL generation:
+
+Generate SQL from natural language queries:
+
+Input:  "how many users signed up last month"
+Output: "SELECT COUNT(*) FROM users WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') AND created_at < DATE_TRUNC('month', CURRENT_DATE)"
+
+Input:  "top 5 products by revenue this quarter"
+Output: "SELECT p.name, SUM(oi.quantity * oi.unit_price) AS revenue FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.created_at >= DATE_TRUNC('quarter', CURRENT_DATE) GROUP BY p.name ORDER BY revenue DESC LIMIT 5"
+
+
+The pattern is always the same: show Claude what goes in and what comes out. Claude generalizes from your examples to novel inputs.
+
+Technique 2: Test-Driven Iteration​
+
+I/O examples work when you can show the transformation. But some tasks are too complex to capture in a few examples. A function that parses configuration files needs to handle nested sections, comments, escaped characters, missing keys, and type coercion. Showing 2-3 examples cannot cover all of that.
+
+Test-driven iteration flips the workflow. Instead of describing what you want, you define how to verify correctness:
+
+You write the test suite first covering expected behavior, edge cases, and performance constraints
+Claude writes the implementation
+Claude runs the tests
+You share test failures with Claude and it iterates
+Repeat until all tests pass
+
+The test suite becomes the specification. Every edge case you care about is encoded as a test. Claude does not need to guess your intent because the tests define it precisely.
+
+A Walkthrough​
+
+Suppose you need a function that extracts metadata from markdown files. The metadata sits between --- delimiters at the top of the file (YAML frontmatter).
+
+Step 1: Write the tests yourself. You know the edge cases better than Claude does.
+
+# test_frontmatter.py
+import pytest
+from frontmatter import parse_frontmatter
+
+def test_basic_extraction():
+    content = "---\ntitle: Hello\nauthor: Ada\n---\nBody text"
+    meta, body = parse_frontmatter(content)
+    assert meta == {"title": "Hello", "author": "Ada"}
+    assert body == "Body text"
+
+def test_no_frontmatter():
+    content = "Just a regular document"
+    meta, body = parse_frontmatter(content)
+    assert meta == {}
+    assert body == "Just a regular document"
+
+def test_empty_frontmatter():
+    content = "---\n---\nBody after empty frontmatter"
+    meta, body = parse_frontmatter(content)
+    assert meta == {}
+    assert body == "Body after empty frontmatter"
+
+def test_multiline_values():
+    content = "---\ntitle: Hello\ndescription: |\n  This is a\n  multiline value\n---\nBody"
+    meta, body = parse_frontmatter(content)
+    assert "multiline" in meta["description"]
+
+def test_triple_dash_in_body():
+    content = "---\ntitle: Test\n---\nBody with --- in the middle"
+    meta, body = parse_frontmatter(content)
+    assert "---" in body
+
+def test_unicode_values():
+    content = "---\ntitle: Привет мир\n---\nBody"
+    meta, body = parse_frontmatter(content)
+    assert meta["title"] == "Привет мир"
+
+
+Step 2: Give Claude the tests and ask for the implementation.
+
+Here is my test file: @test_frontmatter.py
+
+Write a frontmatter.py module that makes all these tests pass.
+Run pytest after implementing and show me the results.
+
+
+Step 3: If tests fail, share the failures. Claude reads the failure output and iterates. Each failure narrows the gap between Claude's implementation and your specification.
+
+The key insight: you define what is correct; Claude figures out how to get there. You never need to explain the algorithm. You just need to write tests that fail when the algorithm is wrong.
+
+Why You Write the Tests, Not Claude​
+
+If Claude writes both the tests and the implementation, it will write tests that pass. That is not useful. The value of test-driven iteration is that YOUR understanding of correctness, YOUR knowledge of edge cases, and YOUR experience with the domain are encoded in the tests. Claude provides the implementation effort; you provide the judgment.
+
+Technique 3: The Interview Pattern​
+
+Sometimes you do not know enough about the domain to write I/O examples or tests. You are building a feature in an unfamiliar part of the codebase, or working with a domain (tax calculations, medical records, compliance rules) where you do not know what edge cases exist.
+
+The interview pattern inverts the dynamic. Instead of you telling Claude what to build, you ask Claude to interview you:
+
+I want to add a caching layer to our API. Before implementing anything,
+interview me about the requirements. Use the AskUserQuestion tool to ask
+about technical decisions, edge cases, failure modes, and tradeoffs I
+might not have considered. Keep interviewing until you have enough
+information to write a complete implementation plan.
+
+
+Claude might ask:
+
+"What is the cache invalidation strategy? Time-based TTL, event-based, or manual?"
+"Should cache misses fall through to the database synchronously, or should you serve stale data while refreshing in the background?"
+"How do you handle cache stampede when a popular key expires and 100 requests hit the database simultaneously?"
+"Does the cache need to be shared across multiple application instances, or is a per-process in-memory cache sufficient?"
+
+Each question surfaces a design decision you need to make. Some of these you would have thought of eventually. Others (like cache stampede) you might have discovered only after a production incident.
+
+When to Use the Interview Pattern​
+
+The interview pattern is most valuable when:
+
+You are working in an unfamiliar domain where you do not know the edge cases
+The feature has many design decisions that interact with each other
+You want to explore the problem space before committing to an approach
+You would normally consult a domain expert but none is available
+
+After the interview, start a fresh session with the resulting spec. The new session has clean context focused entirely on implementation. The interview produced the artifact (a spec or plan); now a separate session executes it.
+
+Single-Message vs Sequential Iteration​
+
+When Claude produces output with multiple issues, you need to decide: report all issues in one message, or fix them one at a time?
+
+The answer depends on whether the fixes interact.
+
+Single Message: When Fixes Interact​
+
+If fixing one issue changes the behavior of another fix, report them together. Claude needs to see the full picture to avoid a fix that solves problem A but breaks the fix for problem B.
+
+Example: A function has a type coercion bug (line 15) and a boundary check bug (line 22), but the boundary check depends on the type of the coerced value. Fixing the type coercion changes what values reach the boundary check. These fixes interact.
+
+I found three issues that are related to each other:
+
+1. Line 15: `parseInt(value)` should use `parseFloat(value)` because
+   the input can be decimal
+2. Line 22: The boundary check `value > 100` needs to account for
+   decimal values (should be `value > 100.0`)
+3. Line 30: The formatting uses `%d` but now needs `%.2f` since we
+   allow decimals
+
+These all relate to the integer-to-float change. Fix them together.
+
+Sequential: When Fixes Are Independent​
+
+If each fix stands alone, address them one at a time. This keeps each iteration focused and makes it easy to verify that each fix works before moving on.
+
+Example: A code review finds a missing null check in the auth module, an incorrect log level in the payment module, and a typo in a user-facing error message. These are in different modules with no shared logic. Fix them one at a time.
+
+Fix the null check in src/auth/validate.ts line 45. The user object
+can be null when the session expires mid-request.
+
+
+Then, after verifying:
+
+Change the log level in src/payments/charge.ts line 112 from
+logger.debug to logger.error. Failed charges should be errors, not
+debug messages.
+
+Decision Framework​
+Situation	Strategy	Why
+Fixes touch the same function or data flow	Single message	One fix changes the context for another
+Fixes are in different modules	Sequential	Each fix can be verified independently
+You are unsure whether they interact	Single message	Safer to let Claude see the full picture
+There are more than 5 independent fixes	Sequential, in batches of 2-3	Keeps each iteration manageable
+Combining Techniques​
+
+The three techniques are not mutually exclusive. A real feature often benefits from combining them:
+
+Interview to discover requirements you had not considered
+I/O examples to lock down the transformation specification
+Test suite to encode correctness, including edge cases from the interview
+Iterate by sharing test failures until all tests pass
+
+This sequence moves from vague understanding to precise specification to verified implementation. Each technique adds a layer of precision.
+
+Try With AI​
+
+Exercise 1: Disambiguate with I/O Examples (Apply)
+
+You need a function that converts a list of full names into username format. But "username format" is ambiguous. Try telling Claude the vague version first, observe what it produces, then fix it with examples.
+
+Start a Claude Code session and paste this:
+
+Write a Python function called to_username that converts full names
+to usernames. Here is my list:
+
+["Ada Lovelace", "Grace M. Hopper", "Alan Turing", "John von Neumann"]
+
+
+Look at what Claude produces. Then try again with concrete examples:
+
+I need to_username to work like this:
+
+Input: "Ada Lovelace"       → Output: "ada.lovelace"
+Input: "Grace M. Hopper"    → Output: "grace.hopper"
+Input: "John von Neumann"   → Output: "john.von.neumann"
+
+Write the function and test it on my list.
+
+
+Compare the two results. How did the examples change Claude's interpretation? Did the first attempt handle middle names or particles like "von" correctly?
+
+What you're learning: Prose descriptions of transformations are inherently ambiguous. The phrase "convert to usernames" has dozens of valid interpretations (underscore vs dot, drop middle names vs keep them, handle particles or not). Two to three concrete examples eliminate the ambiguity instantly. This is the core of Exam Task 3.5: knowing when prose fails and examples succeed.
+
+Exercise 2: Test-Driven Iteration (Build + Iterate)
+
+Write tests for a function you do NOT implement yourself. Let Claude iterate against your test failures.
+
+Create a file called test_slugify.py with these tests:
+
+from slugify import make_slug
+
+def test_basic():
+    assert make_slug("Hello World") == "hello-world"
+
+def test_special_characters():
+    assert make_slug("Hello, World!") == "hello-world"
+
+def test_unicode():
+    assert make_slug("Cafe\u0301 Latte\u0301") == "cafe-latte"
+
+def test_consecutive_spaces():
+    assert make_slug("too   many   spaces") == "too-many-spaces"
+
+def test_leading_trailing():
+    assert make_slug("  padded  ") == "padded"
+
+def test_numbers():
+    assert make_slug("version 2.0 release") == "version-20-release"
+
+def test_empty():
+    assert make_slug("") == ""
+
+def test_already_slugged():
+    assert make_slug("already-slugged") == "already-slugged"
+
+
+Then tell Claude:
+
+Here is my test file: @test_slugify.py
+
+Write a slugify.py module that makes all these tests pass.
+Run pytest and show me the results. If any tests fail, fix the
+implementation and run again until all pass.
+
+
+Watch how many iterations Claude needs. Which tests caused the most trouble?
+
+What you're learning: The test-driven iteration loop. You defined correctness; Claude figured out how to achieve it. Notice that you never described the slugification algorithm. The tests ARE the spec. This technique works for any function where you can express expected behavior as assertions, and it scales to complex logic where prose descriptions would be paragraphs long.
+
+Exercise 3: Interview Before Implementing (Explore + Discover)
+
+Pick a feature you have been meaning to build but have not fully thought through. Let Claude interview you.
+
+Start a Claude Code session and paste this:
+
+I want to build a rate limiter for our API endpoints. Before writing
+any code, interview me about the requirements. Ask me about:
+- Technical implementation choices
+- Edge cases I might not have considered
+- Failure modes and recovery strategies
+- Tradeoffs between different approaches
+
+Use the AskUserQuestion tool for each question. Keep asking until you
+have enough to write a detailed spec, then write the spec to
+RATE_LIMITER_SPEC.md.
+
+
+Answer Claude's questions honestly. After the interview, review the spec. Count how many considerations Claude raised that you had NOT thought of before the interview started.
+
+What you're learning: The interview pattern surfaces hidden requirements. When you work in an unfamiliar domain, you do not know what you do not know. Claude has seen thousands of rate limiter implementations and can ask about sliding windows vs fixed windows, distributed state, graceful degradation, and burst handling. The interview produces a better spec than you would have written alone because it probes the corners of the problem space that experience reveals. This is the technique Exam Task 3.5 expects you to apply when entering unfamiliar territory.
+
+Flashcards Study Aid​

@@ -1,0 +1,459 @@
+The Two Evaluation Axes
+
+You've built an agent that summarizes customer support tickets. How do you know if it's doing a good job?
+
+Your first instinct might be to run some test cases and see if the outputs "look right." But "looks right" doesn't scale. You need systematic evaluation—and here's the problem: not all evals work the same way.
+
+Some agent behaviors have clear right answers you can check with code. Others require judgment calls that only a human (or another AI) can make. Some behaviors have reference outputs you can compare against. Others have no single "correct" answer—just better and worse ones.
+
+Understanding these distinctions changes how you design evaluations. The wrong approach gives you unreliable scores. The right approach gives you actionable signal about agent quality.
+
+Two Questions That Define Every Eval​
+
+Every evaluation you'll ever write falls somewhere on two independent axes:
+
+Axis 1: How do you check correctness?
+
+Objective (Code-checkable): A deterministic function can verify correctness
+Subjective (LLM-judged): Requires reasoning about quality, not just matching
+
+Axis 2: Do you have ground truth?
+
+Per-example ground truth: Each test case has a known "correct" answer
+No per-example ground truth: Quality is assessed against criteria, not reference outputs
+
+These two axes create four distinct quadrants—each requiring different evaluation strategies.
+
+Axis 1: Objective vs Subjective Scoring​
+Objective Evals (Code Can Check)​
+
+Objective evaluations use deterministic functions to verify correctness. The grader runs code that returns pass/fail or a numeric score—no AI reasoning required.
+
+Characteristics:
+
+Same input always produces same evaluation result
+Implemented as pure functions (Python, regex, parsers)
+Fast and cheap to run (no LLM API calls for grading)
+Zero ambiguity—the code decides
+
+Examples of objective criteria:
+
+Criterion	How Code Checks It
+Response under 500 tokens	len(tokenize(response)) &lt; 500
+Contains required JSON fields	set(required_keys).issubset(response.keys())
+Called the expected tool	"search_database" in trace.tool_calls
+Output matches regex pattern	re.match(pattern, output) is not None
+No PII in response	pii_detector.scan(response) == []
+
+When to use objective scoring: When success criteria can be expressed as computable predicates. If you can write a function that returns True/False, you have an objective eval.
+
+Subjective Evals (LLM Must Judge)​
+
+Subjective evaluations require reasoning about quality—something code alone cannot do. You use another LLM as the judge.
+
+Characteristics:
+
+Results may vary slightly between runs (LLM non-determinism)
+Implemented as prompts to a grader LLM
+Slower and more expensive (requires inference)
+Captures nuanced quality dimensions
+
+Examples of subjective criteria:
+
+Criterion	Why Code Can't Check
+Response is helpful	"Helpful" requires understanding context and user needs
+Explanation is clear	Clarity depends on reader comprehension model
+Tone is professional	Professionalism involves subtle linguistic choices
+Summary captures key points	"Key" requires understanding importance hierarchy
+Response addresses user's actual question	Intent interpretation requires reasoning
+
+When to use subjective scoring: When quality depends on semantic understanding that cannot be reduced to pattern matching. If the criterion requires "reading comprehension" to evaluate, you need an LLM judge.
+
+The Grading Implementation Difference​
+
+Here's how the same evaluation target—a customer support response—might use both approaches:
+
+Objective graders (code):
+
+def grade_format_compliance(response: dict) -> dict:
+    """Check structural requirements with code."""
+    checks = {
+        "has_greeting": response.get("greeting") is not None,
+        "has_resolution": response.get("resolution_steps") is not None,
+        "under_300_words": len(response.get("body", "").split()) < 300,
+        "no_profanity": not contains_profanity(response.get("body", ""))
+    }
+    return {
+        "score": sum(checks.values()),
+        "max_score": len(checks),
+        "details": checks
+    }
+
+
+Output:
+
+{"score": 3, "max_score": 4, "details": {"has_greeting": true, "has_resolution": true, "under_300_words": false, "no_profanity": true}}
+
+
+Subjective grader (LLM judge):
+
+JUDGE_PROMPT = """
+Evaluate this customer support response on these criteria.
+For EACH criterion, answer YES or NO:
+
+1. Does the response acknowledge the customer's frustration?
+2. Does it provide actionable next steps?
+3. Is the tone empathetic but professional?
+4. Does it avoid making promises the company can't keep?
+5. Would you be satisfied receiving this response?
+
+Response to evaluate:
+{response}
+
+Return JSON: {"criteria": [true/false, ...], "total_yes": N}
+"""
+
+def grade_quality(response: str, llm_client) -> dict:
+    """Use LLM to evaluate quality dimensions."""
+    result = llm_client.complete(
+        JUDGE_PROMPT.format(response=response)
+    )
+    return json.loads(result)
+
+
+Output:
+
+{"criteria": [true, true, true, false, true], "total_yes": 4}
+
+
+Notice the difference: the objective grader runs instantly with deterministic results. The subjective grader calls an LLM, costs money, and captures dimensions (empathy, actionability) that code cannot assess.
+
+Axis 2: Ground Truth vs No Ground Truth​
+Per-Example Ground Truth​
+
+Some evaluations have reference answers for each test case. You compare agent output against the known correct answer.
+
+Characteristics:
+
+Each test case includes expected output(s)
+Grader compares agent output to reference
+Can measure exact match, partial overlap, or semantic similarity
+Test data requires curation (someone must produce ground truth)
+
+Examples with ground truth:
+
+Task	Ground Truth	How You Got It
+Invoice date extraction	The actual date from the invoice	Human labeled the invoice
+Named entity recognition	List of entities that should be found	Annotated training data
+QA from documents	The answer according to the document	Human read and answered
+Code that should compile	The code compiles successfully	Verified by compiler
+Translation	Professional human translation	Paid translator
+
+When you have ground truth: Your grader compares agent output to expected output. The comparison might be exact match, fuzzy match, or semantic similarity—but there's always a reference to compare against.
+
+No Per-Example Ground Truth​
+
+Other evaluations have no single correct answer. Quality is assessed against criteria or rubrics, not reference outputs.
+
+Characteristics:
+
+Test cases include inputs but not expected outputs
+Grader evaluates quality against criteria, not against reference
+Multiple "correct" answers may exist
+Rubric-based scoring defines quality dimensions
+
+Examples without ground truth:
+
+Task	Why No Ground Truth	How to Evaluate
+Creative writing	Many valid stories exist	Rubric: coherence, engagement, style
+Open-ended advice	Context-dependent, no single right answer	Rubric: relevance, actionability, safety
+Conversation quality	Good responses vary by personality/context	Rubric: appropriateness, helpfulness
+Code review feedback	Multiple valid critiques exist	Rubric: accuracy, specificity, tone
+Summary quality	Many valid summaries of same document	Rubric: coverage, conciseness, accuracy
+
+When you lack ground truth: Your grader applies a rubric—a set of criteria that define quality. No comparison to reference. Instead: does this output meet our quality standards?
+
+The Four Quadrants​
+
+Combining both axes creates four distinct evaluation types:
+
+	Objective (Code)	Subjective (LLM Judge)
+Per-example ground truth	Q1: Exact extraction, expected tool calls	Q2: Gold standard talking points, reference comparisons
+No per-example ground truth	Q3: Format rules, length limits, constraint satisfaction	Q4: Rubric-based quality, helpfulness, clarity
+Quadrant 1: Objective + Ground Truth​
+
+What it looks like: You have the correct answer. Code can verify if agent's answer matches.
+
+Real examples:
+
+Invoice date extraction (expected: "2024-03-15", agent output must match)
+Tool call verification (expected: search(query="user query"), agent must call this)
+JSON schema validation (expected schema, output must conform)
+Math problem solving (expected: 42, agent output must equal)
+
+Grader pattern:
+
+def grade_extraction(agent_output: str, expected: str) -> bool:
+    """Direct comparison against ground truth."""
+    return normalize(agent_output) == normalize(expected)
+
+
+Characteristics: Cheapest, fastest, most reliable. Use whenever possible.
+
+Quadrant 2: Subjective + Ground Truth​
+
+What it looks like: You have reference content, but comparison requires judgment.
+
+Real examples:
+
+Summary covers gold standard talking points (reference: 5 key points that must appear)
+Response addresses required topics (reference: checklist of must-mention items)
+Generated code implements specified functionality (reference: test cases it must pass)
+Report includes required findings (reference: expert-identified key findings)
+
+Grader pattern:
+
+GRADER_PROMPT = """
+How many of these required talking points appear in the response?
+
+Required talking points:
+{talking_points}
+
+Response to evaluate:
+{response}
+
+For each talking point, determine if it's PRESENT or MISSING.
+Return JSON: {"present": [...], "missing": [...], "score": N}
+"""
+
+
+Characteristics: More expensive (LLM calls), but can check semantic coverage, not just string matching.
+
+Quadrant 3: Objective + No Ground Truth​
+
+What it looks like: No single correct answer, but constraints are code-checkable.
+
+Real examples:
+
+Response under 500 tokens (no "right" response, but length is measurable)
+Output contains no PII (any valid output works, PII detection is deterministic)
+Response is valid JSON (structure verifiable, content varies)
+No profanity in output (content can vary, profanity detection is code-based)
+
+Grader pattern:
+
+def grade_constraints(output: str) -> dict:
+    """Check constraint satisfaction without ground truth."""
+    return {
+        "under_limit": len(output.split()) < 200,
+        "valid_json": is_valid_json(output),
+        "no_pii": not detect_pii(output),
+        "has_structure": contains_required_sections(output)
+    }
+
+
+Characteristics: Fast and cheap like Q1, but evaluates constraints rather than correctness.
+
+Quadrant 4: Subjective + No Ground Truth​
+
+What it looks like: Quality judgment against criteria, no reference answer.
+
+Real examples:
+
+Response is helpful and addresses user needs (no single "helpful" response)
+Explanation is clear and well-structured (clarity is judgment call)
+Tone is appropriate for context (appropriateness requires reasoning)
+Creative output is engaging (engagement is subjective)
+
+Grader pattern:
+
+RUBRIC_PROMPT = """
+Evaluate this response against our quality rubric.
+For EACH criterion, answer YES or NO:
+
+1. Does it directly address what the user asked?
+2. Is the information accurate (to your knowledge)?
+3. Is it appropriately detailed for the question?
+4. Is the tone suitable for a professional context?
+5. Would a reasonable user find this helpful?
+
+Response: {response}
+
+Return JSON with boolean for each criterion and total count.
+"""
+
+
+Characteristics: Most expensive, captures nuanced quality, requires careful rubric design.
+
+Choosing Your Quadrant​
+
+When designing an eval, ask these questions in order:
+
+Question 1: Can you get ground truth for test cases?
+
+If you can label expected outputs for your test cases (or already have labeled data):
+
+You can use Quadrant 1 or 2
+Your evals will measure "correctness" against references
+
+If labeling expected outputs is impossible or impractical:
+
+You must use Quadrant 3 or 4
+Your evals will measure "quality" against criteria
+
+Question 2: Can code verify your criteria?
+
+If success is deterministic (string match, format check, constraint satisfaction):
+
+Use Quadrant 1 (with GT) or Quadrant 3 (without GT)
+Your graders will be fast, cheap, and consistent
+
+If success requires semantic understanding (helpfulness, clarity, relevance):
+
+Use Quadrant 2 (with GT) or Quadrant 4 (without GT)
+Your graders will use LLM-as-judge
+
+Decision flow:
+
+                    Ground Truth Available?
+                    /                      \
+                  YES                       NO
+                  /                          \
+        Code Can Verify?              Code Can Verify?
+         /          \                  /          \
+       YES          NO               YES          NO
+        |            |                |            |
+       Q1           Q2               Q3           Q4
+   (Objective    (Subjective     (Objective    (Subjective
+   + Ground      + Ground        + No GT)      + No GT)
+    Truth)        Truth)
+
+Exercise: Classify Task API Evals​
+
+Your Task API agent helps users manage tasks. For each evaluation scenario below, identify the quadrant and explain your reasoning.
+
+Scenario 1: Verify that when a user says "create a task called groceries", the agent calls create_task(title="groceries").
+
+Scenario 2: Check that task descriptions are under 500 characters.
+
+Scenario 3: Evaluate whether the agent's task suggestions are relevant to the user's stated goals.
+
+Scenario 4: Verify that the agent correctly extracts due dates from natural language (e.g., "next Tuesday" should resolve to the correct date).
+
+Scenario 5: Assess whether the agent's responses are friendly and professional in tone.
+
+Work through each scenario:
+
+Can you provide the "right answer" for each test case?
+Can code verify the criterion, or does it need judgment?
+
+(Answers at end of lesson)
+
+Why This Classification Matters​
+
+Understanding quadrants prevents two costly mistakes:
+
+Mistake 1: Using LLM judges when code suffices
+
+If your criterion is code-checkable (Q1 or Q3), using an LLM judge wastes money and adds noise. A token counter is faster, cheaper, and more reliable than asking an LLM "is this under 500 tokens?"
+
+Mistake 2: Expecting code to check what requires judgment
+
+If your criterion needs semantic understanding (Q2 or Q4), code-based graders will miss the mark. Regex cannot determine if a response is "helpful"—you need an LLM judge with a well-designed rubric.
+
+The practical impact:
+
+Misclassified Q1/Q3 as Q4 → Slow, expensive evals that should be instant
+Misclassified Q2/Q4 as Q1/Q3 → Brittle graders that miss quality issues
+Correct classification → Right tool for each job, reliable signal, manageable costs
+Try With AI​
+Prompt 1: Classify Your Agent's Behaviors​
+I'm building an agent that [describe your agent]. Help me create an evaluation plan
+by classifying these behaviors into the four quadrants:
+
+1. [Behavior 1 - e.g., "extracts customer name from email"]
+2. [Behavior 2 - e.g., "writes helpful responses"]
+3. [Behavior 3 - e.g., "stays under token limits"]
+4. [Behavior 4 - e.g., "handles angry customers appropriately"]
+
+For each, tell me:
+- Which quadrant (Q1-Q4)?
+- Why? (ground truth available? code can check?)
+- What grader approach should I use?
+
+
+What you're learning: Applying the two-axis framework to your own agent, seeing how different behaviors require different evaluation strategies.
+
+Prompt 2: Design a Rubric for Q4 Evals​
+I need to evaluate whether my agent's [describe output, e.g., "task suggestions"]
+are high quality. There's no single right answer, so I need a rubric.
+
+Help me design 5 binary criteria (yes/no) that capture quality dimensions like:
+- Relevance to user needs
+- Actionability
+- Appropriate detail level
+- [Add your own]
+
+Format as an LLM judge prompt I can use.
+
+
+What you're learning: Rubric design for subjective evaluations—converting vague "quality" into measurable binary criteria that LLM judges can assess consistently.
+
+Prompt 3: Challenge the Classification​
+I classified this eval as [your quadrant]:
+[Describe the eval]
+
+Challenge my classification. Could it fit a different quadrant?
+What would need to change to move it to a "cheaper" quadrant
+(Q4 → Q3, Q2 → Q1)? Would that sacrifice important signal?
+
+
+What you're learning: The tradeoffs between evaluation approaches—sometimes you can simplify without losing signal, sometimes "cheap" evals miss what matters.
+
+Safety Note​
+
+When using LLM-as-judge for subjective evals, remember that LLM judges have biases (like position bias when comparing two outputs). Test your graders on known-quality examples to ensure they produce sensible scores. Don't blindly trust LLM judgments any more than you'd blindly trust agent outputs.
+
+Reflect on Your Skill​
+
+After completing this lesson, consider updating your agent-evals skill with quadrant classification:
+
+Add to your skill's decision framework:
+
+When analyzing a new eval need, first classify it into a quadrant
+Use quadrant to determine grader implementation approach
+Prefer lower quadrants (Q1 > Q2, Q3 > Q4) when possible for cost/reliability
+
+Key insight to encode: The cheapest reliable eval is the best eval. Move toward Q1/Q3 whenever the criterion allows it.
+
+Exercise Answers​
+
+Scenario 1: Q1 (Objective + Ground Truth)
+
+Ground truth: Yes (the expected tool call is create_task(title="groceries"))
+Code can verify: Yes (compare actual tool call to expected)
+Grader: Exact match on tool name and arguments
+
+Scenario 2: Q3 (Objective + No Ground Truth)
+
+Ground truth: No (there's no single "correct" description, just a constraint)
+Code can verify: Yes (len(description) &lt; 500)
+Grader: Character/word count function
+
+Scenario 3: Q4 (Subjective + No Ground Truth)
+
+Ground truth: No (relevance depends on context, many valid suggestions)
+Code can verify: No (requires understanding user goals and suggestion relevance)
+Grader: LLM judge with relevance rubric
+
+Scenario 4: Q1 (Objective + Ground Truth)
+
+Ground truth: Yes (each natural language date has a correct resolution)
+Code can verify: Yes (compare resolved date to expected date)
+Grader: Date comparison function
+
+Scenario 5: Q4 (Subjective + No Ground Truth)
+
+Ground truth: No (no single "correct" friendly response)
+Code can verify: No ("friendly" and "professional" require judgment)
+Grader: LLM judge with tone rubric

@@ -1,0 +1,362 @@
+Beyond Docker Desktop
+
+Your AI agent runs perfectly on your laptop. Docker Desktop starts it in seconds, localhost:8000 responds, everything works. You're ready for production.
+
+Except you're not.
+
+Production means your agent serves real users, handles real traffic, and operates when you're asleep. Docker Desktop was designed for development, not for running 24/7 services that customers depend on.
+
+This lesson explains why Docker Desktop can't serve production workloads, what managed Kubernetes services offer instead, and when self-managing your own cluster makes financial sense. By the end, you'll understand how to evaluate cloud providers using the cost-control-operations triangle.
+
+Why Docker Desktop Isn't Production​
+
+Docker Desktop excels at local development. But production requires capabilities Docker Desktop was never designed to provide.
+
+The Single-Node Problem​
+
+Docker Desktop runs everything on your laptop—one machine. Production requires:
+
+Requirement	Docker Desktop	Production Reality
+Machine count	1 (your laptop)	3-100+ nodes
+Failure isolation	None—laptop dies, everything dies	Workloads survive node failures
+Geographic distribution	Impossible	Users in Tokyo need nearby servers
+Horizontal scaling	Add containers on same machine	Add machines to handle load
+
+When your laptop closes, Docker Desktop stops. Your "production" service disappears.
+
+No High Availability​
+
+High availability means your service stays up when components fail. Docker Desktop provides zero high availability:
+
+No redundancy: One container instance, one failure point
+No automatic failover: Container crashes → manual restart
+No health redistribution: Can't move workloads to healthy nodes (there are no other nodes)
+
+Real production systems expect components to fail. They're designed so failures don't become outages.
+
+Local Networking Only​
+
+Docker Desktop networking exists only on your machine:
+
+┌─────────────────────────────────────────────────┐
+│                YOUR LAPTOP                       │
+│                                                  │
+│  ┌──────────┐      ┌──────────┐                │
+│  │ Frontend │ ──── │ Backend  │                │
+│  │ :3000    │      │ :8000    │                │
+│  └──────────┘      └──────────┘                │
+│                                                  │
+│  Works perfectly here...                        │
+└─────────────────────────────────────────────────┘
+                     │
+                     ▼
+            But how do users reach it?
+
+
+In production, users need to reach your services from the internet. That requires:
+
+Load balancers to distribute traffic
+DNS to map domain names to IP addresses
+TLS certificates for HTTPS
+Ingress controllers to route requests
+
+Docker Desktop doesn't provide any of these. It's not designed to.
+
+The Development-to-Production Gap​
+Development (Docker Desktop)          Production (What You Need)
+─────────────────────────────          ──────────────────────────
+One machine                            Multiple machines across regions
+You restart crashed containers         System automatically restarts them
+localhost:8000                         api.yourcompany.com with TLS
+No backups (it's on your laptop)       Automated backups, disaster recovery
+Free (included with Docker)            Real infrastructure costs money
+
+
+Docker Desktop is a development tool. Treating it as production infrastructure is like using a bicycle as an ambulance—it's the wrong tool for the job.
+
+Managed Kubernetes: Let Someone Else Handle the Control Plane​
+
+Managed Kubernetes services run the control plane for you. You focus on deploying workloads; they handle the infrastructure that makes Kubernetes work.
+
+What "Managed" Means​
+
+In Chapter 80, you learned Kubernetes has two parts:
+
+Control plane: API server, scheduler, etcd, controller manager—the "brains"
+Worker nodes: Where your containers actually run—the "muscles"
+
+Managed Kubernetes means the provider operates the control plane:
+
+Component	You Manage	Provider Manages
+Control plane	❌	✅
+Worker nodes	✅	❌
+Your containers	✅	❌
+Networking between nodes	Partial	Partial
+Cluster upgrades	Trigger when ready	Execute upgrade
+
+You get: A working Kubernetes API endpoint. Run kubectl get nodes and see your cluster.
+
+They handle: etcd backups, API server availability, scheduler health, control plane upgrades, security patches.
+
+Major Managed Kubernetes Providers (December 2025)​
+Provider	Service	Control Plane Cost	Minimum Monthly Cost	Best For
+DigitalOcean	DOKS	Free (or $40 for HA)	~$24 (2 nodes @ $12)	Startups, learning, cost-sensitive projects
+Microsoft	AKS	Free	Node costs only	Azure-integrated enterprises
+Google	GKE	Free (zonal) / $72 (regional)	~$74 for Autopilot	Kubernetes-native teams, ML workloads
+Amazon	EKS	$72/month	~$72 + node costs	AWS-integrated enterprises
+
+Pricing source: DigitalOcean, Microsoft Azure, Google Cloud, and Amazon Web Services pricing pages (December 2025).
+
+DigitalOcean Kubernetes (DOKS)​
+
+DOKS offers the simplest path to managed Kubernetes:
+
+Free control plane (or $40/month for high-availability control plane)
+Worker nodes from $12/month (shared CPU)
+Pooled bandwidth: 2 TB per node included
+99.95% uptime SLA on HA control plane
+
+Minimum viable cluster: 2 nodes at $12 each = $24/month.
+
+Best for: Side projects, startups, and teams who want Kubernetes without enterprise complexity.
+
+Azure Kubernetes Service (AKS)​
+
+Microsoft's managed Kubernetes integrates deeply with Azure:
+
+Free control plane management in most regions
+Only pay for compute, storage, and networking
+Virtual nodes for serverless bursting
+Spot instance support for cost optimization
+
+Best for: Organizations already using Azure, .NET workloads, enterprises with Microsoft agreements.
+
+Google Kubernetes Engine (GKE)​
+
+Google invented Kubernetes; GKE reflects that heritage:
+
+Free control plane for zonal clusters (single zone)
+$72/month for regional clusters (multi-zone, HA)
+Autopilot mode: Google manages nodes too—pay only for pod resources
+Lowest storage costs: $0.04/GB/month for persistent disks
+
+Best for: Teams wanting the most Kubernetes-native experience, ML/AI workloads with TPU access.
+
+Amazon Elastic Kubernetes Service (EKS)​
+
+AWS's offering integrates with the AWS ecosystem:
+
+$72/month control plane fee (flat, regardless of cluster size)
+Deep AWS integration: IAM, VPC, CloudWatch, etc.
+EKS Anywhere: Run EKS on your own hardware
+Fargate support: Serverless containers (pay per pod)
+
+Best for: AWS-heavy organizations, enterprise compliance requirements.
+
+Self-Managed Kubernetes: Maximum Control, Maximum Responsibility​
+
+Some teams run Kubernetes themselves on affordable cloud providers. This trades operational simplicity for cost savings and control.
+
+Hetzner + K3s: The Budget Option​
+
+Hetzner offers some of the cheapest cloud VMs in the industry:
+
+Instance	vCPUs	RAM	Storage	Price (EU)
+CX22	2	4 GB	40 GB NVMe	~$4/month
+CX32	4	8 GB	80 GB NVMe	~$8/month
+CX42	8	16 GB	160 GB NVMe	~$16/month
+CCX13 (dedicated)	2	8 GB	80 GB NVMe	~$15/month
+
+K3s is a lightweight Kubernetes distribution that runs on small VMs. A minimal production cluster:
+
+Hetzner K3s Cluster (Self-Managed)
+─────────────────────────────────────
+1x CX22 (control plane)      $4/month
+2x CX22 (worker nodes)       $8/month
+─────────────────────────────────────
+Total:                       ~$12/month
+
+
+Compare to managed DOKS at $24/month—you save 50%. But what do you give up?
+
+What "Self-Managed" Actually Means​
+
+With self-managed Kubernetes, YOU handle:
+
+Task	Managed (DOKS/GKE/EKS)	Self-Managed (Hetzner + K3s)
+Control plane availability	Provider	You
+etcd backups	Provider	You
+Kubernetes upgrades	Provider (you trigger)	You (manual)
+Security patches	Provider	You
+Node OS updates	You (or provider)	You
+Networking setup	Mostly provider	Entirely you
+Certificate management	Provider	You
+Monitoring/alerting	Your workloads	Everything
+
+If your etcd data corrupts at 3 AM, there's no support ticket to file. You fix it or your cluster is gone.
+
+When Self-Managed Makes Sense​
+
+Self-managed Kubernetes works when:
+
+You have Kubernetes expertise on your team (not learning as you go)
+Cost savings are significant (10+ nodes makes the ops overhead worthwhile)
+You need control over every aspect (compliance, custom networking)
+Downtime tolerance is higher (internal tools, not customer-facing SaaS)
+
+Self-managed doesn't make sense when:
+
+Your team is small (1-3 engineers managing everything)
+You're learning Kubernetes (managed providers handle the hard parts)
+Uptime is critical (99.9% SLA is easier with managed)
+Saving $15/month isn't worth operational risk
+The Cost-Control-Operations Triangle​
+
+Every cloud infrastructure decision involves three competing priorities:
+
+                     COST
+                      /\
+                     /  \
+                    /    \
+                   /      \
+                  / Choose \
+                 /   Two    \
+                /____________\
+           CONTROL          OPERATIONS
+           (Flexibility)    (Simplicity)
+
+
+Cost: How much you spend monthly Control: How much you can customize and configure Operations: How much work you do to keep it running
+
+Pick Two (You Can't Have All Three)​
+Priority Pair	What You Get	What You Sacrifice
+Cost + Control	Hetzner + K3s	Operational simplicity (you manage everything)
+Cost + Operations	DigitalOcean DOKS	Some control (fewer features than AWS/GKE)
+Control + Operations	AWS EKS	Higher cost (pay for both power and convenience)
+Applying the Triangle​
+
+Startup with 2 engineers, building MVP:
+
+Prioritize: Cost + Operations
+Choice: DigitalOcean DOKS at $24/month
+Reasoning: Can't afford to spend engineering time on infrastructure
+
+Scale-up with dedicated DevOps, 50 services:
+
+Prioritize: Control + Operations
+Choice: AWS EKS or GKE
+Reasoning: Need deep integrations, willing to pay for managed control plane
+
+Agency running client projects, predictable workloads:
+
+Prioritize: Cost + Control
+Choice: Hetzner + K3s
+Reasoning: Expertise exists, saving $500/month across clients adds up
+Provider Selection Decision Matrix​
+
+Use this matrix when your multi-cloud-deployer skill needs to recommend infrastructure:
+
+Scenario	Recommended Provider	Reasoning
+Learning Kubernetes	DOKS	Cheapest managed option, simple UI, good docs
+AWS-heavy organization	EKS	Native integration with existing AWS services
+Azure-heavy organization	AKS	Free control plane, Azure AD integration
+ML/AI workloads needing GPUs	GKE	Best TPU/GPU support, ML-focused features
+Extreme cost sensitivity + Kubernetes expertise	Hetzner + K3s	$12/month for full cluster
+Startup scaling rapidly	GKE Autopilot	Don't manage nodes, pay per pod, scale automatically
+Compliance-heavy enterprise	EKS or AKS	Audit logging, compliance certifications, enterprise support
+Questions Your Skill Should Ask​
+
+Before recommending a provider, your multi-cloud-deployer skill should consider:
+
+What cloud services do you already use? (AWS? Azure? None?)
+How much Kubernetes experience does your team have?
+What's your monthly infrastructure budget?
+How critical is uptime? (Side project vs revenue-generating service)
+Do you need specific features? (GPUs, serverless containers, custom networking)
+Cost Reality Check (December 2025)​
+
+Let's compare running a small production workload across providers:
+
+Scenario: 3-Node Cluster for API Service​
+Provider	Control Plane	3 Worker Nodes	Monthly Total
+Hetzner + K3s	$4 (you run it)	$12 (3x CX22)	~$16
+DigitalOcean DOKS	$0	$36 (3x $12 basic)	~$36
+AKS	$0	~$40 (3x B2s)	~$40
+GKE (zonal)	$0	~$50 (3x e2-small)	~$50
+EKS	$72	~$40 (3x t3.small)	~$112
+
+Note: Actual costs vary by region, instance type, and discounts. Always use provider calculators for accurate estimates.
+
+Hidden Costs to Consider​
+
+The sticker price isn't everything:
+
+Hidden Cost	Impact
+Load balancers	$10-20/month per service exposed
+Persistent storage	$0.04-0.10/GB/month
+Data transfer (egress)	$0.08-0.12/GB after free tier
+Backups	Varies by provider
+Monitoring/logging	Free tiers exist, but scale quickly
+Your time	Hours spent on infrastructure vs product
+
+A "cheap" self-managed cluster becomes expensive if you spend 10 hours/month maintaining it. At $100/hour engineering cost, that's $1000 in hidden labor.
+
+Try With AI​
+
+Test your understanding of production infrastructure tradeoffs:
+
+Prompt 1: Docker Desktop limitations
+
+My teammate says we can just keep using Docker Desktop for our demo next week.
+We have 3 microservices that need to communicate. The demo is for investors.
+What could go wrong? What would you recommend instead?
+
+
+What you're learning: How to articulate why development tools aren't suitable for even demo production scenarios. The "laptop closes, demo dies" scenario is real.
+
+Prompt 2: Provider recommendation
+
+I'm a solo developer building a SaaS product. I know Docker but I'm new to Kubernetes.
+My monthly infrastructure budget is $50. I need the service available 99% of the time.
+Which cloud provider should I use and why?
+
+
+What you're learning: How to apply the cost-control-operations triangle. For learning + cost sensitivity + uptime needs, DOKS is likely the answer.
+
+Prompt 3: Self-managed evaluation
+
+My company has 5 DevOps engineers and we're running 40 services on AWS EKS.
+The EKS control plane fee alone is $72/month per cluster, and we have 3 clusters.
+Should we migrate to Hetzner + K3s to save money? What factors should we consider?
+
+
+What you're learning: The self-managed tradeoff analysis. $216/month in control plane fees might not justify the operational overhead for a team already on AWS.
+
+Safety note: Always validate cloud provider pricing before committing. Prices change, regions vary, and promotional pricing expires. Use official pricing calculators for accurate estimates.
+
+Reflect on Your Skill​
+
+Test your multi-cloud-deployer skill against what you learned:
+
+Test Your Skill​
+Using my multi-cloud-deployer skill:
+1. Explain why Docker Desktop isn't production-ready
+2. Show the cost-control-operations triangle tradeoffs
+3. Recommend a provider for a startup with $30/month budget and no Kubernetes experience
+
+Identify Gaps​
+
+Ask yourself:
+
+Does my skill include the managed vs self-managed distinction?
+Does it cover the cost comparison matrix?
+Can it explain WHY a particular provider fits a scenario?
+Improve Your Skill​
+
+If gaps exist:
+
+My multi-cloud-deployer skill needs provider selection guidance.
+Update it to include:
+1. The cost-control-operations triangle framework
+2. Provider comparison matrix (DOKS, AKS, GKE, EKS, Hetzner+K3s)
+3. Questions to ask before recommending infrastructure

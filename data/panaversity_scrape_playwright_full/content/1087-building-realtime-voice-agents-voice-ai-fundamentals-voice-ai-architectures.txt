@@ -1,0 +1,436 @@
+Voice AI Architectures
+
+Your customer calls your voice Digital FTE. They say "What's the status of my order?" and wait for a response.
+
+In that pause between their question and your agent's answer, a fundamental architectural choice determines whether the experience feels like talking to a human or waiting for a bureaucratic system. That choice is between two approaches: Native Speech-to-Speech, where a single model processes audio directly, and Cascaded Pipeline, where three separate systems translate speech to text, reason about it, and convert the response back to speech.
+
+The difference is 200 milliseconds versus 500 milliseconds. That gap determines whether your customers feel heard instantly or notice an awkward delay.
+
+This lesson gives you the mental models to understand both architectures deeply, calculate costs for your specific use case, and make informed decisions about when each approach makes sense.
+
+The Two Architectures​
+
+Voice AI systems convert spoken input to intelligent spoken output. There are exactly two ways to accomplish this:
+
+Native Speech-to-Speech (S2S)
+┌────────────────────────────────────────────────┐
+│                                                │
+│   Audio In ──► [Single Audio-Native Model] ──► Audio Out
+│                                                │
+│   ● Model trained on audio directly            │
+│   ● Preserves tone, emotion, nuance            │
+│   ● 200-300ms end-to-end                       │
+│   ● ~$0.45-0.50 per 4-minute call              │
+│                                                │
+└────────────────────────────────────────────────┘
+
+Cascaded Pipeline (STT → LLM → TTS)
+┌────────────────────────────────────────────────┐
+│                                                │
+│   Audio In ──► [STT] ──► [LLM] ──► [TTS] ──► Audio Out
+│                                                │
+│   ● Three specialized components               │
+│   ● Text as intermediate representation        │
+│   ● 500-800ms end-to-end                       │
+│   ● ~$0.03-0.07 per minute                     │
+│                                                │
+└────────────────────────────────────────────────┘
+
+
+Both architectures are valid. Both power production voice agents at scale. The choice depends on your constraints: latency requirements, budget, use case characteristics, and provider preferences.
+
+Native Speech-to-Speech Deep Dive​
+
+Native Speech-to-Speech models process audio directly without converting to text first. The model was trained on audio data and generates audio output natively. Think of it like a bilingual person who thinks in both languages, rather than translating between them.
+
+How Native S2S Works​
+
+Traditional language models operate on tokens representing words. Native S2S models operate on audio tokens representing sound waves. When you speak, the model:
+
+Encodes your audio into audio tokens (preserving pitch, pace, emotion)
+Reasons about meaning using the same transformer architecture as text models
+Generates audio tokens for the response
+Decodes those tokens directly to audio output
+
+Because there is no text intermediate step, the model preserves information that text discards: your hesitation, emphasis, emotional state. The response can match your energy, adapt to your mood, and feel natural.
+
+Major Native S2S Providers​
+
+OpenAI Realtime API (gpt-realtime model)
+
+The production leader. Powers ChatGPT's Advanced Voice Mode used by millions daily.
+
+Metric	Value
+Latency	200-300ms end-to-end
+Cost	$0.45-0.50 per 4-minute call ($0.11-0.12/min)
+Connection	WebRTC for browser, WebSocket for server
+Features	Function calling, barge-in (interrupt), turn detection
+
+The gpt-realtime model understands context across the conversation, can call functions mid-response, and handles interruptions gracefully. When a user says "wait, actually..." the model stops immediately.
+
+Gemini Live API (Gemini 2.5 Flash Native Audio)
+
+Google's multimodal approach. Handles voice, vision, and text in unified streams.
+
+Metric	Value
+Latency	<300ms (varies by configuration)
+Cost	Competitive with OpenAI
+Connection	Bidirectional streaming
+Features	Multimodal (voice + vision), affective dialog, proactive audio
+
+Gemini Live's differentiator is multimodality. The same session can process screen shares, camera feeds, and audio together. An agent can see your screen while you talk, understanding context visually and verbally.
+
+Affective dialog means the model adapts its tone to yours. If you sound frustrated, it responds with empathy. Proactive audio means the model decides when to speak, not just responding to explicit prompts.
+
+Amazon Nova Sonic
+
+Enterprise-focused with telephony optimization.
+
+Metric	Value
+Latency	250-350ms
+Cost	Competitive enterprise pricing
+Connection	AWS-native integration
+Features	8kHz telephony optimization, call center integration
+
+Nova Sonic is optimized for contact center deployments. It handles the 8kHz audio typical of phone networks natively, rather than upsampling lower-quality audio.
+
+When Native S2S Makes Sense​
+
+Native S2S excels when:
+
+Premium user experience matters: Consumer voice assistants, high-touch customer service
+Emotional intelligence is required: Mental health support, conflict resolution, sales
+Latency budget is tight: Users expect instant response (< 300ms)
+Budget allows: The 3-10x cost premium is justified by value delivered
+Cascaded Pipeline Deep Dive​
+
+Cascaded Pipeline connects three specialized systems: Speech-to-Text (STT) converts audio to text, a Language Model (LLM) reasons about the text and generates a response, and Text-to-Speech (TTS) converts the response to audio.
+
+Think of it like using a translator who converts between languages. Information passes through an intermediate representation (text), which means you can optimize each component independently but lose some signal in translation.
+
+The Pipeline Flow​
+User Speaks                          Agent Responds
+     │                                     ▲
+     ▼                                     │
+┌─────────┐                         ┌─────────┐
+│   STT   │ ──► Text Transcript ──► │   TTS   │
+│ ~90ms   │                         │ 75-100ms│
+└─────────┘                         └─────────┘
+     │                                     ▲
+     ▼                                     │
+           ┌─────────────────────┐
+           │        LLM          │
+           │    200-400ms        │
+           │                     │
+           └─────────────────────┘
+
+
+Each component adds latency. The total is the sum of all components plus network overhead:
+
+Component	Typical Latency	Role
+Microphone capture	40ms	Audio buffer before processing
+Network (to STT)	20-50ms	Transmitting audio
+STT processing	90ms	Converting audio to text
+End-of-turn detection	200-500ms	Deciding user finished speaking
+Network (to LLM)	10-30ms	Transmitting text
+LLM first token	200-400ms	Generating response
+Network (to TTS)	10-30ms	Transmitting response
+TTS processing	75-100ms	Converting text to audio
+Total	645-1,240ms	User-perceivable delay
+
+The ranges are wide because each component can be optimized or degraded by provider choice, network conditions, and configuration.
+
+Why Cascaded Pipeline Still Dominates Production​
+
+Despite higher latency, cascaded pipelines power the majority of production voice agents. Here's why:
+
+Cost efficiency at scale
+
+Architecture	Cost per Minute	10,000 minutes/month
+Native S2S (OpenAI)	~$0.11-0.12	$1,100-1,200
+Cascaded (economy stack)	~$0.03-0.04	$300-400
+Savings	3-4x	$700-900/month
+
+At enterprise scale (100,000+ minutes/month), this difference becomes significant.
+
+Component flexibility
+
+With cascaded pipelines, you can:
+
+Swap STT providers without changing LLM or TTS
+Use cheaper LLMs for simple queries, expensive ones for complex reasoning
+Select TTS voices optimized for your brand
+Deploy STT/TTS on-premise for data privacy
+
+Transcript availability
+
+Cascaded pipelines produce text transcripts inherently. Native S2S requires separate transcription. For compliance, training data, and analytics, transcripts are valuable.
+
+Telephony optimization
+
+Phone networks use 8kHz audio. Cascaded pipelines with telephony-optimized STT (like Deepgram's phone models) handle this natively. Some S2S models struggle with lower-quality audio.
+
+Component Provider Landscape​
+
+STT (Speech-to-Text)
+
+Provider	Latency	Cost/min	Strength
+Deepgram Nova-3	~90ms	$0.0077	Fastest streaming, production leader
+AssemblyAI	~150ms	$0.0090	High accuracy, good diarization
+OpenAI Whisper	~300ms	Free (open)	Local deployment, multilingual
+Google Cloud	~120ms	$0.0090	Enterprise integration
+
+LLM (Language Model)
+
+Provider	First Token	Cost/1K tokens	Strength
+GPT-4o-mini	200-300ms	$0.00015/in, $0.0006/out	Best cost/quality ratio
+Claude 3.5 Haiku	200-300ms	Similar	Nuanced responses
+Gemini 1.5 Flash	150-250ms	Competitive	Fast streaming
+
+TTS (Text-to-Speech)
+
+Provider	Latency	Cost/char	Strength
+Cartesia Sonic-3	40-90ms	~$0.000015	Fastest, low cost
+Deepgram Aura	50-100ms	$0.000015	Real-time streaming
+ElevenLabs	100-200ms	~$0.000030	Premium voice quality
+PlayHT	80-150ms	Variable	Wide voice selection
+Latency Budgets: Where Time Goes​
+
+Understanding where latency accumulates helps you optimize the right components.
+
+Human Perception Thresholds​
+Delay	User Experience
+< 200ms	Feels instant, natural conversation
+200-400ms	Acceptable, slight awareness of AI
+400-600ms	Noticeable delay, feels like thinking
+600-1000ms	Clearly slow, interrupting flow
+> 1000ms	Frustrating, users talk over agent
+
+The goal is staying under 400ms for most interactions. Under 300ms feels natural.
+
+Cascaded Pipeline Budget Breakdown​
+
+A typical production cascaded pipeline:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Total: 645ms typical                         │
+├─────────────────────────────────────────────────────────────────┤
+│ Mic Buffer │ Network │  STT  │ Turn Det│ Network│  LLM  │  TTS  │
+│    40ms    │  30ms   │ 90ms  │  200ms  │  20ms  │ 250ms │ 75ms  │
+│████████████│█████████│███████│█████████│████████│███████│███████│
+└─────────────────────────────────────────────────────────────────┘
+
+
+The biggest culprits:
+
+End-of-turn detection (200-500ms): Waiting to confirm the user finished speaking. Cutting this too short causes interruptions. Too long feels sluggish.
+
+LLM first token (200-400ms): Time for the language model to start generating. Smaller, faster models help but sacrifice capability.
+
+STT processing (90-300ms): Provider choice matters enormously here. Deepgram streams results in ~90ms; Whisper takes 300ms+.
+
+Optimization Strategies​
+
+Reduce STT latency
+
+Use Deepgram Nova-3 (fastest streaming)
+Enable streaming transcription (don't wait for complete utterance)
+Reduce audio chunk size for faster first-word recognition
+
+Reduce turn detection latency
+
+Use semantic turn detection (understand meaning, not just silence)
+LiveKit's transformer-based detector understands when sentences are complete
+Tune silence thresholds for your domain (faster in quick Q&A, slower in thoughtful conversation)
+
+Reduce LLM latency
+
+Use GPT-4o-mini or Claude Haiku for standard queries
+Route complex queries to larger models selectively
+Stream LLM output to TTS (don't wait for complete response)
+
+Reduce TTS latency
+
+Use Cartesia Sonic-3 (40-90ms first byte)
+Enable streaming synthesis
+Pre-generate common phrases ("Thanks for calling", "One moment please")
+Decision Matrix: When to Use Which​
+Scenario-Based Selection​
+Scenario	Recommended	Reasoning
+Consumer voice assistant with <500ms requirement	Native S2S	Latency is primary constraint, premium experience justifies cost
+High-volume contact center (10,000+ calls/day)	Cascaded	3-10x cost savings at scale; 500ms acceptable for support calls
+Voice agent needing full transcripts for compliance	Cascaded	Transcripts are inherent to pipeline; S2S requires separate transcription
+Emotional support or mental health application	Native S2S	Emotional intelligence and tone matching are critical
+Maximum TTS voice quality/customization	Cascaded	ElevenLabs, PlayHT offer superior voice customization
+Phone network (8kHz telephony)	Cascaded	Telephony-optimized STT handles low-quality audio better
+Multimodal (voice + screen sharing)	Native S2S (Gemini Live)	Unified multimodal streams required
+MVP with limited budget	Cascaded	Lower cost to validate before investing in S2S
+Decision Framework​
+
+Ask these questions in order:
+
+What's your latency requirement?
+
+< 300ms mandatory: Native S2S
+300-600ms acceptable: Either (evaluate cost)
+
+600ms tolerable: Cascaded (optimize for cost)
+
+What's your call volume?
+
+< 1,000 calls/month: Either (cost difference is minor)
+1,000-10,000 calls/month: Evaluate total cost carefully
+
+10,000 calls/month: Cascaded likely wins on economics
+
+Do you need transcripts?
+
+Yes, for compliance/training: Cascaded (inherent)
+Optional: Either
+
+Is emotional intelligence critical?
+
+Mental health, conflict resolution: Native S2S
+Transactional queries: Cascaded is sufficient
+
+What's your transport?
+
+Phone/telephony: Cascaded with telephony-optimized STT
+Browser WebRTC: Either
+Both: Consider hybrid approach
+Hybrid Approaches​
+
+Production systems often use both architectures:
+
+Strategy 1: S2S Greeting, Cascaded Bulk
+
+Native S2S for first 30 seconds (immediate, premium impression)
+Switch to cascaded for extended conversation (cost efficiency)
+
+Strategy 2: Complexity-Based Routing
+
+Simple queries (hours, status) → Cascaded with fast LLM
+Complex reasoning (troubleshooting) → Native S2S
+
+Strategy 3: User Tier-Based
+
+Premium customers → Native S2S
+Standard tier → Cascaded
+Cost Modeling Examples​
+Example 1: Customer Support Agent​
+
+Scenario: 5,000 calls/month, average 4 minutes each
+
+Architecture	Cost/Call	Monthly Cost
+Native S2S (OpenAI)	$0.45	$2,250
+Cascaded (economy)	$0.12	$600
+Savings	$0.33/call	$1,650/month
+
+At 5,000 calls/month, cascaded saves $1,650 monthly. But if Native S2S reduces call time by 30 seconds (faster resolution), the economics shift.
+
+Example 2: Premium Voice Assistant​
+
+Scenario: 50,000 daily active users, 2 minutes average interaction
+
+Metric	Native S2S	Cascaded
+Daily cost	$5,500	$1,500
+Monthly cost	$165,000	$45,000
+User experience	Premium	Acceptable
+
+For a consumer product where experience drives retention, the $120,000/month difference might be justified if it improves daily active users or conversion.
+
+Example 3: Enterprise Contact Center​
+
+Scenario: 100,000 calls/month, 8-minute average, 8kHz telephony
+
+Factor	Consideration
+Volume	100K calls strongly favors cascaded
+Audio quality	8kHz telephony favors cascaded with optimized STT
+Transcripts	Required for QA, naturally available in cascaded
+Latency	500-600ms acceptable for support calls
+
+Recommendation: Cascaded with Deepgram Nova-3 (phone model), GPT-4o-mini, Cartesia Sonic-3.
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini) to deepen your understanding of voice architectures.
+
+Prompt 1: Calculate Your Cost Model​
+I'm planning a voice agent with these parameters:
+
+- Use case: [describe: customer support, sales, scheduling, etc.]
+- Expected call volume: [X calls per day/month]
+- Average call duration: [Y minutes]
+- Latency requirement: [under 300ms / under 500ms / flexible]
+- Budget constraint: [X per month / none]
+
+Help me model the economics:
+
+1. Calculate Native S2S cost (at $0.11/minute)
+2. Calculate Cascaded cost (at $0.035/minute)
+3. At what call volume does the cost difference become significant?
+4. What qualitative factors might justify the S2S premium for my use case?
+
+Show me the specific numbers for my scenario.
+
+
+What you're learning: Economic reasoning about architecture choices. Understanding when premium pricing is justified requires calculating specific numbers, not relying on general intuitions about "expensive" versus "cheap."
+
+Prompt 2: Diagnose Latency Problems​
+I have a voice agent with latency issues. Users complain it feels "slow"
+and they sometimes talk over the agent. Here's my current stack:
+
+- STT: [Whisper / Deepgram / AssemblyAI / other]
+- LLM: [GPT-4 / GPT-4o-mini / Claude / other]
+- TTS: [ElevenLabs / Cartesia / Deepgram Aura / other]
+- Current perceived latency: approximately [X milliseconds]
+
+Help me diagnose:
+
+1. Based on typical component latencies, where is time likely going?
+2. Which component should I optimize first for maximum impact?
+3. What specific alternatives exist for each component?
+4. What's a realistic latency target I could achieve?
+
+Be specific about provider swaps and expected improvements.
+
+
+What you're learning: Latency debugging methodology. When something "feels slow," breaking down the pipeline into measurable components reveals specific optimization targets instead of general frustration.
+
+Prompt 3: Architecture Trade-off Analysis​
+I'm building a voice Digital FTE for [your domain] and need to choose:
+
+Option A: Native Speech-to-Speech (OpenAI Realtime)
+- 250ms latency
+- $0.11 per minute
+- Emotional intelligence, natural prosody
+
+Option B: Cascaded Pipeline (Deepgram + GPT-4o-mini + Cartesia)
+- 450ms latency
+- $0.035 per minute
+- Full transcripts, component flexibility
+
+My specific context:
+- [Industry/use case]
+- [User expectations in my domain]
+- [Compliance/transcript requirements]
+- [Budget constraints]
+
+Help me think through:
+
+1. Is 200ms difference actually perceptible in my use case?
+2. When would users notice and care about the quality difference?
+3. What's the total cost difference at my expected scale?
+4. What would make you recommend Option A despite higher cost?
+5. What would make Option B clearly better despite higher latency?
+
+Give me a specific recommendation for MY situation, not generic advice.
+
+
+What you're learning: Multi-criteria decision making under real constraints. Architecture choices aren't about finding the "best" option but about matching tradeoffs to your specific requirements, budget, and user expectations.
+
+Safety Note​
+
+When discussing costs and latencies with AI, remember that pricing changes frequently. The figures in this lesson ($0.11/min for OpenAI Realtime, $0.0077/min for Deepgram, etc.) reflect 2025 pricing and will evolve. Always verify current pricing at provider documentation before making production decisions.
+
+AI assistants can help you reason about tradeoffs, but pricing calculations should be validated against official sources before budgeting or committing to architecture decisions.

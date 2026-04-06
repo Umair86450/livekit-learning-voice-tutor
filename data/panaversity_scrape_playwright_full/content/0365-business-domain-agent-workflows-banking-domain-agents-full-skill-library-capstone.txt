@@ -1,0 +1,309 @@
+Full Banking Agent: Skill Library Build and Capstone
+
+In Lessons 1 through 14, you progressed from understanding the three regulatory pillars to calculating ECL, capital ratios, and liquidity metrics, then connected the pillars through cross-pillar integration and validated data integrity through reconciliation. This capstone lesson brings everything together. You will build four banking skills from scratch, set up six scheduled operational tasks, execute a comprehensive cross-pillar scenario, and produce the deliverable that every banking risk function ultimately serves: the Board Risk Report.
+
+This is a 90-minute lesson structured in three parts: skill library build (25 minutes), capstone scenario execution (50 minutes), and chapter summary (15 minutes).
+
+Part 1: Skill Library Build: Exercise 17​
+
+Duration: 25 minutes
+
+Building Skills in Cowork​
+
+You have completed 14 lessons of banking regulation. Now you package that knowledge into reusable skills that your AI assistant can invoke on demand. In Cowork, you create skills through the native skill creation workflow: describing the persona, decision logic, and validation criteria in the skill instructions form.
+
+Build these four skills:
+
+Skill 1: ifrs9-ecl​
+
+Create a new skill in Cowork with these instructions:
+
+Name: ifrs9-ecl
+Description: Calculate Expected Credit Loss under IFRS 9. Handles Stage 1 (12-month ECL), Stage 2 (lifetime ECL), and Stage 3 (lifetime ECL, credit-impaired). Supports individual facility and portfolio-level calculation with macroeconomic scenario weighting.
+Persona: IFRS 9 credit risk analyst with expertise in ECL modelling across retail and corporate portfolios.
+Key decision rules to include in the instructions:
+Stage classification drives measurement basis (12-month vs lifetime)
+PD source: point-in-time for ECL, through-the-cycle for regulatory EL
+LGD: match to collateral type and apply downturn adjustment under stress
+Scenario weighting: probability-weighted ECL is NOT the base case ECL
+Validation rules to include:
+ECL = PD x LGD x EAD (verify formula applied correctly)
+Stage 2 and 3 use lifetime PD (not 12-month)
+Probability-weighted ECL >= base case ECL (non-linearity check)
+Skill 2: ifrs9-staging​
+
+Create the skill for IFRS 9 stage classification. The instructions should specify that it:
+
+Accepts facility-level data (DPD, rating changes, qualitative indicators)
+Applies SICR triggers (quantitative: 30 DPD, 2-notch downgrade; qualitative: job loss, collateral decline)
+Returns Stage 1, 2, or 3 with reasoning
+Flags edge cases where professional judgment is required
+Skill 3: basel-rwa-credit​
+
+Create the skill for credit risk RWA calculation. The instructions should specify that it:
+
+Supports both Standardised Approach and IRB
+Applies correct risk weights by asset class
+Handles off-balance-sheet items with CCFs
+Applies the Basel IV output floor (72.5% of SA RWA)
+Skill 4: aml-typologies​
+
+Create the skill for AML typology identification. The instructions should specify that it:
+
+Recognises common typologies (structuring, layering, trade-based ML, PEP abuse)
+Accepts transaction patterns as input
+Returns identified typologies with confidence level and red flags
+Flags the agent boundary: typology identification is automated; SAR filing decision is human
+Setting Up 8 Scheduled Tasks​
+
+After building the skills, configure these operational tasks using Cowork's /schedule feature. Each task runs automatically at the specified frequency: the router loads the correct skills and jurisdiction overlays.
+
+Task	Frequency	Skills Used	Output
+1. Staging monitor	Daily (08:00)	ifrs9-staging	Flag any facilities where SICR indicators changed since last run
+2. ECL calculation	Quarterly (or on-demand)	ifrs9-ecl, ifrs9-scenarios	Full portfolio ECL with scenario weighting
+3. Capital ratio	Daily (07:30)	basel-capital, basel-rwa-credit	CET1, Tier 1, Total Capital ratios vs minimums + buffers
+4. LCR calculation	Daily (07:30)	liquidity-lcr	LCR with HQLA breakdown, distance to 100% minimum
+5. AML alert prioritisation	Daily (08:00)	aml-typologies	Prioritised alert queue with typology tags and risk scores
+6. Sanctions batch screen	Daily (07:00)	sanctions-screening	Screen new customers/counterparties against UK/EU/OFAC lists
+7. Nostro reconciliation	Every 2 hours (intraday)	bank-reconciliation	Match mirror vs SWIFT MT940; flag breaks > USD 100K immediately
+8. GL-to-risk recon	Daily (07:00)	bank-reconciliation, ifrs9-ecl	Compare IFRS 9 provision (risk system) vs GL provision account
+
+To configure task 1 in Cowork:
+
+Set up a daily scheduled task: IFRS 9 Staging Monitor
+
+Frequency: Every business day at 08:00
+Action: Read the latest loan tape. Apply SICR criteria from the
+  ifrs9-staging skill. Flag any facilities where:
+  - DPD has crossed 30 days (rebuttable presumption trigger)
+  - Rating has been downgraded 2+ notches since origination
+  - A financial covenant breach has been notified
+  - Watchlist status has changed
+Output: Morning watch-list additions with SICR rationale per facility.
+Escalation: If any Stage 1 → Stage 3 direct migration detected,
+  notify Head of Credit Risk immediately.
+
+
+For task 2 (quarterly ECL), the scheduled task chains multiple skills:
+
+Set up a quarterly scheduled task: Full Portfolio ECL Calculation
+
+Frequency: Last business day of each quarter
+Action:
+  Step 1 — Run ifrs9-staging on the full loan tape (stage classification)
+  Step 2 — Apply ifrs9-scenarios (current macro forecasts, probability weights)
+  Step 3 — Run ifrs9-ecl (PD × LGD × EAD, scenario-weighted)
+  Step 4 — Generate provision movement table (opening → closing reconciliation)
+  Step 5 — Draft IFRS 7 disclosure notes via ifrs9-disclosure
+Output: Complete ECL package for IFRS 9 Governance Committee review.
+Escalation: If total ECL movement exceeds 10% of prior quarter, flag for
+  CFO and CRO immediate review before committee meeting.
+
+
+For tasks 7-8 (reconciliation), the escalation rules follow the ageing SLA from L14:
+
+Set up an intraday scheduled task: Nostro Reconciliation
+
+Frequency: Every 2 hours during business day
+Action: Match latest mirror updates vs SWIFT MT940 confirmations
+  using the bank-reconciliation skill matching hierarchy.
+Escalation:
+  - New break > USD 100,000 → notify Operations desk immediately
+  - Any break aged > 3 days → notify account owner
+  - Any break aged > 15 days → notify CFO; provision assessment required
+
+Validation: 11 Cross-Domain Queries​
+
+Test the skill library with these queries. Each should produce a correct, complete response:
+
+"Calculate ECL for a GBP 500M retail mortgage portfolio, Stage 1, PD 1.2%, LGD 25%"
+"This borrower has gone from A rating to BB with 45 DPD. What stage?"
+"Calculate RWA for GBP 200M in corporate bonds rated BBB under SA"
+"What is the CET1 ratio if CET1 is GBP 400M and RWA is GBP 3.2B?"
+"Classify HQLA: GBP 500M in government bonds, GBP 100M in covered bonds"
+"A customer makes 6 cash deposits of GBP 9,800 in one week. What typology?"
+"Screen: payment from Ali Mohammed (UAE) to Steel Corp (Dubai), USD 150K"
+"Trace cascade: GBP 30M loan discovered as fraudulent. Stage migration? ECL impact? CET1 impact?"
+"Reconcile: ECL model says GBP 125M, GL says GBP 123M. What is the likely cause?"
+"Design an adverse macro scenario for a UK bank: GDP -3%, unemployment 8%"
+"Produce a monthly regulatory cycle workflow: which tasks run on which days?"
+Part 2: Capstone Scenario: Exercise 18: Board Risk Report​
+
+Duration: 50 minutes
+
+Bank Profile​
+Metric	Value
+Total loan book	GBP 4.2B
+ECL (current)	GBP 124M (Stage 1: GBP 18M, Stage 2: GBP 62M, Stage 3: GBP 44M)
+CET1 ratio	11.2% (current), 10.8% (after latest ECL movement)
+Leverage ratio	4.6%
+LCR	142%
+NSFR	108%
+AML metrics	847 alerts in queue, 12 SARs filed this quarter, 2 MRAs outstanding
+Key concentration	CRE: GBP 680M with 14% in Stage 2; Consumer: early DPD stress
+Macroeconomic Overlay Scenarios​
+Scenario	Probability	GDP	Unemployment	Key Assumption
+Base	50%	+1.2%	4.8%	Gradual recovery
+Adverse	35%	-0.8%	6.5%	Mild recession, property correction
+Severe	15%	-3.0%	9.1%	Deep recession, property crash
+Phase 1: ECL Movement Dashboard​
+
+Calculate the ECL movement from the prior quarter:
+
+Component	Prior Quarter	Current Quarter	Movement
+Stage 1 ECL	GBP 15M	GBP 18M	+GBP 3M
+Stage 2 ECL	GBP 55M	GBP 62M	+GBP 7M
+Stage 3 ECL	GBP 40M	GBP 44M	+GBP 4M
+Total ECL	GBP 110M	GBP 124M	+GBP 14M
+
+Analyse: What is driving the GBP 14M increase? Is it stage migration, PD deterioration, LGD changes, or new originations? What does the CRE concentration (GBP 680M with 14% in Stage 2) tell you about the portfolio trajectory?
+
+Phase 2: Capital Dashboard​
+Metric	Minimum	+ Buffer	Current	Status
+CET1 ratio	4.5%	7.0% (+ CCB)	10.8%	Above buffer
+Tier 1 ratio	6.0%	8.5%	? (calculate)	
+Total Capital ratio	8.0%	10.5%	? (calculate)	
+Leverage ratio	3.0%	:	4.6%	Above minimum
+
+The CET1 ratio has moved from 11.2% to 10.8%: a 40bp decline. What caused it? (The GBP 14M ECL increase, post-tax at 75%, reduces retained earnings by GBP 10.5M.)
+
+Phase 3: Liquidity Dashboard​
+Metric	Minimum	Current	Headroom
+LCR	100%	142%	42pp
+NSFR	100%	108%	8pp
+
+The NSFR headroom is thin at 8 percentage points. What would cause it to breach 100%? (Large wholesale funding maturity without replacement, or significant increase in long-term lending without matching stable funding.)
+
+Phase 4: AML Dashboard​
+Metric	Value	Trend	Concern Level
+Open alerts	847	Up 12% QoQ	Medium
+SARs filed	12	Up from 8 last quarter	Medium-High
+MRAs outstanding	2	Unchanged	High
+Average alert age	4.2 days	Up from 3.8 days	Medium
+
+The 2 outstanding MRAs (Matters Requiring Attention from regulators) are the highest-priority item. What are typical MRA themes for UK banks? (Transaction monitoring effectiveness, PEP screening gaps, beneficial ownership documentation.)
+
+Phase 5: Integrated Stress Test​
+
+Apply the adverse scenario (GDP -0.8%, unemployment 6.5%, probability 35%) combined with an AML fine of GBP 50M:
+
+Impact	Calculation	Result
+ECL increase under adverse	ECL rises from GBP 124M to approximately GBP 180M	+GBP 56M
+Post-tax CET1 impact (ECL)	GBP 56M x 75% = GBP 42M	-GBP 42M
+AML fine (post-tax)	GBP 50M x 75% = GBP 37.5M	-GBP 37.5M
+Combined CET1 impact		-GBP 79.5M
+Stressed CET1	Starting CET1 minus GBP 79.5M	Calculate
+Stressed CET1 ratio	Stressed CET1 / RWA (assume RWA increases 5% under stress)	Calculate
+
+Does the bank breach the combined buffer under the adverse + AML fine scenario? What management actions are available?
+
+Phase 6: Board Risk Report: 10 Slides​
+
+Assemble your analysis into a 10-slide Board Risk Report:
+
+Slide	Content
+1	Executive Summary: Key metrics, traffic-light status, top 3 risks
+2	ECL Movement: Dashboard from Phase 1 with trend chart
+3	Stage Migration Analysis: Where is credit quality deteriorating?
+4	Capital Adequacy: Dashboard from Phase 2, buffer headroom
+5	Liquidity Position: LCR and NSFR from Phase 3, NSFR concern
+6	AML and Financial Crime: Dashboard from Phase 4, MRA status
+7	Integrated Stress Test: Results from Phase 5, survival assessment
+8	Concentration Risk: CRE GBP 680M deep-dive, consumer early stress
+9	Recommendations: 5 specific actions with owners and timelines
+10	Appendix: Methodology notes, data sources, model limitations
+Part 3: Chapter Summary: Five Principles of Banking Domain AI​
+
+This chapter covered three regulatory pillars, 18 exercises, and a full cross-pillar capstone. Five principles emerged from this work.
+
+Principle 1: Model governance applies to AI models. The same regulatory framework (SR 11-7 in the US, SS1/23 in the UK) that governs traditional risk models applies to AI models used in banking. An AI agent that calculates ECL or stages assets is a model, and it requires validation, back-testing, documentation, and approval just like a statistical model.
+
+Principle 2: SICR assessment is irreducibly human. The AI can compute PDs, identify DPD thresholds, and flag qualitative indicators. But the decision of whether a significant increase in credit risk has occurred (particularly for facilities like A004 (job loss, no DPD) and A006 (property decline, no rating change)) requires professional judgment that cannot be fully automated. The agent assists; the human decides.
+
+Principle 3: AML is a legal obligation, not a data exercise. Filing a SAR is a legal act with criminal consequences for failure. The tipping-off prohibition is a criminal offence. The agent can gather data, screen transactions, and identify typologies, but it must never file a SAR, communicate suspicion to customers, or make risk acceptance decisions. These boundaries are not optional features: they are legal requirements.
+
+Principle 4: The Basel IV output floor reshapes the industry. The 72.5% output floor means that IRB banks can no longer achieve dramatically lower RWA than SA banks for the same portfolio. This compresses the capital advantage of IRB models, changes the economics of low-risk lending (mortgages, sovereigns), and means that the capital calculation you did in Exercise 10 becomes increasingly relevant even for IRB banks.
+
+Principle 5: Pillar interaction is where insight lives. A bank that reports ECL, capital, and AML separately gets three answers. A bank that traces the cascade (provision increase reduces CET1, which tightens the buffer, which constrains the dividend, which signals market concern, which increases funding costs, which compresses NII) gets one integrated answer. The banking plugin's router exists specifically to make this integration automatic rather than manual.
+
+Try With AI​
+
+Setup: Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1: Reproduce​
+Help me create 4 banking skills. For each, I will describe the
+domain knowledge — you help me structure it into a skill with
+a clear persona, decision rules, and validation criteria.
+
+1. ifrs9-ecl: Calculate Expected Credit Loss. Must handle Stage 1
+   (12-month), Stage 2 (lifetime), Stage 3 (lifetime impaired).
+   Support scenario weighting. Key validation: weighted ECL >= base.
+
+2. ifrs9-staging: Stage classification using SICR triggers. Must
+   handle quantitative (30 DPD, 2-notch downgrade) and qualitative
+   (job loss, collateral decline) triggers. Flag edge cases.
+
+3. basel-rwa-credit: Credit risk RWA under SA and IRB. Must handle
+   all SA risk weights, off-balance-sheet CCFs, and the 72.5%
+   output floor.
+
+4. aml-typologies: Identify money laundering typologies from
+   transaction patterns. Must recognize structuring, layering,
+   trade-based ML, PEP abuse. Must NOT recommend SAR filing.
+
+For each skill, help me write clear instructions covering: persona,
+key decision rules, input/output specification, and validation
+criteria that I can paste into the skill creation form.
+
+
+What you are learning: Building skills from your own expertise is the expert interview approach from Chapter 26. By structuring what you learned in Lessons 3-10 into reusable Cowork skills, you transform knowledge into operational capability. The skill does not replace your judgment: it packages your analytical framework so that routine calculations are automated and edge cases are flagged for human review.
+
+Prompt 2: Adapt​
+Execute a Board Risk Report for this bank:
+
+Loan book: GBP 4.2B
+ECL: GBP 124M (S1 GBP 18M, S2 GBP 62M, S3 GBP 44M)
+Prior quarter ECL: GBP 110M (S1 GBP 15M, S2 GBP 55M, S3 GBP 40M)
+CET1 ratio: 10.8% (down from 11.2%)
+Leverage: 4.6%, LCR: 142%, NSFR: 108%
+AML: 847 alerts, 12 SARs, 2 MRAs
+CRE concentration: GBP 680M, 14% Stage 2
+
+Macro scenarios: Base (GDP +1.2%, 50%), Adverse (GDP -0.8%, 35%),
+Severe (GDP -3.0%, 15%)
+
+Run all 5 phases:
+1. ECL Movement (what drove the GBP 14M increase?)
+2. Capital Dashboard (all ratios vs minimums + buffers)
+3. Liquidity (LCR/NSFR headroom analysis)
+4. AML Dashboard (alert trends, MRA priorities)
+5. Integrated Stress (adverse scenario + GBP 50M AML fine)
+
+Then produce a 10-slide Board Risk Report outline with the key
+message for each slide.
+
+
+What you are learning: The Board Risk Report is the ultimate cross-pillar deliverable. It forces you to integrate ECL, capital, liquidity, and AML into a single narrative that a non-technical board member can understand. The integrated stress test (adverse macro combined with AML fine) demonstrates why cross-pillar analysis matters: a bank that stress-tests ECL and AML separately misses the compounding effect of simultaneous shocks.
+
+Prompt 3: Apply​
+For each of the five principles of banking domain AI, provide:
+
+1. A one-sentence explanation of the principle
+2. A specific example from the Chapter 32 exercises that
+   demonstrates it
+3. What goes wrong if the principle is violated
+
+The five principles:
+1. Model governance applies to AI models (SR 11-7)
+2. SICR assessment is irreducibly human
+3. AML is a legal obligation, not a data exercise
+4. Basel IV output floor reshapes the industry
+5. Pillar interaction is where insight lives
+
+For principle 5, trace a specific cascade: a GBP 50M fraud
+discovery through all three pillars, quantifying each impact.
+
+
+What you are learning: The five principles are the lasting takeaways from this chapter. Technical skills (ECL calculation, capital ratios, AML screening) can be looked up and re-learned. But the principles shape how you think about banking AI: what must be automated, what must remain human, and where the integration of multiple regulatory views creates insight that no single pillar can provide.
+
+Flashcards Study Aid​

@@ -1,0 +1,664 @@
+MCP TypeScript SDK
+
+In Chapter 37, you learned the Model Context Protocol as a consumer, connecting Claude Code to MCP servers for file access, database queries, and web searches. Now you flip perspectives. Instead of consuming MCP servers, you build them. The official TypeScript SDK gives you the tools to create servers that expose your AI backend's capabilities to any MCP-compatible client.
+
+The timing matters: SDK version 1.10.0 (April 2025) introduced Streamable HTTP transport, replacing the older HTTP+SSE approach with a cleaner, more scalable protocol. You'll use this modern transport, which unifies request handling into a single endpoint and supports both synchronous responses and streaming for long-running operations.
+
+By the end of this lesson, you'll have an MCP server exposing your FastAPI AI backend through the standardized MCP protocol, ready for Claude Code, Claude Desktop, or any other MCP client to consume.
+
+Why Build an MCP Server?​
+
+Consider the difference between exposing your AI capabilities through a custom SDK versus MCP:
+
+Custom SDK (Lesson 4 pattern):
+
+import { createAgentSDK } from "./agent-sdk";
+
+const sdk = createAgentSDK({ baseUrl: "...", apiKey: "..." });
+const result = await sdk.chat.stream({ messages, tools });
+
+
+Every client needs your specific SDK. Documentation, versioning, authentication patterns are all custom.
+
+MCP Server:
+
+// Client uses any MCP-compatible tool
+// Claude Code settings.json:
+{
+  "mcpServers": {
+    "my-agent": {
+      "type": "streamableHttp",
+      "url": "https://my-agent.example.com/mcp"
+    }
+  }
+}
+
+
+Any MCP client works immediately. Claude Code, Claude Desktop, Zed, Cursor, and future tools all speak MCP. Your server becomes part of the universal AI tool ecosystem.
+
+Output:
+
+// With MCP, clients discover your tools automatically:
+> /mcp
+Available MCP servers:
+  my-agent (2 tools, 3 resources)
+    - analyze_code: Analyze code for issues
+    - generate_tests: Generate unit tests
+
+McpServer: The Foundation​
+
+The McpServer class provides the high-level API for building MCP servers. It handles protocol negotiation, message routing, and capability advertisement:
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({
+  name: "fastapi-agent-mcp",
+  version: "1.0.0",
+  // Capabilities advertise what your server supports
+  capabilities: {
+    tools: {},      // We'll register tools
+    resources: {},  // We'll expose resources
+    prompts: {},    // Optional prompt templates
+  },
+});
+
+
+Output:
+
+// Server initialized with:
+// Name: fastapi-agent-mcp
+// Version: 1.0.0
+// Capabilities: tools, resources, prompts
+
+
+The capabilities object tells clients what features your server supports. Clients use this during initialization to understand what requests they can make.
+
+Streamable HTTP Transport​
+
+SDK 1.10.0 introduced StreamableHTTPServerTransport, which replaces the older HTTP+SSE dual-endpoint approach with a single unified endpoint. The transport handles all MCP communication through one URL:
+
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+// Create transport with optional session configuration
+const transport = new StreamableHTTPServerTransport({
+  // For stateless servers (serverless-friendly):
+  sessionIdGenerator: undefined,
+
+  // For stateful servers:
+  // sessionIdGenerator: () => crypto.randomUUID(),
+});
+
+// Connect server to transport
+await server.connect(transport);
+
+
+Output:
+
+// Transport ready to handle:
+// POST /mcp - Send messages to server
+// GET /mcp - Open server-initiated message stream
+// DELETE /mcp - Close session (if stateful)
+
+Stateless vs Stateful Sessions​
+
+The sessionIdGenerator option determines your server's session behavior:
+
+Configuration	Use Case	Behavior
+undefined	Serverless, simple tools	Each request is independent
+() => crypto.randomUUID()	Stateful workflows	Server tracks client across requests
+Custom generator	JWT-based auth	Session ID encodes authentication
+
+For your FastAPI integration, start with stateless. It works with serverless platforms like Vercel, AWS Lambda, or Cloudflare Workers without connection persistence overhead.
+
+Registering Tools​
+
+Tools are the primary way MCP servers expose capabilities. Each tool has a name, description, Zod schema for parameters, and an async handler:
+
+import { z } from "zod";
+
+// Tool: Analyze code using your FastAPI backend
+server.tool(
+  "analyze_code",
+  "Analyze code for bugs, security issues, and improvements",
+  {
+    code: z.string().describe("The source code to analyze"),
+    language: z.enum(["typescript", "python", "javascript", "go"])
+      .describe("Programming language of the code"),
+    depth: z.enum(["quick", "thorough"]).default("quick")
+      .describe("Analysis depth - quick for syntax, thorough for logic"),
+  },
+  async ({ code, language, depth }) => {
+    // Call your FastAPI backend
+    const response = await fetch(`${FASTAPI_URL}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, language, depth }),
+    });
+
+    const result = await response.json();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// Tool: Generate tests for code
+server.tool(
+  "generate_tests",
+  "Generate unit tests for the provided code",
+  {
+    code: z.string().describe("The source code to test"),
+    framework: z.enum(["vitest", "jest", "pytest", "go-test"])
+      .describe("Testing framework to use"),
+  },
+  async ({ code, framework }) => {
+    const response = await fetch(`${FASTAPI_URL}/generate-tests`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, framework }),
+    });
+
+    const result = await response.json();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: result.tests,
+        },
+      ],
+    };
+  }
+);
+
+console.log("Registered tools: analyze_code, generate_tests");
+
+
+Output:
+
+Registered tools: analyze_code, generate_tests
+
+// When client calls analyze_code:
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"issues\": [\n    {\n      \"line\": 5,\n      \"severity\": \"warning\",\n      \"message\": \"Unused variable 'temp'\"\n    }\n  ],\n  \"score\": 85\n}"
+    }
+  ]
+}
+
+Tool Response Format​
+
+MCP tools return a structured response with a content array. Each content item has a type:
+
+Type	Use Case	Example
+text	Text output	Analysis results, generated code
+image	Base64 images	Charts, diagrams
+resource	Reference to resource	Link to file, database record
+
+For most AI backend integrations, text with JSON stringification covers the common cases.
+
+Exposing Resources​
+
+Resources provide read-only access to data. Unlike tools (which perform actions), resources expose information that clients can request and cache:
+
+// Static resource: Server configuration
+server.resource(
+  "config://agent/models",
+  "Available AI models and their capabilities",
+  async () => ({
+    contents: [
+      {
+        uri: "config://agent/models",
+        mimeType: "application/json",
+        text: JSON.stringify({
+          models: [
+            { id: "gpt-4o", context: 128000, streaming: true },
+            { id: "claude-sonnet-4-20250514", context: 200000, streaming: true },
+            { id: "gemini-2.0-flash", context: 1000000, streaming: true },
+          ],
+          default: "gpt-4o",
+        }),
+      },
+    ],
+  })
+);
+
+// Dynamic resource: Current usage statistics
+server.resource(
+  "stats://agent/usage",
+  "Current API usage statistics",
+  async () => {
+    const stats = await fetch(`${FASTAPI_URL}/stats`).then(r => r.json());
+
+    return {
+      contents: [
+        {
+          uri: "stats://agent/usage",
+          mimeType: "application/json",
+          text: JSON.stringify(stats),
+        },
+      ],
+    };
+  }
+);
+
+console.log("Registered resources: config://agent/models, stats://agent/usage");
+
+
+Output:
+
+Registered resources: config://agent/models, stats://agent/usage
+
+// Client reads config://agent/models:
+{
+  "contents": [
+    {
+      "uri": "config://agent/models",
+      "mimeType": "application/json",
+      "text": "{\"models\":[{\"id\":\"gpt-4o\",\"context\":128000,\"streaming\":true}...],\"default\":\"gpt-4o\"}"
+    }
+  ]
+}
+
+Resource URI Schemes​
+
+Choose URI schemes that communicate the resource type:
+
+Scheme	Purpose	Example
+config://	Configuration data	config://agent/models
+stats://	Statistics and metrics	stats://agent/usage
+file://	File system access	file:///path/to/file
+db://	Database records	db://users/123
+https://	Remote resources	https://api.example.com/data
+Express.js Integration​
+
+Connect your MCP server to Express.js to serve over HTTP. The transport handles request processing; you route requests to it:
+
+import express from "express";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+const app = express();
+app.use(express.json());
+
+// Initialize MCP server and transport
+const server = new McpServer({
+  name: "fastapi-agent-mcp",
+  version: "1.0.0",
+});
+
+const transport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: undefined, // Stateless
+});
+
+await server.connect(transport);
+
+// Register tools and resources (from previous examples)
+// server.tool(...)
+// server.resource(...)
+
+// MCP endpoint: POST for client-to-server messages
+app.post("/mcp", async (req, res) => {
+  try {
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error("MCP request error:", error);
+    res.status(500).json({
+      jsonrpc: "2.0",
+      error: {
+        code: -32603,
+        message: "Internal server error",
+      },
+      id: null,
+    });
+  }
+});
+
+// MCP endpoint: GET for server-initiated streams (optional)
+app.get("/mcp", async (req, res) => {
+  // Only needed if your server sends unsolicited messages
+  // For most cases, POST is sufficient
+  res.status(405).json({
+    jsonrpc: "2.0",
+    error: {
+      code: -32601,
+      message: "Server does not support GET streaming",
+    },
+    id: null,
+  });
+});
+
+// Health check
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", mcp: "ready" });
+});
+
+app.listen(3001, () => {
+  console.log("MCP server running on http://localhost:3001/mcp");
+});
+
+
+Output:
+
+MCP server running on http://localhost:3001/mcp
+
+// POST to /mcp with initialize request:
+// Request: {"jsonrpc":"2.0","method":"initialize","params":{...},"id":1}
+// Response: {"jsonrpc":"2.0","result":{"capabilities":{"tools":{},...}},"id":1}
+
+Security Considerations​
+
+When exposing MCP servers over HTTP:
+
+Validate Origin headers to prevent DNS rebinding attacks
+Bind to localhost for local development (not 0.0.0.0)
+Implement authentication for production deployments
+Rate limit to prevent abuse
+// Security middleware example
+app.use("/mcp", (req, res, next) => {
+  // Validate origin for non-localhost deployments
+  const origin = req.headers.origin;
+  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  // Require API key
+  const apiKey = req.headers["x-api-key"];
+  if (!apiKey || apiKey !== process.env.MCP_API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+});
+
+
+Output:
+
+// Unauthorized request without API key:
+// Response: {"error":"Unauthorized"}
+
+// Request with valid key proceeds to transport
+
+Session Management for Stateful Operations​
+
+When your MCP server needs to maintain state across requests (like a conversation or workflow), enable session management:
+
+import crypto from "crypto";
+
+// Sessions stored in memory (use Redis for production)
+const sessions = new Map<string, { createdAt: Date; data: any }>();
+
+const transport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: () => {
+    const sessionId = crypto.randomUUID();
+    sessions.set(sessionId, {
+      createdAt: new Date(),
+      data: {},
+    });
+    return sessionId;
+  },
+});
+
+// Clean up expired sessions
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.createdAt.getTime() > 30 * 60 * 1000) { // 30 min
+      sessions.delete(id);
+    }
+  }
+}, 60 * 1000);
+
+// Access session in tool handlers
+server.tool(
+  "add_to_context",
+  "Add information to the current session context",
+  {
+    key: z.string(),
+    value: z.string(),
+  },
+  async ({ key, value }, extra) => {
+    const sessionId = extra.sessionId;
+    const session = sessions.get(sessionId);
+
+    if (!session) {
+      return {
+        content: [{ type: "text", text: "Session not found" }],
+        isError: true,
+      };
+    }
+
+    session.data[key] = value;
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Added ${key}=${value} to session context`,
+        },
+      ],
+    };
+  }
+);
+
+
+Output:
+
+// First request creates session:
+// Response Header: Mcp-Session-Id: a1b2c3d4-...
+
+// Subsequent requests include:
+// Request Header: Mcp-Session-Id: a1b2c3d4-...
+
+// Session data persists across requests
+
+When to Use Sessions​
+Scenario	Session Needed?	Why
+Stateless tools (code analysis)	No	Each request is independent
+Multi-step workflows	Yes	Track progress across steps
+User preferences	Yes	Remember settings
+Conversation context	Yes	Accumulate information
+Serverless deployment	Usually No	Session storage adds complexity
+Complete MCP Server Example​
+
+Here's a complete example integrating everything:
+
+import express from "express";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
+
+const FASTAPI_URL = process.env.FASTAPI_URL || "http://localhost:8000";
+
+async function createMcpServer() {
+  const app = express();
+  app.use(express.json());
+
+  // Initialize server
+  const server = new McpServer({
+    name: "fastapi-agent-mcp",
+    version: "1.0.0",
+    capabilities: {
+      tools: {},
+      resources: {},
+    },
+  });
+
+  // Stateless transport
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+
+  await server.connect(transport);
+
+  // Tool: Chat with AI backend
+  server.tool(
+    "chat",
+    "Send a message to the AI agent and get a response",
+    {
+      message: z.string().describe("The message to send"),
+      model: z.enum(["gpt-4o", "claude-sonnet-4-20250514", "gemini-2.0-flash"])
+        .default("gpt-4o")
+        .describe("AI model to use"),
+    },
+    async ({ message, model }) => {
+      const response = await fetch(`${FASTAPI_URL}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, model }),
+      });
+
+      const result = await response.json();
+
+      return {
+        content: [{ type: "text", text: result.response }],
+      };
+    }
+  );
+
+  // Tool: Analyze code
+  server.tool(
+    "analyze_code",
+    "Analyze code for issues and improvements",
+    {
+      code: z.string(),
+      language: z.enum(["typescript", "python", "javascript"]),
+    },
+    async ({ code, language }) => {
+      const response = await fetch(`${FASTAPI_URL}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, language }),
+      });
+
+      const result = await response.json();
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  // Resource: Available models
+  server.resource(
+    "config://models",
+    "Available AI models",
+    async () => ({
+      contents: [{
+        uri: "config://models",
+        mimeType: "application/json",
+        text: JSON.stringify({
+          models: ["gpt-4o", "claude-sonnet-4-20250514", "gemini-2.0-flash"],
+        }),
+      }],
+    })
+  );
+
+  // MCP endpoint
+  app.post("/mcp", async (req, res) => {
+    try {
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("MCP error:", error);
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal error" },
+        id: null,
+      });
+    }
+  });
+
+  app.get("/health", (_, res) => res.json({ status: "ok" }));
+
+  const port = process.env.PORT || 3001;
+  app.listen(port, () => {
+    console.log(`MCP server: http://localhost:${port}/mcp`);
+    console.log(`Tools: chat, analyze_code`);
+    console.log(`Resources: config://models`);
+  });
+}
+
+createMcpServer().catch(console.error);
+
+
+Output:
+
+MCP server: http://localhost:3001/mcp
+Tools: chat, analyze_code
+Resources: config://models
+
+// Connect from Claude Code:
+// Add to settings.json:
+{
+  "mcpServers": {
+    "fastapi-agent": {
+      "type": "streamableHttp",
+      "url": "http://localhost:3001/mcp"
+    }
+  }
+}
+
+// Then in Claude Code:
+> Use the chat tool to ask about TypeScript generics
+[Calling chat with message: "Explain TypeScript generics"...]
+
+Try With AI​
+Prompt 1: Build Your First MCP Server​
+Help me create an MCP server that exposes my FastAPI AI backend.
+The backend has these endpoints:
+- POST /chat (message, model) -> response
+- POST /summarize (text, max_length) -> summary
+- GET /models -> list of available models
+
+Create the MCP server with:
+1. McpServer initialization
+2. StreamableHTTPServerTransport (stateless)
+3. Two tools: chat and summarize
+4. One resource: available models
+5. Express.js integration with error handling
+
+Use Zod for parameter validation with .describe() on each field.
+
+
+What you're learning: The complete pattern for wrapping any REST API as an MCP server. This transforms your custom API into a universal tool that any MCP client can consume without custom SDK integration.
+
+Prompt 2: Add Session Management​
+I need to extend my MCP server to support stateful conversations.
+Modify the server to:
+1. Generate UUID session IDs
+2. Store session context in a Map
+3. Add a tool "remember" that stores key-value pairs in session
+4. Add a tool "recall" that retrieves values from session
+5. Clean up expired sessions after 30 minutes
+
+Show me how to access session ID in tool handlers and
+how clients maintain the session across requests.
+
+
+What you're learning: Session management patterns for MCP servers that need to maintain state. This enables multi-turn conversations and workflows where context accumulates across tool calls.
+
+Prompt 3: Secure Production Deployment​
+My MCP server will be deployed publicly. Help me add:
+1. API key authentication via x-api-key header
+2. Origin validation to prevent DNS rebinding
+3. Rate limiting (100 requests per minute per IP)
+4. Request logging with correlation IDs
+5. Graceful error responses that don't leak internals
+
+Show the middleware implementation and how to configure
+these settings from environment variables.
+
+
+What you're learning: Production security patterns for MCP servers. Public MCP endpoints need protection against abuse, and proper security is essential before exposing your AI capabilities to the internet.
+
+Safety Note​
+
+MCP servers expose your AI capabilities to external clients. In production, always implement authentication, rate limiting, and input validation. The examples in this lesson prioritize clarity over security, so add proper middleware before deployment. Never expose unauthenticated MCP endpoints to the public internet.

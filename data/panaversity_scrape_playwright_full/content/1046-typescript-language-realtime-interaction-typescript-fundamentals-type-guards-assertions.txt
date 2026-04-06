@@ -1,0 +1,591 @@
+Type Guards and Type Assertions
+
+Your AI agent streams responses in chunks. Some chunks contain content deltas. Others contain tool calls. Others signal completion. The TypeScript compiler knows the union type, but at runtime, you need to check which variant you received before accessing properties that only exist on that variant. Get this wrong, and your application crashes when users interact with the agent.
+
+This is where type guards become essential. Type guards are runtime checks that TypeScript understands, narrowing types automatically within conditional blocks. Instead of hoping a property exists, you write a check that proves it exists, and TypeScript tracks that proof through your code.
+
+In Lesson 4, you learned discriminated unions that model these different states. Now you'll learn to write the runtime checks that safely navigate between them.
+
+typeof Guards for Primitives​
+
+The simplest type guard is typeof, which checks primitive types at runtime. TypeScript understands these checks and narrows types automatically.
+
+function formatValue(value: string | number): string {
+  if (typeof value === "string") {
+    // TypeScript knows: value is string here
+    return value.toUpperCase();
+  }
+  // TypeScript knows: value is number here
+  return value.toFixed(2);
+}
+
+
+Output:
+
+formatValue("hello")  // "HELLO"
+formatValue(42.567)   // "42.57"
+
+
+The typeof operator works with these primitive types:
+
+typeof Check	Narrows To
+typeof x === "string"	string
+typeof x === "number"	number
+typeof x === "boolean"	boolean
+typeof x === "undefined"	undefined
+typeof x === "object"	object | null
+typeof x === "function"	Function
+
+A common pattern in AI applications handles optional configuration:
+
+type AgentConfig = {
+  maxTokens?: number | string;  // Could be "1000" from env var
+  temperature?: number;
+};
+
+function getMaxTokens(config: AgentConfig): number {
+  const raw = config.maxTokens;
+
+  if (typeof raw === "undefined") {
+    return 4096;  // Default
+  }
+
+  if (typeof raw === "string") {
+    return parseInt(raw, 10);  // Parse string from env
+  }
+
+  return raw;  // Already a number
+}
+
+
+Output:
+
+getMaxTokens({})                    // 4096
+getMaxTokens({ maxTokens: "1000" }) // 1000
+getMaxTokens({ maxTokens: 2048 })   // 2048
+
+instanceof Guards for Classes​
+
+When working with class instances, instanceof checks the prototype chain. This is essential for error handling:
+
+class APIError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number,
+    public retryAfter?: number
+  ) {
+    super(message);
+    this.name = "APIError";
+  }
+}
+
+class RateLimitError extends APIError {
+  constructor(retryAfter: number) {
+    super("Rate limit exceeded", 429, retryAfter);
+    this.name = "RateLimitError";
+  }
+}
+
+async function callAI(prompt: string): Promise<string> {
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ prompt })
+    });
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        const retryAfter = parseInt(response.headers.get("Retry-After") || "60");
+        throw new RateLimitError(retryAfter);
+      }
+      throw new APIError("API request failed", response.status);
+    }
+
+    return await response.text();
+  } catch (error) {
+    if (error instanceof RateLimitError) {
+      // TypeScript knows: error.retryAfter exists
+      console.log(`Rate limited. Retry after ${error.retryAfter}s`);
+      await sleep(error.retryAfter * 1000);
+      return callAI(prompt);  // Retry
+    }
+
+    if (error instanceof APIError) {
+      // TypeScript knows: error.statusCode exists
+      console.log(`API error: ${error.statusCode}`);
+      throw error;
+    }
+
+    // Unknown error
+    throw new Error(`Unexpected error: ${error}`);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+Output (when rate limited):
+
+Rate limited. Retry after 30s
+// ... waits 30 seconds, then retries
+
+
+The instanceof check narrows the type, giving you access to class-specific properties like statusCode and retryAfter.
+
+Custom Type Predicates​
+
+For complex types that aren't classes, you need custom type predicates. A type predicate is a function that returns a boolean, but tells TypeScript what type the value is when true.
+
+Here's the pattern from AI streaming applications:
+
+interface ContentChunk {
+  type: "content";
+  delta: string;
+}
+
+interface ToolCallChunk {
+  type: "tool_call";
+  name: string;
+  arguments: unknown;
+}
+
+interface DoneChunk {
+  type: "done";
+  usage: { prompt_tokens: number; completion_tokens: number };
+}
+
+type StreamChunk = ContentChunk | ToolCallChunk | DoneChunk;
+
+// Type predicate: function returns boolean, but narrows type
+function isToolCall(chunk: StreamChunk): chunk is ToolCallChunk {
+  return chunk.type === "tool_call";
+}
+
+function isContent(chunk: StreamChunk): chunk is ContentChunk {
+  return chunk.type === "content";
+}
+
+function isDone(chunk: StreamChunk): chunk is DoneChunk {
+  return chunk.type === "done";
+}
+
+
+The key syntax: chunk is ToolCallChunk after the colon tells TypeScript this function is a type predicate. When it returns true, the parameter is narrowed to ToolCallChunk.
+
+Now you can use these predicates:
+
+function processChunk(chunk: StreamChunk): void {
+  if (isToolCall(chunk)) {
+    // TypeScript knows: chunk is ToolCallChunk
+    console.log(`Calling tool: ${chunk.name}`);
+    console.log(`Arguments: ${JSON.stringify(chunk.arguments)}`);
+    return;
+  }
+
+  if (isContent(chunk)) {
+    // TypeScript knows: chunk is ContentChunk
+    process.stdout.write(chunk.delta);
+    return;
+  }
+
+  if (isDone(chunk)) {
+    // TypeScript knows: chunk is DoneChunk
+    console.log(`\nCompleted. Tokens used: ${chunk.usage.completion_tokens}`);
+    return;
+  }
+
+  // TypeScript knows: chunk is never (all cases handled)
+  const exhaustive: never = chunk;
+}
+
+
+Output (for a streaming session):
+
+Hello, I can help you with that.
+Calling tool: search_web
+Arguments: {"query":"TypeScript type guards"}
+Based on my search...
+Completed. Tokens used: 127
+
+Why Not Just Use switch?​
+
+You might wonder why we need type predicates when switch on the discriminant works. Both approaches are valid:
+
+// Approach 1: switch (from Lesson 4)
+function processWithSwitch(chunk: StreamChunk): void {
+  switch (chunk.type) {
+    case "content":
+      process.stdout.write(chunk.delta);
+      break;
+    case "tool_call":
+      console.log(`Calling: ${chunk.name}`);
+      break;
+    case "done":
+      console.log(`Tokens: ${chunk.usage.completion_tokens}`);
+      break;
+  }
+}
+
+// Approach 2: type predicates
+function processWithPredicates(chunk: StreamChunk): void {
+  if (isToolCall(chunk)) {
+    console.log(`Calling: ${chunk.name}`);
+  } else if (isContent(chunk)) {
+    process.stdout.write(chunk.delta);
+  } else {
+    console.log(`Tokens: ${chunk.usage.completion_tokens}`);
+  }
+}
+
+
+Type predicates shine when:
+
+You need to filter arrays: chunks.filter(isToolCall) returns ToolCallChunk[]
+You want reusable checks across multiple functions
+The discriminant check is complex (multiple conditions)
+// Filtering with type predicates
+const chunks: StreamChunk[] = [
+  { type: "content", delta: "Hello" },
+  { type: "tool_call", name: "search", arguments: {} },
+  { type: "content", delta: " world" },
+  { type: "done", usage: { prompt_tokens: 10, completion_tokens: 20 } }
+];
+
+const toolCalls = chunks.filter(isToolCall);
+// TypeScript knows: toolCalls is ToolCallChunk[]
+toolCalls.forEach(tc => console.log(tc.name));
+
+
+Output:
+
+search
+
+Type Assertions with as​
+
+Sometimes you know more than TypeScript does. Type assertions tell the compiler to trust you:
+
+const response = await fetch("/api/agent");
+const data = await response.json();  // Type: unknown
+
+// You know the API returns this shape
+type AgentResponse = {
+  id: string;
+  status: "active" | "paused" | "stopped";
+};
+
+const agent = data as AgentResponse;
+console.log(agent.status);  // TypeScript allows this
+
+
+Output:
+
+active
+
+The Danger of Assertions​
+
+Assertions are dangerous because they bypass TypeScript's safety. If you're wrong, you get runtime errors:
+
+// DANGEROUS: What if API changes?
+const agent = data as AgentResponse;
+
+// If API actually returns { id: 123, state: "running" }
+console.log(agent.status);  // undefined - runtime surprise!
+console.log(agent.status.toUpperCase());  // TypeError: Cannot read property 'toUpperCase' of undefined
+
+
+Rule: Prefer type guards over assertions. Assertions say "trust me." Type guards say "I checked."
+
+When Assertions Are Appropriate​
+
+Use assertions only when:
+
+DOM APIs where TypeScript's types are too broad:
+const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+const ctx = canvas.getContext("2d");  // TypeScript knows this returns CanvasRenderingContext2D | null
+
+After validation when you've already checked the shape:
+function validateAgentResponse(data: unknown): data is AgentResponse {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "id" in data &&
+    "status" in data &&
+    typeof (data as AgentResponse).id === "string" &&
+    ["active", "paused", "stopped"].includes((data as AgentResponse).status)
+  );
+}
+
+const data = await response.json();
+if (validateAgentResponse(data)) {
+  // Now we've PROVEN it's an AgentResponse
+  console.log(data.status);  // Safe!
+}
+
+Test mocks where you intentionally provide partial data:
+const mockAgent = { id: "test-123" } as AgentResponse;
+// Okay in tests where you control the usage
+
+Non-null Assertion Operator (!)​
+
+The ! operator tells TypeScript a value isn't null or undefined:
+
+type User = {
+  name: string;
+  email?: string;
+};
+
+function sendNotification(user: User): void {
+  // TypeScript error: user.email might be undefined
+  // sendEmail(user.email);
+
+  // Non-null assertion: "trust me, it exists"
+  sendEmail(user.email!);
+}
+
+The Danger of Non-null Assertions​
+
+Like as, the ! operator bypasses safety. If you're wrong, runtime error:
+
+const user: User = { name: "Alice" };  // No email!
+sendNotification(user);  // Passes undefined to sendEmail - crash!
+
+
+Better approach: Check first, then access:
+
+function sendNotification(user: User): void {
+  if (user.email) {
+    // TypeScript knows: user.email is string (not undefined)
+    sendEmail(user.email);  // Safe!
+  }
+}
+
+When Non-null Assertions Are Appropriate​
+
+Use ! only when:
+
+Immediately after a check TypeScript doesn't understand:
+const map = new Map<string, User>();
+map.set("alice", { name: "Alice" });
+
+if (map.has("alice")) {
+  // TypeScript doesn't know .has() guarantees .get() returns value
+  const user = map.get("alice")!;  // Okay here
+}
+
+Class initialization that TypeScript can't track:
+class Agent {
+  private model!: AIModel;  // Definite assignment assertion
+
+  async init(): Promise<void> {
+    this.model = await loadModel();
+  }
+
+  async respond(prompt: string): Promise<string> {
+    // You MUST call init() first, which sets model
+    return this.model.generate(prompt);
+  }
+}
+
+Combining Guards in Real Code​
+
+Here's a complete example showing all techniques together:
+
+interface StreamEvent {
+  type: string;
+  data?: unknown;
+}
+
+interface ContentEvent {
+  type: "content";
+  data: { delta: string };
+}
+
+interface ToolEvent {
+  type: "tool_call";
+  data: { name: string; args: Record<string, unknown> };
+}
+
+interface ErrorEvent {
+  type: "error";
+  data: { code: number; message: string };
+}
+
+type KnownEvent = ContentEvent | ToolEvent | ErrorEvent;
+
+// Type predicate with validation
+function isContentEvent(event: StreamEvent): event is ContentEvent {
+  return (
+    event.type === "content" &&
+    typeof event.data === "object" &&
+    event.data !== null &&
+    "delta" in event.data &&
+    typeof (event.data as ContentEvent["data"]).delta === "string"
+  );
+}
+
+function isToolEvent(event: StreamEvent): event is ToolEvent {
+  return (
+    event.type === "tool_call" &&
+    typeof event.data === "object" &&
+    event.data !== null &&
+    "name" in event.data
+  );
+}
+
+function isErrorEvent(event: StreamEvent): event is ErrorEvent {
+  return (
+    event.type === "error" &&
+    typeof event.data === "object" &&
+    event.data !== null &&
+    "code" in event.data
+  );
+}
+
+async function handleStream(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  const decoder = new TextDecoder();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const text = decoder.decode(value);
+    const event: StreamEvent = JSON.parse(text);
+
+    if (isContentEvent(event)) {
+      process.stdout.write(event.data.delta);
+    } else if (isToolEvent(event)) {
+      console.log(`\n[Tool: ${event.data.name}]`);
+    } else if (isErrorEvent(event)) {
+      throw new Error(`Stream error ${event.data.code}: ${event.data.message}`);
+    } else {
+      // Unknown event type - log and continue
+      console.warn(`Unknown event type: ${event.type}`);
+    }
+  }
+}
+
+
+Output (for a streaming response):
+
+Hello! I'll search for that information.
+[Tool: web_search]
+Based on my search, here's what I found...
+
+
+The key insight: each type predicate does real validation, not just type assertion. This means your code handles malformed data gracefully instead of crashing.
+
+Common Mistakes to Avoid​
+Mistake 1: Assertion Instead of Guard​
+// WRONG: Asserts without checking
+function getContent(chunk: StreamChunk): string {
+  return (chunk as ContentChunk).delta;  // Crashes if tool_call!
+}
+
+// RIGHT: Guards before accessing
+function getContent(chunk: StreamChunk): string | null {
+  if (isContent(chunk)) {
+    return chunk.delta;  // Safe
+  }
+  return null;
+}
+
+Mistake 2: Forgetting typeof Null​
+// WRONG: typeof null === "object"
+function processData(data: object | null): void {
+  if (typeof data === "object") {
+    // data could still be null here!
+    console.log(data.toString());  // Might crash
+  }
+}
+
+// RIGHT: Check null explicitly
+function processData(data: object | null): void {
+  if (data !== null && typeof data === "object") {
+    console.log(data.toString());  // Safe
+  }
+}
+
+Mistake 3: Type Predicate Without Validation​
+// WRONG: Predicate just checks discriminant
+function isToolCall(chunk: unknown): chunk is ToolCallChunk {
+  return (chunk as any).type === "tool_call";  // Doesn't validate structure!
+}
+
+// RIGHT: Validate the full shape
+function isToolCall(chunk: unknown): chunk is ToolCallChunk {
+  return (
+    typeof chunk === "object" &&
+    chunk !== null &&
+    "type" in chunk &&
+    (chunk as StreamChunk).type === "tool_call" &&
+    "name" in chunk &&
+    "arguments" in chunk
+  );
+}
+
+Try With AI​
+Prompt 1: Build a Response Validator​
+I'm building a TypeScript client for an AI API. The API returns this shape:
+
+{
+  "choices": [
+    {
+      "message": { "role": "assistant", "content": "..." },
+      "finish_reason": "stop" | "length" | "tool_calls"
+    }
+  ],
+  "usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+}
+
+Create a type for this response and a type predicate function that validates
+unknown data matches this shape. The validator should check:
+- choices is a non-empty array
+- each choice has message with role and content strings
+- finish_reason is one of the valid literals
+- usage has the required token counts
+
+
+What you're learning: Writing robust type predicates that validate complex nested structures from external APIs.
+
+Prompt 2: Error Hierarchy​
+I need a hierarchy of error classes for AI operations:
+
+1. AIError (base) - has message and optional cause
+2. RateLimitError - adds retryAfterMs: number
+3. TokenLimitError - adds tokensUsed: number, maxTokens: number
+4. ContentFilterError - adds filteredCategories: string[]
+
+Write the classes, then write a function handleError(error: unknown) that:
+- Uses instanceof to handle each error type differently
+- Falls back to a generic handler for unknown errors
+- Returns a user-friendly error message
+
+Show the instanceof narrowing in action.
+
+
+What you're learning: Using instanceof guards with error class hierarchies for safe, typed error handling.
+
+Prompt 3: Safe API Response Parsing​
+I'm receiving data from an external API as unknown type. Help me write
+a pattern that:
+
+1. Parses JSON safely (could throw)
+2. Validates the parsed data matches expected type
+3. Returns a discriminated union: { ok: true, data: T } | { ok: false, error: string }
+
+Use this pattern to parse an agent config:
+{
+  name: string,
+  model: "gpt-4" | "claude-3",
+  temperature?: number
+}
+
+The solution should use type predicates, not assertions.
+Show how the discriminated union result makes the happy path type-safe.
+
+
+What you're learning: Combining type predicates with Result-pattern discriminated unions for bulletproof API data handling.
+
+Safety note: Type assertions (as) and non-null assertions (!) bypass TypeScript's safety. When working with AI APIs that may return unexpected data, prefer type guards that validate at runtime. Assertions are appropriate after validation or in controlled contexts like tests.

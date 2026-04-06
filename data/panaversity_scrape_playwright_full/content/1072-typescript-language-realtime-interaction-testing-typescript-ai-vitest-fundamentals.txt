@@ -1,0 +1,646 @@
+Vitest Fundamentals
+
+Your AI SDK generates streaming chat responses, tool calls, and structured JSON. How do you verify that a code change doesn't break the streaming parser? How do you test that tool calls get routed correctly? How do you catch regressions before users do?
+
+You need tests. And for TypeScript in 2025, Vitest is the answer.
+
+Vitest is a test runner built on Vite's fast build system. It understands TypeScript natively without configuration. It runs tests in parallel by default. And its API is nearly identical to Jest, so if you've tested JavaScript before, you'll feel at home. The difference: Vitest is significantly faster, with sub-second startup times instead of waiting 5-10 seconds for Jest to initialize.
+
+This lesson teaches Vitest's core patterns: organizing tests with describe and it, writing assertions with expect, managing setup with lifecycle hooks, and capturing response structures with snapshots. These patterns apply to any TypeScript project, but we'll focus on AI application testing scenarios.
+
+Project Setup​
+
+First, install Vitest in your project:
+
+npm install -D vitest
+
+
+Output:
+
+added 1 package, and audited 245 packages in 2s
+
+
+Add a test script to package.json:
+
+{
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run"
+  }
+}
+
+
+Create a Vitest configuration file at vitest.config.ts:
+
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    globals: false,  // Explicit imports (recommended)
+    environment: "node",
+    include: ["**/*.test.ts", "**/*.spec.ts"],
+  },
+});
+
+
+Output:
+
+// Configuration file created
+// globals: false means you import describe, it, expect explicitly
+// environment: "node" uses Node.js APIs (not browser DOM)
+
+
+With globals: false, you import test functions explicitly. This makes dependencies clear and enables better IDE autocomplete.
+
+Test Structure: describe and it​
+
+Tests are organized into groups with describe and individual test cases with it. Think of describe as chapters and it as individual tests within those chapters.
+
+import { describe, it, expect } from "vitest";
+
+// A simple function to test
+function formatTokenCount(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k tokens`;
+  }
+  return `${count} tokens`;
+}
+
+describe("formatTokenCount", () => {
+  it("formats small numbers without abbreviation", () => {
+    const result = formatTokenCount(500);
+    expect(result).toBe("500 tokens");
+  });
+
+  it("formats thousands with k suffix", () => {
+    const result = formatTokenCount(2500);
+    expect(result).toBe("2.5k tokens");
+  });
+
+  it("handles exact thousands", () => {
+    const result = formatTokenCount(1000);
+    expect(result).toBe("1.0k tokens");
+  });
+});
+
+
+Output:
+
+ ✓ formatTokenCount (3 tests) 2ms
+   ✓ formats small numbers without abbreviation
+   ✓ formats thousands with k suffix
+   ✓ handles exact thousands
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+
+
+Run tests with npm test. Vitest watches for changes by default, re-running affected tests instantly.
+
+Nested Describe Blocks​
+
+For complex modules, nest describe blocks to create logical hierarchies:
+
+import { describe, it, expect } from "vitest";
+
+describe("ChatMessage", () => {
+  describe("parsing", () => {
+    it("extracts role from message", () => {
+      const message = { role: "assistant", content: "Hello" };
+      expect(message.role).toBe("assistant");
+    });
+
+    it("handles empty content", () => {
+      const message = { role: "user", content: "" };
+      expect(message.content).toBe("");
+    });
+  });
+
+  describe("validation", () => {
+    it("requires role field", () => {
+      const message = { content: "Hello" };
+      expect("role" in message).toBe(false);
+    });
+  });
+});
+
+
+Output:
+
+ ✓ ChatMessage (3 tests) 1ms
+   ✓ parsing (2 tests)
+     ✓ extracts role from message
+     ✓ handles empty content
+   ✓ validation (1 test)
+     ✓ requires role field
+
+
+Nested describes create readable test output that documents your code's behavior.
+
+Assertions with expect​
+
+The expect function takes a value and returns an object with matcher methods. Matchers assert specific conditions about the value.
+
+Common Matchers​
+import { describe, it, expect } from "vitest";
+
+describe("expect matchers", () => {
+  // Exact equality
+  it("toBe checks strict equality", () => {
+    expect(5).toBe(5);
+    expect("hello").toBe("hello");
+    // expect(5).toBe("5"); // Would fail - different types
+  });
+
+  // Deep equality for objects/arrays
+  it("toEqual compares object contents", () => {
+    const response = { role: "assistant", content: "Hi" };
+    expect(response).toEqual({ role: "assistant", content: "Hi" });
+  });
+
+  // Truthiness
+  it("toBeTruthy and toBeFalsy check truthiness", () => {
+    expect("non-empty").toBeTruthy();
+    expect("").toBeFalsy();
+    expect(null).toBeFalsy();
+    expect(0).toBeFalsy();
+  });
+
+  // Null and undefined
+  it("toBeNull and toBeUndefined check specific values", () => {
+    expect(null).toBeNull();
+    expect(undefined).toBeUndefined();
+    expect(null).toBeDefined();  // null is defined, just null
+  });
+
+  // Numbers
+  it("number matchers for ranges", () => {
+    expect(100).toBeGreaterThan(99);
+    expect(100).toBeLessThanOrEqual(100);
+    expect(0.1 + 0.2).toBeCloseTo(0.3);  // Floating point comparison
+  });
+
+  // Strings
+  it("string matchers", () => {
+    expect("Hello, Claude").toContain("Claude");
+    expect("Hello, Claude").toMatch(/Claude/);
+    expect("error: timeout").toMatch(/error:/);
+  });
+
+  // Arrays
+  it("array matchers", () => {
+    const models = ["gpt-4", "claude-3", "gemini"];
+    expect(models).toContain("claude-3");
+    expect(models).toHaveLength(3);
+  });
+});
+
+
+Output:
+
+ ✓ expect matchers (7 tests) 3ms
+   ✓ toBe checks strict equality
+   ✓ toEqual compares object contents
+   ✓ toBeTruthy and toBeFalsy check truthiness
+   ✓ toBeNull and toBeUndefined check specific values
+   ✓ number matchers for ranges
+   ✓ string matchers
+   ✓ array matchers
+
+Testing Errors with toThrow​
+
+For functions that should throw errors, wrap them in an arrow function:
+
+import { describe, it, expect } from "vitest";
+
+function validateApiKey(key: string): void {
+  if (!key.startsWith("sk-")) {
+    throw new Error("Invalid API key format");
+  }
+  if (key.length < 10) {
+    throw new Error("API key too short");
+  }
+}
+
+describe("validateApiKey", () => {
+  it("accepts valid API keys", () => {
+    expect(() => validateApiKey("sk-abc123xyz")).not.toThrow();
+  });
+
+  it("rejects keys without sk- prefix", () => {
+    expect(() => validateApiKey("abc123xyz")).toThrow("Invalid API key format");
+  });
+
+  it("rejects short keys", () => {
+    expect(() => validateApiKey("sk-abc")).toThrow("API key too short");
+  });
+
+  it("can match error messages with regex", () => {
+    expect(() => validateApiKey("bad")).toThrow(/Invalid/);
+  });
+});
+
+
+Output:
+
+ ✓ validateApiKey (4 tests) 1ms
+   ✓ accepts valid API keys
+   ✓ rejects keys without sk- prefix
+   ✓ rejects short keys
+   ✓ can match error messages with regex
+
+
+Notice the arrow function wrapper: expect(() => validateApiKey("bad")). This captures the throw rather than letting it crash the test.
+
+Negating Matchers with not​
+
+Any matcher can be negated with .not:
+
+expect(5).not.toBe(10);
+expect([]).not.toContain("item");
+expect(() => safeFunction()).not.toThrow();
+
+Lifecycle Hooks​
+
+When multiple tests need similar setup, lifecycle hooks reduce duplication.
+
+beforeEach and afterEach​
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
+interface ChatSession {
+  messages: Array<{ role: string; content: string }>;
+  model: string;
+}
+
+describe("ChatSession", () => {
+  let session: ChatSession;
+
+  beforeEach(() => {
+    // Fresh session before each test
+    session = {
+      messages: [],
+      model: "gpt-4",
+    };
+  });
+
+  afterEach(() => {
+    // Cleanup if needed (e.g., close connections)
+    // In this case, nothing to clean up
+  });
+
+  it("starts with empty messages", () => {
+    expect(session.messages).toHaveLength(0);
+  });
+
+  it("can add messages", () => {
+    session.messages.push({ role: "user", content: "Hello" });
+    expect(session.messages).toHaveLength(1);
+  });
+
+  it("each test gets fresh session", () => {
+    // This test runs after the previous one added a message,
+    // but beforeEach creates a new session, so messages is empty
+    expect(session.messages).toHaveLength(0);
+  });
+});
+
+
+Output:
+
+ ✓ ChatSession (3 tests) 1ms
+   ✓ starts with empty messages
+   ✓ can add messages
+   ✓ each test gets fresh session
+
+
+Each test gets a fresh session object, preventing test pollution where one test's changes affect another.
+
+beforeAll and afterAll​
+
+For expensive setup that can be shared across tests:
+
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+
+describe("Database tests", () => {
+  let db: { connected: boolean; data: string[] };
+
+  beforeAll(async () => {
+    // Expensive setup runs once before all tests
+    console.log("Connecting to test database...");
+    db = { connected: true, data: ["initial"] };
+    // In real code: await db.connect()
+  });
+
+  afterAll(async () => {
+    // Cleanup runs once after all tests
+    console.log("Disconnecting from test database...");
+    db.connected = false;
+    // In real code: await db.disconnect()
+  });
+
+  it("database is connected", () => {
+    expect(db.connected).toBe(true);
+  });
+
+  it("has initial data", () => {
+    expect(db.data).toContain("initial");
+  });
+});
+
+
+Output:
+
+Connecting to test database...
+ ✓ Database tests (2 tests) 1ms
+   ✓ database is connected
+   ✓ has initial data
+Disconnecting from test database...
+
+
+Use beforeAll/afterAll for database connections, server startup, or any setup that's slow but can be shared.
+
+Hook Scope​
+
+Hooks apply to their describe block and all nested blocks:
+
+import { describe, it, expect, beforeEach } from "vitest";
+
+describe("outer", () => {
+  beforeEach(() => {
+    console.log("outer beforeEach");
+  });
+
+  it("outer test", () => {
+    // outer beforeEach runs
+  });
+
+  describe("inner", () => {
+    beforeEach(() => {
+      console.log("inner beforeEach");
+    });
+
+    it("inner test", () => {
+      // outer beforeEach runs first, then inner beforeEach
+    });
+  });
+});
+
+
+Output:
+
+outer beforeEach
+ ✓ outer test
+outer beforeEach
+inner beforeEach
+ ✓ inner test
+
+
+Outer hooks run before inner hooks, allowing layered setup.
+
+Snapshot Testing​
+
+Snapshot testing captures a value's structure and compares future runs against it. This is powerful for testing complex objects like AI responses.
+
+Basic Snapshots with toMatchSnapshot​
+import { describe, it, expect } from "vitest";
+
+interface AIResponse {
+  model: string;
+  choices: Array<{
+    message: {
+      role: string;
+      content: string;
+    };
+    finish_reason: string;
+  }>;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+function createMockResponse(): AIResponse {
+  return {
+    model: "gpt-4",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "Hello! How can I help you today?",
+        },
+        finish_reason: "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 9,
+      total_tokens: 19,
+    },
+  };
+}
+
+describe("AI Response", () => {
+  it("matches expected structure", () => {
+    const response = createMockResponse();
+    expect(response).toMatchSnapshot();
+  });
+});
+
+
+Output (first run):
+
+ ✓ AI Response (1 test) 5ms
+   ✓ matches expected structure
+
+ Snapshots  1 written
+
+
+Vitest creates a __snapshots__/response.test.ts.snap file:
+
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot
+
+exports[`AI Response > matches expected structure 1`] = `
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "message": {
+        "content": "Hello! How can I help you today?",
+        "role": "assistant",
+      },
+    },
+  ],
+  "model": "gpt-4",
+  "usage": {
+    "completion_tokens": 9,
+    "prompt_tokens": 10,
+    "total_tokens": 19,
+  },
+}
+`;
+
+
+On subsequent runs, if the structure changes, the test fails:
+
+ ✗ AI Response > matches expected structure
+   Error: Snapshot `AI Response > matches expected structure 1` mismatched
+
+
+Update snapshots with npm test -- --update or press u in watch mode.
+
+Inline Snapshots with toMatchInlineSnapshot​
+
+For smaller snapshots, keep them inline in the test file:
+
+import { describe, it, expect } from "vitest";
+
+function formatUsage(prompt: number, completion: number): string {
+  return `Tokens: ${prompt} prompt + ${completion} completion = ${prompt + completion} total`;
+}
+
+describe("formatUsage", () => {
+  it("formats token counts", () => {
+    expect(formatUsage(100, 50)).toMatchInlineSnapshot(
+      `"Tokens: 100 prompt + 50 completion = 150 total"`
+    );
+  });
+});
+
+
+Output:
+
+ ✓ formatUsage (1 test) 1ms
+   ✓ formats token counts
+
+
+When you first run the test, leave toMatchInlineSnapshot() empty. Vitest automatically fills in the expected value. This keeps snapshots visible in your test file.
+
+When to Use Snapshots​
+
+Snapshots excel for:
+
+Complex object structures (AI responses, parsed data)
+Formatted output (error messages, logs)
+Detecting unintended changes in data shapes
+
+Avoid snapshots for:
+
+Simple assertions (toBe(5) is clearer than a snapshot)
+Dynamic values (timestamps, random IDs)
+Behavior testing (use explicit assertions)
+
+For dynamic values, use matchers like expect.any():
+
+import { describe, it, expect } from "vitest";
+
+describe("response with timestamp", () => {
+  it("matches structure with dynamic fields", () => {
+    const response = {
+      id: "chat-abc123",
+      created: Date.now(),  // Dynamic!
+      content: "Hello",
+    };
+
+    expect(response).toMatchSnapshot({
+      id: expect.any(String),
+      created: expect.any(Number),
+    });
+  });
+});
+
+
+This snapshot ignores the exact values of id and created, only checking their types.
+
+Running Tests​
+
+Common Vitest commands:
+
+# Run in watch mode (default)
+npm test
+
+# Run once and exit
+npm test -- --run
+
+# Run specific test file
+npm test -- response.test.ts
+
+# Run tests matching a pattern
+npm test -- --testNamePattern "formatUsage"
+
+# Update all snapshots
+npm test -- --update
+
+# Show coverage report
+npm test -- --coverage
+
+
+Output (coverage):
+
+ ✓ all tests passed
+
+ ----------------------|---------|----------|---------|---------|
+ File                  | % Stmts | % Branch | % Funcs | % Lines |
+ ----------------------|---------|----------|---------|---------|
+ All files             |   92.31 |    85.71 |   100   |   92.31 |
+  format-utils.ts      |   100   |   100    |   100   |   100   |
+  validate-api-key.ts  |   83.33 |    75    |   100   |   83.33 |
+ ----------------------|---------|----------|---------|---------|
+
+Try With AI​
+Prompt 1: Test Organization​
+I have an AI SDK client with these methods:
+- chat.create(messages) - returns completion
+- chat.stream(messages) - returns async iterator
+- embeddings.create(text) - returns vector
+
+Help me organize tests using describe blocks. What's the best structure
+for testing each method? Should I have separate files or one file with
+nested describes?
+
+
+What you're learning: How to structure test files for real-world modules. You'll discover patterns for organizing tests by feature vs by method, and when separate files make sense.
+
+Prompt 2: Assertion Selection​
+I'm testing an AI response validator. Given this response type:
+
+interface ChatResponse {
+  id: string;
+  model: string;
+  choices: Array<{ message: { role: string; content: string } }>;
+  usage: { total_tokens: number };
+}
+
+What matchers should I use to test:
+1. The response has exactly one choice
+2. The role is "assistant"
+3. The content is not empty
+4. Total tokens is a positive number
+
+Show me the expect statements for each assertion.
+
+
+What you're learning: Choosing the right matcher for each assertion type. Different conditions require different matchers, and some have subtle behavior differences (toBe vs toEqual, toBeTruthy vs not.toBeFalsy).
+
+Prompt 3: Snapshot Strategy​
+I'm building tests for my AI chat application. Which of these should use
+snapshot testing vs explicit assertions?
+
+1. The structure of a parsed tool call
+2. Whether the model field equals "gpt-4"
+3. The format of an error message shown to users
+4. Whether streaming chunks arrive in order
+5. The JSON schema of our API response
+
+For each, explain why snapshot testing is or isn't appropriate.
+
+
+What you're learning: When snapshots add value vs when they add noise. Snapshots are powerful but overusing them creates brittle tests that require constant updates. This prompt helps you develop judgment about testing strategies.
+
+Safety note: When running tests against real AI APIs, use environment variables for keys and never commit them. Consider mocking API calls in unit tests (covered in Lesson 2) to avoid costs and rate limits.
+
+Sources:
+
+Vitest Test API Reference
+Vitest Snapshot Guide
+Vitest Test Context

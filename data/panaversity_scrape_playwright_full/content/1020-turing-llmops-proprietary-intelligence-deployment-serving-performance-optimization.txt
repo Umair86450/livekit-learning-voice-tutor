@@ -1,0 +1,547 @@
+Performance Optimization for Inference
+
+Your model is deployed and working. Now the real work begins. Users are complaining about slow responses. Your GPU costs are higher than expected. The tail latency is inconsistent. This lesson teaches systematic performance optimization for LLM inference.
+
+Understanding Latency Breakdown​
+
+Before optimizing, you need to understand where time is spent. LLM inference has distinct phases:
+
+Inference Latency Breakdown:
+┌────────────────────────────────────────────────────────────────┐
+│ Total Request Time                                              │
+├────────────────────────────────────────────────────────────────┤
+│ Network   │ Queue    │ Prefill      │ Decode                   │
+│ ~5-20ms   │ Variable │ ~50-200ms    │ ~10-50ms per token       │
+├───────────┴──────────┴──────────────┴──────────────────────────┤
+│                                                                 │
+│ Network: Request/response transmission                          │
+│ Queue: Waiting for GPU availability                             │
+│ Prefill: Processing all input tokens (prompt)                   │
+│ Decode: Generating output tokens (autoregressive)               │
+└────────────────────────────────────────────────────────────────┘
+
+Measuring Each Component​
+import ollama
+import time
+from dataclasses import dataclass
+
+@dataclass
+class LatencyBreakdown:
+    """Breakdown of inference latency components."""
+    total_ms: float
+    network_ms: float
+    queue_ms: float
+    prefill_ms: float
+    decode_ms: float
+    tokens_generated: int
+
+def measure_latency(prompt: str, model: str = 'task-api') -> LatencyBreakdown:
+    """Measure detailed latency breakdown for a request."""
+    start_time = time.perf_counter()
+
+    response = ollama.chat(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+
+    total_time = (time.perf_counter() - start_time) * 1000
+
+    # Extract Ollama's internal timing
+    load_duration = response.get('load_duration', 0) / 1e6  # ns to ms
+    prompt_eval_duration = response.get('prompt_eval_duration', 0) / 1e6
+    eval_duration = response.get('eval_duration', 0) / 1e6
+    tokens = response.get('eval_count', 0)
+
+    # Calculate components
+    known_time = load_duration + prompt_eval_duration + eval_duration
+    overhead = total_time - known_time
+
+    return LatencyBreakdown(
+        total_ms=total_time,
+        network_ms=overhead * 0.3,  # Estimated split
+        queue_ms=load_duration,
+        prefill_ms=prompt_eval_duration,
+        decode_ms=eval_duration,
+        tokens_generated=tokens
+    )
+
+# Measure
+breakdown = measure_latency("Create a task: Review code by Friday")
+print(f"Total: {breakdown.total_ms:.1f}ms")
+print(f"  Queue: {breakdown.queue_ms:.1f}ms")
+print(f"  Prefill: {breakdown.prefill_ms:.1f}ms")
+print(f"  Decode: {breakdown.decode_ms:.1f}ms ({breakdown.tokens_generated} tokens)")
+print(f"  Tokens/sec: {breakdown.tokens_generated / (breakdown.decode_ms / 1000):.1f}")
+
+
+Output:
+
+Total: 342.5ms
+  Queue: 45.2ms
+  Prefill: 89.3ms
+  Decode: 198.4ms (35 tokens)
+  Tokens/sec: 28.4
+
+Quick Wins: Parameter Tuning​
+
+These optimizations require no code changes, only configuration adjustments.
+
+1. Reduce Context Length​
+
+Prefill time scales with context length. If you do not need 4096 tokens, reduce it:
+
+# Modelfile optimization
+FROM ./task-api-q4_k_m.gguf
+
+# Original: PARAMETER num_ctx 4096
+PARAMETER num_ctx 2048    # 50% reduction
+# Or for Task API with short responses:
+PARAMETER num_ctx 1024    # 75% reduction
+
+
+Impact measurement:
+
+Context Length	Prefill Time	Memory Usage
+4096	89ms	1.2 GB
+2048	52ms	0.8 GB
+1024	31ms	0.5 GB
+2. Limit Output Length​
+
+For structured outputs like JSON, you know the approximate response length:
+
+# Limit output to prevent runaway generation
+PARAMETER num_predict 256    # Max 256 tokens
+# Or for very short responses:
+PARAMETER num_predict 64     # Task API responses are typically <50 tokens
+
+3. Reduce Temperature for Determinism​
+
+Lower temperature reduces sampling complexity:
+
+# For deterministic structured output
+PARAMETER temperature 0.1    # Near-deterministic
+PARAMETER top_p 0.5          # Reduce sampling space
+PARAMETER top_k 20           # Limit vocabulary
+
+
+Lower temperature also improves cache hit rates for identical prompts.
+
+4. Batch Size Tuning​
+
+For Ollama, batch size affects prefill speed:
+
+# Environment variable for batch size
+export OLLAMA_NUM_PARALLEL=4
+
+
+For vLLM, tune the max batch tokens:
+
+vllm serve task-api \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 32
+
+Caching Strategies​
+
+Caching can dramatically reduce latency for repeated or similar requests.
+
+Exact Match Caching​
+
+For identical requests, cache the response:
+
+import hashlib
+from functools import lru_cache
+import ollama
+
+class CachedModelClient:
+    """Model client with response caching."""
+
+    def __init__(self, model: str = 'task-api', max_cache_size: int = 1000):
+        self.model = model
+        self._cache = {}
+        self.max_cache_size = max_cache_size
+
+    def _cache_key(self, prompt: str) -> str:
+        """Generate cache key from prompt."""
+        return hashlib.md5(prompt.encode()).hexdigest()
+
+    def generate(self, prompt: str, use_cache: bool = True) -> str:
+        """Generate with optional caching."""
+        key = self._cache_key(prompt)
+
+        if use_cache and key in self._cache:
+            return self._cache[key]
+
+        response = ollama.chat(
+            model=self.model,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        content = response['message']['content']
+
+        # Cache the result
+        if len(self._cache) < self.max_cache_size:
+            self._cache[key] = content
+
+        return content
+
+# Usage
+client = CachedModelClient()
+
+# First call: cache miss (342ms)
+result1 = client.generate("List all high priority tasks")
+
+# Second call: cache hit (<1ms)
+result2 = client.generate("List all high priority tasks")
+
+Semantic Caching​
+
+For similar but not identical requests, use embedding-based matching:
+
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+class SemanticCache:
+    """Cache that matches semantically similar queries."""
+
+    def __init__(self, threshold: float = 0.95):
+        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+        self.threshold = threshold
+        self.cache = []  # (embedding, prompt, response)
+
+    def _get_embedding(self, text: str) -> np.ndarray:
+        return self.encoder.encode(text)
+
+    def get(self, prompt: str) -> str | None:
+        """Find cached response for semantically similar prompt."""
+        query_embedding = self._get_embedding(prompt)
+
+        for cached_embedding, cached_prompt, cached_response in self.cache:
+            similarity = np.dot(query_embedding, cached_embedding)
+            if similarity > self.threshold:
+                return cached_response
+
+        return None
+
+    def set(self, prompt: str, response: str):
+        """Cache a prompt-response pair."""
+        embedding = self._get_embedding(prompt)
+        self.cache.append((embedding, prompt, response))
+
+# Usage
+semantic_cache = SemanticCache(threshold=0.92)
+
+# These are semantically similar:
+# "Create a task: Review PR #42" ≈ "Make a new task to review PR 42"
+# Cache hit possible even with different wording
+
+Prompt Optimization​
+
+Shorter prompts mean faster prefill. Optimize your prompts systematically.
+
+Compress System Prompts​
+
+Your system prompt is processed with every request. Make it concise:
+
+# Before: 256 tokens
+SYSTEM """You are a helpful task management assistant. Your job is to help
+users manage their tasks, create new tasks, update existing tasks, list tasks,
+and delete tasks. You should respond in a structured JSON format that follows
+a specific schema. The schema includes an action field which can be one of:
+create_task, list_tasks, update_task, delete_task, complete_task. Each action
+has specific parameters that you should include in your response..."""
+
+# After: 64 tokens
+SYSTEM """Task API: Respond with JSON only.
+Actions: create_task, list_tasks, update_task, delete_task, complete_task
+Format: {"action": "...", "params": {...}, "success": true|false}"""
+
+Use Few-Shot Examples Efficiently​
+
+Few-shot examples are expensive. Use the minimum effective number:
+
+def build_prompt(user_request: str) -> str:
+    """Build prompt with minimal few-shot examples."""
+    # One example is often sufficient for structured output
+    example = '''User: Create a task: Review docs
+Response: {"action": "create_task", "params": {"title": "Review docs"}, "success": true}'''
+
+    return f"{example}\n\nUser: {user_request}\nResponse:"
+
+# Compare token counts:
+# 0-shot: ~20 tokens (fastest, may reduce accuracy)
+# 1-shot: ~50 tokens (good balance)
+# 3-shot: ~120 tokens (highest accuracy, slowest)
+
+Dynamic Example Selection​
+
+Choose examples based on the request type:
+
+EXAMPLES = {
+    'create': '{"action": "create_task", "params": {"title": "..."}}',
+    'list': '{"action": "list_tasks", "params": {"filter": {...}}}',
+    'update': '{"action": "update_task", "params": {"id": N, ...}}',
+    'delete': '{"action": "delete_task", "params": {"id": N}}',
+}
+
+def select_example(request: str) -> str:
+    """Select most relevant example for the request."""
+    request_lower = request.lower()
+
+    if any(word in request_lower for word in ['create', 'add', 'new']):
+        return EXAMPLES['create']
+    elif any(word in request_lower for word in ['list', 'show', 'all']):
+        return EXAMPLES['list']
+    elif any(word in request_lower for word in ['update', 'change', 'modify']):
+        return EXAMPLES['update']
+    elif any(word in request_lower for word in ['delete', 'remove']):
+        return EXAMPLES['delete']
+
+    return EXAMPLES['create']  # Default
+
+Streaming for Perceived Latency​
+
+Streaming does not reduce total latency, but it dramatically improves perceived responsiveness.
+
+Implementing Streaming​
+import ollama
+import time
+
+def stream_with_metrics(prompt: str, model: str = 'task-api'):
+    """Stream response and measure time-to-first-token."""
+    start_time = time.perf_counter()
+    first_token_time = None
+    full_response = ""
+
+    stream = ollama.chat(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}],
+        stream=True
+    )
+
+    for chunk in stream:
+        content = chunk['message']['content']
+
+        if first_token_time is None and content:
+            first_token_time = time.perf_counter()
+            ttft = (first_token_time - start_time) * 1000
+            print(f"[TTFT: {ttft:.0f}ms] ", end='')
+
+        print(content, end='', flush=True)
+        full_response += content
+
+    total_time = (time.perf_counter() - start_time) * 1000
+    print(f"\n[Total: {total_time:.0f}ms]")
+
+    return full_response
+
+# Compare perception
+print("Non-streaming:")
+start = time.perf_counter()
+response = ollama.chat(model='task-api', messages=[{'role': 'user', 'content': 'List all tasks'}])
+print(f"Response after {(time.perf_counter() - start)*1000:.0f}ms: {response['message']['content']}")
+
+print("\nStreaming:")
+stream_with_metrics("List all tasks")
+
+
+Output:
+
+Non-streaming:
+Response after 342ms: {"action": "list_tasks", "params": {}, "success": true}
+
+Streaming:
+[TTFT: 98ms] {"action": "list_tasks", "params": {}, "success": true}
+[Total: 342ms]
+
+
+Same total time, but streaming shows the first token in 98ms instead of waiting 342ms.
+
+Monitoring and Profiling​
+
+Systematic monitoring helps identify optimization opportunities.
+
+Key Metrics to Track​
+from dataclasses import dataclass, field
+from typing import List
+import statistics
+
+@dataclass
+class PerformanceMonitor:
+    """Track inference performance metrics."""
+    latencies: List[float] = field(default_factory=list)
+    tokens_per_second: List[float] = field(default_factory=list)
+    cache_hits: int = 0
+    cache_misses: int = 0
+
+    def record_request(self, latency_ms: float, tokens: int, cached: bool):
+        """Record metrics for a request."""
+        self.latencies.append(latency_ms)
+        if tokens > 0:
+            self.tokens_per_second.append(tokens / (latency_ms / 1000))
+        if cached:
+            self.cache_hits += 1
+        else:
+            self.cache_misses += 1
+
+    def report(self) -> dict:
+        """Generate performance report."""
+        if not self.latencies:
+            return {"error": "No data recorded"}
+
+        sorted_latencies = sorted(self.latencies)
+        n = len(sorted_latencies)
+
+        return {
+            "requests": n,
+            "latency_p50_ms": sorted_latencies[n // 2],
+            "latency_p95_ms": sorted_latencies[int(n * 0.95)],
+            "latency_p99_ms": sorted_latencies[int(n * 0.99)] if n >= 100 else sorted_latencies[-1],
+            "avg_tokens_per_sec": statistics.mean(self.tokens_per_second) if self.tokens_per_second else 0,
+            "cache_hit_rate": self.cache_hits / (self.cache_hits + self.cache_misses) if (self.cache_hits + self.cache_misses) > 0 else 0
+        }
+
+# Usage
+monitor = PerformanceMonitor()
+
+# Record requests during operation
+for i in range(100):
+    start = time.perf_counter()
+    response = ollama.chat(model='task-api', messages=[{'role': 'user', 'content': f'Task {i}'}])
+    latency = (time.perf_counter() - start) * 1000
+    tokens = response.get('eval_count', 0)
+    monitor.record_request(latency, tokens, cached=False)
+
+# Generate report
+report = monitor.report()
+print(f"P50 Latency: {report['latency_p50_ms']:.1f}ms")
+print(f"P99 Latency: {report['latency_p99_ms']:.1f}ms")
+print(f"Throughput: {report['avg_tokens_per_sec']:.1f} tok/s")
+
+
+Output:
+
+P50 Latency: 285.3ms
+P99 Latency: 412.7ms
+Throughput: 32.4 tok/s
+
+Setting Up Alerts​
+def check_sla_compliance(latency_ms: float, sla_p99_ms: float = 500):
+    """Check if latency meets SLA and alert if not."""
+    if latency_ms > sla_p99_ms:
+        print(f"ALERT: Latency {latency_ms:.0f}ms exceeds SLA {sla_p99_ms}ms")
+        # In production: send to alerting system (PagerDuty, Slack, etc.)
+        return False
+    return True
+
+Optimization Workflow​
+
+Follow this systematic approach to optimization:
+
+Optimization Workflow:
+┌────────────────────────────────────────────────────────────────┐
+│ 1. MEASURE: Establish baseline metrics                         │
+│    - Record latency distribution (P50, P95, P99)               │
+│    - Measure throughput (requests/sec, tokens/sec)             │
+│    - Track resource utilization (GPU, memory)                  │
+├────────────────────────────────────────────────────────────────┤
+│ 2. IDENTIFY: Find the bottleneck                               │
+│    - Is it prefill (long prompts)?                             │
+│    - Is it decode (many output tokens)?                        │
+│    - Is it queue time (need more capacity)?                    │
+│    - Is it memory (model too large)?                           │
+├────────────────────────────────────────────────────────────────┤
+│ 3. OPTIMIZE: Apply targeted fixes                              │
+│    - Quick wins: context length, temperature, output limit     │
+│    - Medium effort: caching, prompt compression                │
+│    - High effort: quantization change, hardware upgrade        │
+├────────────────────────────────────────────────────────────────┤
+│ 4. VALIDATE: Confirm improvement                               │
+│    - Re-measure with same methodology                          │
+│    - A/B test if possible                                      │
+│    - Check for quality regression                              │
+├────────────────────────────────────────────────────────────────┤
+│ 5. ITERATE: Continue until target met                          │
+│    - Return to step 1 with new baseline                        │
+│    - Stop when diminishing returns                             │
+└────────────────────────────────────────────────────────────────┘
+
+Reflect on Your Skill​
+
+Update your model-serving skill with performance optimization techniques:
+
+## Performance Optimization
+
+### Quick Wins (No Code Changes)
+- Reduce num_ctx to minimum needed
+- Set num_predict to limit output
+- Lower temperature for structured output
+- Enable response caching
+
+### Latency Breakdown
+- Network: ~5-20ms
+- Queue: Variable (depends on load)
+- Prefill: ~1ms per 10 input tokens
+- Decode: ~10-50ms per output token
+
+### Monitoring Targets
+- P50 latency: <200ms
+- P99 latency: <500ms
+- Throughput: 30+ tok/s on consumer GPU
+- Cache hit rate: >50% for common queries
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Analyze Your Bottleneck​
+Here are my Task API model performance metrics:
+- P50 latency: 450ms
+- P99 latency: 1200ms
+- Average input tokens: 150
+- Average output tokens: 40
+- GPU utilization: 35%
+- Current settings: num_ctx=4096, temperature=0.7
+
+My target is P99 < 500ms. Help me:
+1. Identify the likely bottleneck based on these metrics
+2. Propose specific optimizations in priority order
+3. Estimate the expected improvement from each optimization
+
+
+What you are learning: Bottleneck analysis. Different symptoms require different optimizations.
+
+Prompt 2: Design a Caching Strategy​
+My Task API handles these request patterns:
+- 40% are "List all tasks" (exact same query)
+- 30% are "Create task: [varied content]"
+- 20% are "Show high priority tasks" (exact same query)
+- 10% are miscellaneous queries
+
+Design a caching strategy that:
+1. Maximizes cache hit rate
+2. Handles cache invalidation (tasks change)
+3. Works with streaming responses
+4. Does not serve stale data for list queries after creates
+
+
+What you are learning: Cache design tradeoffs. Effective caching requires understanding query patterns and staleness tolerance.
+
+Prompt 3: Evaluate Optimization Tradeoffs​
+I need to reduce my inference costs. Current setup:
+- vLLM on A100 (80GB) at $2/hour
+- Serving 7B model with Q8_0 quantization
+- 500 requests/hour average
+
+Evaluate these cost-reduction strategies:
+A) Switch to Q4_K_M quantization (smaller instance possible?)
+B) Move to A10G instance ($1/hour) with same model
+C) Add response caching (estimated 60% hit rate)
+D) Reduce to 3B model (different fine-tune needed)
+
+For each, analyze: cost savings, quality impact, implementation effort.
+
+
+What you are learning: Cost-performance optimization. Real deployments require balancing multiple constraints.
+
+Safety Note​
+
+Performance optimizations can subtly affect model quality. Aggressive caching may serve stale responses. Lower temperatures may reduce creativity for edge cases. Always validate that optimizations maintain acceptable output quality, especially for production deployments with real users.

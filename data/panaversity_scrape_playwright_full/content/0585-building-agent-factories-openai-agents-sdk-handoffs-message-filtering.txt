@@ -1,0 +1,738 @@
+Agent Handoffs and Message Filtering
+
+Your Customer Support Digital FTE receives a message: "I'd like a refund for order #12345." The triage agent understands the intent immediately---this is a refund request, not a FAQ or billing inquiry. But the triage agent isn't equipped to process refunds. It needs to hand off to a specialist.
+
+This is the essence of multi-agent systems: specialized agents that excel at narrow tasks, coordinated by a triage agent that routes requests to the right specialist. The pattern mirrors how human support teams work---a receptionist takes your call and transfers you to the right department.
+
+In the previous lesson, you learned to give agents capabilities with function tools. Now you'll give them teammates. By the end of this lesson, you'll have built a support routing system where a triage agent hands off to specialists, those specialists can hand back when they need help, and conversation context flows cleanly between agents.
+
+Why Handoffs Matter​
+
+Consider what happens without handoffs:
+
+Approach	Problem
+One mega-agent	Instructions become enormous, quality degrades
+Separate agents	No coordination, user restarts conversation
+Manual routing	Developer decides routing, no autonomy
+
+Handoffs solve this. The LLM decides when and where to route based on conversation context. Each specialist agent stays focused on its domain. The user experiences a seamless conversation.
+
+Understanding Handoffs​
+
+When you add handoffs to an agent, the SDK automatically:
+
+Creates a tool for each handoff (e.g., transfer_to_billing_agent)
+Includes the tool in the agent's available actions
+Handles the transfer when the agent calls the tool
+Passes conversation context to the receiving agent
+
+The receiving agent then continues the conversation. From the user's perspective, it's one continuous interaction.
+
+Basic Handoffs: The Handoffs List​
+
+The simplest way to enable handoffs is passing agents directly to the handoffs parameter:
+
+from agents import Agent, Runner
+
+# Specialist agents
+billing_agent = Agent(
+    name="billing_agent",
+    instructions="""You handle billing questions:
+    - Invoice inquiries
+    - Payment methods
+    - Subscription changes
+
+    If the user needs a refund or has a technical issue, say you cannot help with that."""
+)
+
+technical_agent = Agent(
+    name="technical_agent",
+    instructions="""You handle technical support:
+    - Bug reports
+    - Feature questions
+    - Integration help
+
+    If the user has a billing question, say you cannot help with that."""
+)
+
+# Triage agent with handoffs
+triage_agent = Agent(
+    name="triage_agent",
+    instructions="""You are the first point of contact for customer support.
+
+    Route users to the right specialist:
+    - Billing questions (invoices, payments, subscriptions) -> billing_agent
+    - Technical issues (bugs, features, integrations) -> technical_agent
+
+    If unclear, ask clarifying questions before routing.""",
+    handoffs=[billing_agent, technical_agent]
+)
+
+# Run triage agent
+result = Runner.run_sync(triage_agent, "My credit card was charged twice this month.")
+print(f"Final agent: {result.last_agent.name}")
+print(f"Response: {result.final_output}")
+
+
+Output:
+
+Final agent: billing_agent
+Response: I understand you've been charged twice this month, which is concerning. Let me help you resolve this.
+
+Could you provide:
+1. The date(s) of the duplicate charges
+2. The last 4 digits of the card that was charged
+3. Your account email
+
+I'll investigate the duplicate charge and process a refund if confirmed.
+
+
+Notice that result.last_agent tells you which agent produced the final response. The triage agent recognized the billing issue and handed off to billing_agent.
+
+The handoff() Function​
+
+For more control, use the handoff() function instead of passing agents directly:
+
+from agents import Agent, handoff
+
+billing_agent = Agent(name="billing_agent", instructions="Handle billing.")
+
+# Create handoff with customizations
+billing_handoff = handoff(
+    agent=billing_agent,
+    tool_name_override="route_to_billing",
+    tool_description_override="Transfer to billing specialist for payment and invoice issues"
+)
+
+triage_agent = Agent(
+    name="triage",
+    instructions="Route to appropriate specialist.",
+    handoffs=[billing_handoff]
+)
+
+
+The handoff() function accepts:
+
+Parameter	Purpose
+agent	Target agent to hand off to
+tool_name_override	Custom tool name (default: transfer_to_{agent_name})
+tool_description_override	Custom description for LLM context
+on_handoff	Callback executed when handoff occurs
+input_filter	Function to modify conversation before handoff
+input_type	Pydantic model for structured handoff data
+Handoff Callbacks with on_handoff​
+
+The on_handoff callback runs when a handoff is triggered---before the target agent receives the conversation. This is useful for:
+
+Logging handoff events
+Prefetching data the specialist will need
+Recording analytics
+Updating session state
+from agents import Agent, Runner, handoff, RunContextWrapper
+from pydantic import BaseModel
+
+class SupportContext(BaseModel):
+    user_id: str
+    handoff_count: int = 0
+
+def on_billing_handoff(ctx: RunContextWrapper[SupportContext]):
+    """Called when user is transferred to billing."""
+    ctx.context.handoff_count += 1
+    print(f"[HANDOFF] User {ctx.context.user_id} transferred to billing")
+    print(f"[HANDOFF] Total handoffs this session: {ctx.context.handoff_count}")
+    # In production: prefetch billing history, log to analytics
+
+def on_technical_handoff(ctx: RunContextWrapper[SupportContext]):
+    """Called when user is transferred to technical support."""
+    ctx.context.handoff_count += 1
+    print(f"[HANDOFF] User {ctx.context.user_id} transferred to technical")
+
+billing_agent = Agent[SupportContext](
+    name="billing_agent",
+    instructions="Handle billing inquiries."
+)
+
+technical_agent = Agent[SupportContext](
+    name="technical_agent",
+    instructions="Handle technical support."
+)
+
+triage_agent = Agent[SupportContext](
+    name="triage_agent",
+    instructions="""Route users appropriately:
+    - Billing questions -> billing_agent
+    - Technical issues -> technical_agent""",
+    handoffs=[
+        handoff(billing_agent, on_handoff=on_billing_handoff),
+        handoff(technical_agent, on_handoff=on_technical_handoff)
+    ]
+)
+
+# Run with context
+context = SupportContext(user_id="user_42")
+result = Runner.run_sync(
+    triage_agent,
+    "I need help with an invoice discrepancy.",
+    context=context
+)
+
+print(f"\nFinal response from {result.last_agent.name}:")
+print(result.final_output)
+
+
+Output:
+
+[HANDOFF] User user_42 transferred to billing
+[HANDOFF] Total handoffs this session: 1
+
+Final response from billing_agent:
+I'd be happy to help with your invoice discrepancy. To investigate this properly, I'll need:
+
+1. Your account email or customer ID
+2. The invoice number or date in question
+3. What specifically looks incorrect on the invoice
+
+Once you provide these details, I can review the charges and resolve any errors.
+
+
+The callback executed immediately when the handoff was triggered, before the billing agent started processing.
+
+Input Filters: Controlling Context Flow​
+
+By default, the target agent receives the entire conversation history. Sometimes that's too much:
+
+Token costs increase with history length
+Irrelevant tool calls clutter context
+Previous agent's internal reasoning may confuse the specialist
+
+Input filters let you control what context the target agent receives.
+
+The HandoffInputData Structure​
+
+An input filter receives HandoffInputData containing:
+
+history: Previous conversation items
+pre_handoff_items: Items from current run before handoff
+new_items: New items being added
+
+Your filter returns modified HandoffInputData:
+
+from agents import Agent, handoff, HandoffInputData
+
+def filter_recent_only(data: HandoffInputData) -> HandoffInputData:
+    """Keep only the last 5 messages to reduce context size."""
+    # Filter history to last 5 items
+    recent_history = data.history[-5:] if len(data.history) > 5 else data.history
+
+    return HandoffInputData(
+        history=recent_history,
+        pre_handoff_items=data.pre_handoff_items,
+        new_items=data.new_items
+    )
+
+billing_agent = Agent(name="billing_agent", instructions="Handle billing.")
+
+triage_agent = Agent(
+    name="triage_agent",
+    instructions="Route appropriately.",
+    handoffs=[
+        handoff(
+            agent=billing_agent,
+            input_filter=filter_recent_only
+        )
+    ]
+)
+
+
+Now the billing agent only sees the last 5 messages, reducing token usage and focusing context.
+
+Built-in Handoff Filters​
+
+The SDK provides common filters in agents.extensions.handoff_filters:
+
+remove_all_tools​
+
+This filter strips all tool-related items from conversation history:
+
+Function calls and their outputs
+File search results
+Web search results
+from agents import Agent, handoff
+from agents.extensions import handoff_filters
+
+faq_agent = Agent(
+    name="faq_agent",
+    instructions="Answer frequently asked questions."
+)
+
+triage_agent = Agent(
+    name="triage_agent",
+    instructions="Route to FAQ for common questions.",
+    tools=[get_user_info, check_order_status],  # These tools won't clutter FAQ context
+    handoffs=[
+        handoff(
+            agent=faq_agent,
+            input_filter=handoff_filters.remove_all_tools
+        )
+    ]
+)
+
+
+Output:
+
+When a handoff occurs, the FAQ agent sees only the conversational messages---no tool calls, no function outputs. This keeps its context clean and focused on the user's question.
+
+Why Filter Tools?​
+
+Consider this scenario:
+
+User asks: "What's my order status?"
+Triage agent calls check_order_status() tool
+Tool returns: {"order_id": "12345", "status": "shipped", "tracking": "1Z999..."}
+User asks: "Actually, I have a billing question too"
+Triage hands off to billing agent
+
+Without filtering, the billing agent sees all that order status data---irrelevant to billing and consuming tokens. With remove_all_tools, the billing agent only sees the conversation.
+
+Handoff Chains with Return Paths​
+
+Handoffs are unidirectional by design---when Agent A hands off to Agent B, control transfers completely. Agent B doesn't automatically return to Agent A when finished.
+
+However, specialists sometimes need to escalate or transfer to another agent. You can create explicit return paths by giving specialists their own handoffs:
+
+from agents import Agent, Runner, handoff
+
+# Define escalation agent first (no handoffs needed)
+escalation_agent = Agent(
+    name="escalation_agent",
+    instructions="""You handle escalated cases that require human review.
+
+    Document the issue thoroughly and let the user know a human will follow up within 24 hours."""
+)
+
+# Billing agent can escalate or return to triage
+billing_agent = Agent(
+    name="billing_agent",
+    instructions="""You handle billing questions.
+
+    If the user's issue requires:
+    - Technical support (bugs, integrations) -> return to triage
+    - Human review (fraud, disputes over $500) -> escalate
+
+    Otherwise, resolve the billing issue directly.""",
+    handoffs=[escalation_agent]  # Can escalate
+)
+
+# Technical agent can also escalate
+technical_agent = Agent(
+    name="technical_agent",
+    instructions="""You handle technical issues.
+
+    If the issue is a critical production outage or security concern -> escalate
+
+    Otherwise, provide technical assistance.""",
+    handoffs=[escalation_agent]
+)
+
+# Triage routes to specialists, specialists can return to triage
+# Note: We need to create triage first, then update billing's handoffs
+triage_agent = Agent(
+    name="triage_agent",
+    instructions="""Route users to the right specialist:
+    - Billing (invoices, payments) -> billing_agent
+    - Technical (bugs, features) -> technical_agent
+    - Unclear -> ask clarifying questions""",
+    handoffs=[billing_agent, technical_agent]
+)
+
+# Add triage to billing's handoffs for return capability
+billing_agent = Agent(
+    name="billing_agent",
+    instructions="""You handle billing questions.
+
+    If the user's issue is actually technical -> transfer back to triage
+    If it requires human review -> escalate
+
+    Otherwise, resolve directly.""",
+    handoffs=[escalation_agent, triage_agent]  # Can escalate OR return
+)
+
+# Test the flow
+context_msg = "I was charged twice and I think there's a bug in your checkout system."
+result = Runner.run_sync(triage_agent, context_msg)
+
+print(f"Final agent: {result.last_agent.name}")
+print(f"Response: {result.final_output}")
+
+
+Output:
+
+Final agent: technical_agent
+Response: I understand you're experiencing a double-charge issue during checkout. This could be a technical bug. Let me help investigate:
+
+1. What browser and device were you using during checkout?
+2. Did you see any error messages during the payment process?
+3. Did you click the "Pay" button multiple times, or did it happen on a single click?
+
+I'll trace the checkout flow to identify if there's a bug causing duplicate charges.
+
+
+The flow: triage recognized a billing issue but the user mentioned "bug in your checkout system." The billing agent, recognizing the technical component, could transfer to triage (or in this run, triage routed directly to technical after analyzing the full message).
+
+Avoiding Handoff Loops​
+
+When agents can hand off to each other, infinite loops become possible:
+
+Triage -> Billing -> Triage -> Billing -> ...
+
+
+Prevent this with:
+
+Clear instructions: Tell agents when NOT to hand off
+Conversation context: Agents see handoff history and can recognize loops
+Maximum iterations: The Runner has a max_turns parameter
+from agents import Agent, Runner, RunConfig
+
+result = Runner.run_sync(
+    triage_agent,
+    "Help me",
+    run_config=RunConfig(max_turns=10)  # Limit total agent turns
+)
+
+Complete Example: Support Routing System​
+
+Let's build a complete customer support system demonstrating all handoff patterns:
+
+from agents import Agent, Runner, handoff, function_tool, RunContextWrapper
+from agents.extensions import handoff_filters
+from pydantic import BaseModel
+from datetime import datetime
+
+# Context for tracking session state
+class CustomerContext(BaseModel):
+    customer_id: str
+    session_start: str = ""
+    handoff_history: list[str] = []
+    resolved: bool = False
+
+# Tools for agents
+@function_tool
+def lookup_customer(ctx: RunContextWrapper[CustomerContext], email: str) -> str:
+    """Look up customer information by email.
+
+    Args:
+        email: Customer's email address
+
+    Returns:
+        Customer information or not found message
+    """
+    # Simulated lookup
+    if "example.com" in email:
+        ctx.context.customer_id = "CUST_12345"
+        return f"Found customer: {ctx.context.customer_id}, Plan: Professional, Since: 2023"
+    return "Customer not found"
+
+@function_tool
+def check_recent_tickets(ctx: RunContextWrapper[CustomerContext]) -> str:
+    """Check recent support tickets for the current customer."""
+    if ctx.context.customer_id:
+        return f"Recent tickets for {ctx.context.customer_id}: #4521 (resolved), #4530 (open - billing dispute)"
+    return "No customer loaded"
+
+# Handoff callbacks
+def log_handoff(agent_name: str):
+    """Factory for handoff logging callbacks."""
+    def callback(ctx: RunContextWrapper[CustomerContext]):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        ctx.context.handoff_history.append(f"{timestamp}: -> {agent_name}")
+        print(f"[{timestamp}] Handoff to {agent_name}")
+    return callback
+
+# Define agents
+escalation_agent = Agent[CustomerContext](
+    name="escalation_agent",
+    instructions="""You handle escalated cases requiring human review.
+
+    1. Summarize the issue clearly
+    2. Note why it was escalated
+    3. Confirm a human will respond within 24 hours
+    4. Provide a reference number"""
+)
+
+faq_agent = Agent[CustomerContext](
+    name="faq_agent",
+    instructions="""You answer frequently asked questions:
+
+    - Pricing: Starter $29/mo, Professional $99/mo, Enterprise custom
+    - Refund policy: 30-day money-back guarantee
+    - Cancellation: Cancel anytime from account settings
+    - Data export: Available in JSON format from settings
+
+    If the question requires account-specific info, say you cannot help."""
+)
+
+billing_agent = Agent[CustomerContext](
+    name="billing_agent",
+    instructions="""You handle billing and payment issues.
+
+    You can:
+    - Explain charges and invoices
+    - Process refund requests (under $100)
+    - Update payment methods
+
+    Escalate if:
+    - Refund over $100
+    - Fraud suspected
+    - Payment processing errors""",
+    tools=[check_recent_tickets],
+    handoffs=[escalation_agent]
+)
+
+technical_agent = Agent[CustomerContext](
+    name="technical_agent",
+    instructions="""You handle technical support.
+
+    You can:
+    - Debug integration issues
+    - Explain API usage
+    - Help with configuration
+
+    Escalate if:
+    - Security vulnerabilities
+    - Data loss
+    - Production outages""",
+    handoffs=[escalation_agent]
+)
+
+# Triage agent with all routing
+triage_agent = Agent[CustomerContext](
+    name="triage_agent",
+    instructions="""You are the customer support triage agent.
+
+    First, identify the customer if possible using their email.
+
+    Then route to the appropriate specialist:
+    - General questions (pricing, policies) -> faq_agent
+    - Billing issues (invoices, refunds, payments) -> billing_agent
+    - Technical issues (bugs, API, integrations) -> technical_agent
+
+    If unclear, ask one clarifying question before routing.""",
+    tools=[lookup_customer],
+    handoffs=[
+        handoff(
+            faq_agent,
+            on_handoff=log_handoff("faq_agent"),
+            input_filter=handoff_filters.remove_all_tools
+        ),
+        handoff(
+            billing_agent,
+            on_handoff=log_handoff("billing_agent")
+        ),
+        handoff(
+            technical_agent,
+            on_handoff=log_handoff("technical_agent"),
+            input_filter=handoff_filters.remove_all_tools
+        )
+    ]
+)
+
+# Run the system
+context = CustomerContext(
+    customer_id="",
+    session_start=datetime.now().isoformat()
+)
+
+# First interaction
+result = Runner.run_sync(
+    triage_agent,
+    "Hi, I'm john@example.com and I was charged twice for my subscription last month.",
+    context=context
+)
+
+print(f"\n--- Session Summary ---")
+print(f"Customer ID: {context.customer_id}")
+print(f"Handoff history: {context.handoff_history}")
+print(f"Final agent: {result.last_agent.name}")
+print(f"\n{result.final_output}")
+
+
+Output:
+
+[14:32:17] Handoff to billing_agent
+
+--- Session Summary ---
+Customer ID: CUST_12345
+Handoff history: ['14:32:17: -> billing_agent']
+Final agent: billing_agent
+
+I can see you've been charged twice for your subscription last month. I found your account (CUST_12345, Professional plan).
+
+Looking at your recent tickets, I see there's already an open billing dispute (#4530). Let me check the details of your duplicate charge:
+
+1. Could you confirm the approximate amount of the duplicate charge?
+2. Did both charges appear on the same day or different days?
+
+If the duplicate charge is under $100, I can process a refund directly. If it's more, I'll escalate to our billing team for faster resolution.
+
+Progressive Project: Support Desk Assistant​
+
+Let's add handoffs to specialist agents to our Support Desk. When a case requires deep expertise, the triage agent hands off complete control---the specialist agent takes over the entire conversation.
+
+What You're Building​
+
+In Lessons 1-3, you built a Support Desk with tools and sub-agents. But sub-agents return results to the orchestrator. Now you'll add true handoffs where specialists take full ownership of the conversation:
+
+Pattern	When to Use
+Sub-agents (L03)	Orchestrator needs to coordinate multiple specialists
+Handoffs (L04)	Specialist should own the entire interaction
+Adding Specialist Handoffs​
+
+Now it's your turn to add handoffs to your Support Desk. Using the patterns from this lesson, create specialists that take over completely.
+
+Step 1: Extend your context model
+
+Add fields to track handoffs:
+
+handoff_history: list of strings to log transfers
+session_start: timestamp for the session
+
+Step 2: Create a handoff logging callback
+
+Using the Handoff Callbacks section as reference, create a factory function that logs when handoffs occur:
+
+def log_handoff(specialist_name: str):
+    def callback(ctx: RunContextWrapper[SupportContext]):
+        # Log the transfer with timestamp
+        # Add to ctx.context.handoff_history
+    return callback
+
+
+Step 3: Create specialist-specific tools
+
+Each specialist needs domain-specific tools:
+
+Billing: lookup_billing_history - returns payment records
+Technical: check_warranty_status - checks product warranty
+Sales: generate_quote - creates price quotes
+
+Step 4: Create the escalation agent
+
+This is the "end of the line" agent for cases requiring human review:
+
+No handoffs (it's the final destination)
+Documents issues thoroughly
+Confirms human follow-up
+
+Step 5: Create specialist agents with escalation paths
+
+Create three specialist agents using the Basic Handoffs pattern:
+
+BillingSpecialist: handles invoices, refunds up to $200, payment updates
+TechnicalSpecialist: handles setup, troubleshooting, warranty claims
+SalesSpecialist: handles quotes, pricing, upgrades
+
+Each should:
+
+Have their domain-specific tool
+Have handoffs=[escalation_agent] for complex cases
+Include clear escalation criteria in instructions
+
+Step 6: Update main support desk with handoffs
+
+Use the handoff() function to configure transfers:
+
+handoffs=[
+    handoff(
+        billing_specialist,
+        tool_name_override="transfer_to_billing",
+        tool_description_override="Transfer to billing specialist",
+        on_handoff=log_handoff("BillingSpecialist"),
+        input_filter=handoff_filters.remove_all_tools
+    ),
+    # Similar for technical and sales...
+]
+
+
+Step 7: Test routing scenarios
+
+Test three different customer messages:
+
+Billing issue: "I was charged twice this month"
+Technical issue: "My SmartHub won't connect to WiFi"
+Sales inquiry: "I need a quote for 50 units"
+
+Check that each routes to the correct specialist.
+
+Key Differences: Sub-agents vs Handoffs​
+Aspect	Sub-agents (L03)	Handoffs (L04)
+Control	Orchestrator keeps control	Specialist takes over
+Response	Sub-agent returns to orchestrator	Specialist responds directly
+Use case	Need coordination	Need deep specialization
+Context	Shared via context object	Passed via input_filter
+Extension Challenge​
+
+Add return paths so specialists can hand back to the main desk:
+
+handoffs=[escalation_agent, support_desk]  # Can escalate OR hand back
+
+What's Next​
+
+Your specialists handle their domains, but what about bad actors? In Lesson 5, you'll add guardrails that block harmful inputs, validate outputs, and protect both your system and customers.
+
+Try With AI​
+
+Use Claude Code, Gemini CLI, or ChatGPT to explore these patterns further:
+
+Prompt 1: Design a Handoff Architecture​
+I'm building a customer support system for an e-commerce platform using OpenAI Agents SDK.
+
+Design a handoff architecture with:
+1. Triage agent as entry point
+2. 4 specialist agents (orders, returns, payments, product questions)
+3. Escalation path for complex issues
+4. Appropriate input_filters for each handoff
+
+For each handoff, explain:
+- Why this agent handles this case
+- What context should/shouldn't be passed
+- When to escalate vs resolve
+
+
+What you're learning: How to design multi-agent architectures with appropriate context flow between specialists. You're practicing the architectural thinking needed for production agent systems.
+
+Prompt 2: Implement Custom Filters​
+I have a support agent system where conversations can get long (50+ messages).
+When handing off to a specialist, I want to:
+1. Keep the last 10 user messages
+2. Remove all tool calls
+3. Add a summary of the issue at the start
+
+Help me implement a custom input_filter function that does this.
+Show the filter function and how to use it with handoff().
+
+
+What you're learning: How to implement custom input filters that optimize context for receiving agents, balancing information preservation with token efficiency.
+
+Prompt 3: Apply to Your Domain​
+I want to build a multi-agent system for [YOUR DOMAIN: legal intake, medical triage,
+financial advising, etc.].
+
+Help me design:
+1. What specialist agents do I need?
+2. What should the triage agent's routing logic be?
+3. Where should I use input_filters to protect sensitive information?
+4. What handoff callbacks would be useful for compliance/logging?
+
+Start with the agent architecture, then show implementation code.
+
+
+What you're learning: Translating the handoff patterns to your specific domain, considering both technical implementation and domain-specific requirements like compliance.
+
+Safety Note​
+
+Handoffs transfer conversation context between agents. Be careful with:
+
+Sensitive data: Use input_filters to remove PII before handoffs to less-trusted agents
+Circular handoffs: Set max_turns in RunConfig to prevent infinite loops
+Context size: Long conversations consume tokens; filter aggressively for specialists
+Audit logging: Use on_handoff callbacks to maintain audit trails of who handled what

@@ -1,0 +1,467 @@
+Right-Sizing with VPA
+
+Your Task API deployment requests 1 CPU and 2Gi of memory per pod. You set these values six months ago, guessing what the application might need. Now you're paying for resources the pods never use.
+
+You check the metrics: average CPU usage is 150m (15% of requested). Average memory is 400Mi (20% of requested). You're paying for 5x the CPU and 5x the memory your application actually needs. Across 10 replicas running 24/7, that waste adds up to hundreds of dollars per month.
+
+Manual right-sizing is tedious and risky. You could lower the requests based on current usage, but what about traffic spikes? What about that batch job that runs Sunday nights and uses 3x normal resources? Guess wrong, and your pods get OOMKilled or CPU-throttled during peak load.
+
+The Vertical Pod Autoscaler (VPA) solves this. It continuously monitors actual resource usage, generates recommendations based on real patterns, and can automatically adjust pod requests to match actual needs. This lesson teaches you how to install VPA, configure it in safe "recommendations-only" mode, interpret its output, and calculate savings before applying changes.
+
+Why Right-Sizing Matters​
+
+Over-provisioning is the default in Kubernetes. Developers set generous resource requests to avoid problems: "Better to request too much than get throttled." But this approach has costs:
+
+Direct cost: Cloud providers charge for what you provision, not what you use. Request 1 CPU, use 0.1 CPU, pay for 1 CPU.
+
+Scheduling waste: The Kubernetes scheduler reserves requested resources on nodes. Over-provisioned pods consume node capacity that other workloads could use, leading to more nodes than necessary.
+
+Hidden inefficiency: Without visibility into actual usage vs requests, teams don't know they're wasting money. The waste compounds over months and years.
+
+Metric	Task API Current	Actual Usage	Waste
+CPU Request	1000m	150m	850m (85%)
+Memory Request	2Gi	400Mi	1.6Gi (80%)
+Monthly Cost (10 pods)	$500	$100	$400 wasted
+
+VPA addresses this by recommending request values based on observed usage, accounting for peaks and patterns your manual observation would miss.
+
+VPA Architecture​
+
+VPA consists of three components that work together:
+
+The Three Components​
+                        ┌─────────────────────┐
+                        │      VPA CRD        │
+                        │  (Your Config)      │
+                        └──────────┬──────────┘
+                                   │
+         ┌─────────────────────────┼─────────────────────────┐
+         │                         │                         │
+         ▼                         ▼                         ▼
+┌─────────────────┐    ┌─────────────────────┐    ┌────────────────────┐
+│   Recommender   │    │       Updater       │    │ Admission Controller│
+│                 │    │                     │    │                    │
+│ Queries metrics │    │ Evicts pods when    │    │ Modifies pod specs │
+│ Calculates recs │    │ resources outdated  │    │ at creation time   │
+└────────┬────────┘    └──────────┬──────────┘    └─────────┬──────────┘
+         │                        │                         │
+         ▼                        ▼                         ▼
+    Recommendations           Pod Eviction              Pod Creation
+    stored in status          (Recreate mode)           with new requests
+
+
+Recommender: Continuously queries the Metrics Server, analyzes historical usage (typically 8+ days), and computes recommended CPU and memory requests. Recommendations are stored in the VPA object's status field.
+
+Updater: When VPA is in Recreate mode, the Updater watches for pods whose current requests differ significantly from recommendations. It evicts those pods so they can be recreated with new values.
+
+Admission Controller: When a pod is created, this component intercepts the creation request and modifies the pod spec to use VPA-recommended resource values (if VPA is in Initial or Recreate mode).
+
+Key insight: VPA generates recommendations regardless of mode. Even in Off mode, you get recommendations. The mode controls whether VPA applies those recommendations automatically.
+
+Installing VPA​
+
+VPA is not included in standard Kubernetes. You need to install it separately.
+
+Prerequisites:
+
+Kubernetes 1.21+
+Metrics Server installed and running
+Helm 3+
+
+Installation via Helm:
+
+# Add the Fairwinds repository
+helm repo add fairwinds-stable https://charts.fairwinds.com/stable
+helm repo update
+
+# Install VPA in its own namespace
+helm install vpa fairwinds-stable/vpa \
+  --namespace vpa \
+  --create-namespace
+
+
+Output:
+
+NAME: vpa
+NAMESPACE: vpa
+STATUS: deployed
+REVISION: 1
+NOTES:
+VPA has been installed.
+
+
+Verify installation:
+
+kubectl get pods -n vpa
+
+
+Output:
+
+NAME                                        READY   STATUS    RESTARTS   AGE
+vpa-admission-controller-6b9b5d8c4b-x2j9k   1/1     Running   0          30s
+vpa-recommender-7d6b8c5f9a-m4n8p            1/1     Running   0          30s
+vpa-updater-5f7c9d8b6c-q9r2s                1/1     Running   0          30s
+
+
+All three components should be running. The Recommender starts analyzing metrics immediately; recommendations appear within minutes.
+
+VPA Modes: Off, Initial, and Recreate​
+
+VPA operates in different modes based on your update policy. Choose the mode that matches your risk tolerance.
+
+Mode	Recommendations	Applies to New Pods	Evicts Running Pods	Production Safety
+Off	Yes	No	No	Safest - observe only
+Initial	Yes	Yes	No	Conservative - new pods get optimized
+Recreate	Yes	Yes	Yes	Active - existing pods get evicted
+Off Mode: Recommendations Only​
+
+VPA generates recommendations but takes no action. This is the safe starting point for production workloads.
+
+When to use:
+
+First deploying VPA to any workload
+Production services where restarts are disruptive
+When you want human review before changes
+
+Behavior: You read recommendations from the VPA status and decide whether to apply them manually.
+
+Initial Mode: New Pods Only​
+
+VPA applies recommendations to newly created pods but doesn't touch running pods.
+
+When to use:
+
+After validating Off mode recommendations
+Workloads with regular deployments (new pods created frequently)
+When you want gradual rollout
+
+Behavior: The next time pods are created (deployment, scale-up, restart), they get the recommended resources.
+
+Recreate Mode: Active Right-Sizing​
+
+VPA evicts pods whose resources differ significantly from recommendations. The pods restart with new resource values.
+
+When to use:
+
+After validating recommendations work correctly
+Workloads that tolerate restarts
+Non-production environments for testing
+
+Behavior: VPA's Updater component evicts pods, the Deployment controller creates replacements, the Admission Controller applies new resources.
+
+Safety consideration: Recreate mode causes pod restarts. Ensure your workload handles disruption (PodDisruptionBudgets, proper replica counts) before enabling.
+
+Creating a VPA for Task API​
+
+Start with Off mode to observe recommendations without risk.
+
+VPA Configuration:
+
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: task-api-vpa
+  namespace: production
+  labels:
+    app: task-api
+    team: product-team
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  updatePolicy:
+    updateMode: "Off"  # Recommendations only - safest option
+  resourcePolicy:
+    containerPolicies:
+    - containerName: task-api
+      minAllowed:
+        cpu: 100m       # Never recommend below this
+        memory: 128Mi
+      maxAllowed:
+        cpu: 2000m      # Never recommend above this
+        memory: 2Gi
+      controlledResources: ["cpu", "memory"]
+
+
+Apply the VPA:
+
+kubectl apply -f task-api-vpa.yaml
+
+
+Output:
+
+verticalpodautoscaler.autoscaling.k8s.io/task-api-vpa created
+
+
+Explanation of key fields:
+
+targetRef: Which workload VPA manages (Deployment, StatefulSet, DaemonSet)
+updateMode: "Off": Generate recommendations without applying them
+minAllowed: Floor for recommendations (prevents too-aggressive downsizing)
+maxAllowed: Ceiling for recommendations (prevents runaway scaling)
+controlledResources: Which resources VPA manages (CPU, memory, or both)
+Reading VPA Recommendations​
+
+After VPA collects enough metrics (typically 15-30 minutes minimum, 8+ days for stable recommendations), check the status:
+
+kubectl describe vpa task-api-vpa -n production
+
+
+Output:
+
+Status:
+  Conditions:
+    - lastTransitionTime: "2025-12-30T10:15:00Z"
+      status: "True"
+      type: RecommendationProvided
+  Recommendation:
+    containerRecommendations:
+    - containerName: task-api
+      lowerBound:
+        cpu: 100m
+        memory: 200Mi
+      target:
+        cpu: 180m
+        memory: 450Mi
+      upperBound:
+        cpu: 500m
+        memory: 900Mi
+      uncappedTarget:
+        cpu: 180m
+        memory: 450Mi
+
+Understanding the Recommendation Fields​
+Field	Meaning	Use Case
+target	Optimal resource request based on usage patterns	Set your requests to this value
+lowerBound	Minimum safe value (P10 usage)	Never go below this
+upperBound	Maximum expected value (P95 usage)	Your limit should be at or above this
+uncappedTarget	Target without min/max constraints	Shows what VPA would recommend without your policy limits
+
+How to read this output:
+
+VPA analyzed Task API's actual usage and recommends:
+
+CPU: 180m instead of your current 1000m (82% reduction)
+Memory: 450Mi instead of your current 2Gi (78% reduction)
+
+The target is based on observed usage with a safety margin. The upperBound shows peak usage that VPA observed.
+
+Calculating Savings​
+
+Compare current requests to VPA recommendations:
+
+Resource	Current Request	VPA Target	Reduction	Savings
+CPU	1000m	180m	820m	82%
+Memory	2Gi	450Mi	1.6Gi	78%
+
+Monthly cost calculation (example rates):
+
+Current cost (per pod per month):
+  CPU: 1.0 vCPU × $30/vCPU = $30
+  Memory: 2.0 Gi × $5/Gi = $10
+  Total per pod: $40
+
+Recommended cost (per pod per month):
+  CPU: 0.18 vCPU × $30/vCPU = $5.40
+  Memory: 0.45 Gi × $5/Gi = $2.25
+  Total per pod: $7.65
+
+Savings per pod: $40 - $7.65 = $32.35 (81%)
+
+With 10 replicas: $323.50 savings per month
+With 10 replicas for 12 months: $3,882 annual savings
+
+
+This is why right-sizing matters. A single workload saves thousands annually. Multiply by all your deployments.
+
+VPA and HPA: The Coexistence Rules​
+
+If you're using the Horizontal Pod Autoscaler (HPA) alongside VPA, understand the conflict:
+
+The problem: Both autoscalers react to CPU/memory metrics. VPA wants to resize pods. HPA wants to add/remove pods. If both react to the same metric, they fight each other.
+
+Example conflict scenario:
+
+CPU usage increases
+HPA sees high CPU, adds more pods
+VPA sees high CPU, recommends higher CPU requests
+New pods get higher requests
+Total cluster CPU demand jumps unexpectedly
+Nodes fill up, pods can't schedule
+Safe Coexistence Patterns​
+Pattern	VPA Mode	HPA Metric	Safe?
+VPA Off + HPA CPU	Off	CPU	Yes - VPA only recommends
+VPA Recreate + HPA CPU	Recreate	CPU	No - conflicting actions
+VPA Recreate + HPA Custom	Recreate	requests/sec	Yes - different triggers
+VPA Memory + HPA CPU	Recreate (memory only)	CPU	Yes - different resources
+
+Recommended pattern: Use VPA in Off mode for recommendations, apply changes through your deployment pipeline, and let HPA handle scaling.
+
+Alternative pattern: If using VPA Recreate, configure HPA to scale on custom metrics (requests per second, queue depth) rather than CPU/memory.
+
+# Safe: VPA manages memory, HPA scales on custom metric
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+spec:
+  resourcePolicy:
+    containerPolicies:
+    - containerName: task-api
+      controlledResources: ["memory"]  # VPA manages memory only
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: 100
+
+Applying VPA Recommendations Safely​
+
+Once you trust VPA's recommendations, you have options for applying them:
+
+Option 1: Manual Application (Most Conservative)​
+
+Read VPA recommendations, update your Deployment manifest, deploy through your normal CI/CD pipeline:
+
+# deployment.yaml (updated based on VPA recommendation)
+resources:
+  requests:
+    cpu: 180m      # Was 1000m
+    memory: 450Mi  # Was 2Gi
+  limits:
+    cpu: 500m      # Based on VPA upperBound
+    memory: 900Mi  # Based on VPA upperBound
+
+
+Advantages: Full control, GitOps-friendly, audit trail.
+
+Option 2: VPA Initial Mode​
+
+Change VPA to Initial mode. New pods get recommendations automatically:
+
+spec:
+  updatePolicy:
+    updateMode: "Initial"  # Changed from "Off"
+
+
+Then trigger a rolling deployment. New pods get optimized resources.
+
+Advantages: Gradual rollout, no disruption to running pods.
+
+Option 3: VPA Recreate Mode​
+
+Change VPA to Recreate mode. VPA evicts and recreates pods with new resources:
+
+spec:
+  updatePolicy:
+    updateMode: "Recreate"  # Changed from "Off"
+
+
+Advantages: Fully automatic optimization.
+
+Risks: Pod restarts, potential service disruption. Use PodDisruptionBudgets.
+
+Safety Guidelines​
+
+Always start with Off mode: Run VPA in Off mode for at least a week, preferably two. Let it observe traffic patterns including peaks, batch jobs, and edge cases.
+
+Review recommendations before applying: Don't trust VPA blindly. Compare recommendations to your understanding of the workload. If VPA recommends 50m CPU for a service you know handles traffic spikes, investigate.
+
+Set appropriate min/max bounds: The minAllowed and maxAllowed policies prevent VPA from recommending dangerous values. Set these based on your knowledge of the workload's requirements.
+
+Test in staging first: Before enabling Recreate mode in production, test the full cycle in staging. Verify that pods restart gracefully and the service remains healthy.
+
+Coordinate with HPA: If using HPA, follow the coexistence patterns above. Conflicts between autoscalers cause unpredictable behavior.
+
+Monitor after changes: After applying new resource values, watch metrics for the next few days. Verify that pods aren't hitting limits, getting throttled, or experiencing OOMKills.
+
+Try With AI​
+
+These prompts help you apply VPA concepts to your own Kubernetes workloads.
+
+Prompt 1: VPA Configuration Design
+
+I have a FastAPI application deployed as a Kubernetes Deployment.
+Current resource requests: 500m CPU, 1Gi memory.
+The application handles variable traffic with spikes during business hours.
+I'm already using HPA to scale based on CPU utilization.
+
+Help me design a safe VPA configuration that:
+- Starts in recommendation-only mode
+- Sets appropriate min/max bounds
+- Avoids conflicts with my existing HPA
+
+Explain why you chose each setting.
+
+
+What you're learning: How to configure VPA safely when HPA already exists. The key is understanding which mode and resource policies prevent autoscaler conflicts.
+
+Prompt 2: Interpreting VPA Output
+
+My VPA shows these recommendations:
+  lowerBound: cpu=50m, memory=100Mi
+  target: cpu=120m, memory=256Mi
+  upperBound: cpu=400m, memory=512Mi
+  uncappedTarget: cpu=120m, memory=256Mi
+
+My current requests are: cpu=1000m, memory=2Gi
+
+Help me understand:
+1. What do each of these bounds mean?
+2. How much can I save if I apply the target?
+3. What should I set for limits?
+4. Are there any risks I should consider?
+
+
+What you're learning: How to translate VPA output into actionable changes. The target tells you what to request; the upperBound guides your limits.
+
+Prompt 3: VPA Mode Selection
+
+I need to choose a VPA mode for three different workloads:
+
+1. Production API (24/7, user-facing, cannot tolerate unexpected restarts)
+2. Batch processing job (runs nightly, processes data, tolerates restarts)
+3. Development environment (used by engineers, frequent deployments)
+
+For each workload, recommend:
+- Which VPA mode to use
+- How long to observe before changing modes
+- Any additional safety measures
+
+
+What you're learning: How workload characteristics determine the appropriate VPA mode. Production safety needs differ from batch processing needs.
+
+Safety note: VPA recommendations are based on historical usage. If your workload pattern changes (new features, increased traffic, different user behavior), previous recommendations may become invalid. Monitor continuously after applying changes.
+
+Reflect on Your Skill​
+
+You built an operational-excellence skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my operational-excellence skill, explain VPA and how to use it safely.
+Does my skill describe the three VPA modes correctly?
+Does it warn about VPA+HPA conflicts?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the VPA mode decision framework (Off for observation, Initial for new pods, Recreate for active optimization)?
+Did it explain how to read VPA recommendations (target, lowerBound, upperBound)?
+Did it address VPA+HPA coexistence patterns?
+Improve Your Skill​
+
+If you found gaps:
+
+My operational-excellence skill is missing VPA mode selection guidance.
+Update it to include:
+1. A decision tree for choosing Off vs Initial vs Recreate mode
+2. The rule: always start with Off mode in production
+3. Safe VPA+HPA patterns (VPA manages memory, HPA scales on custom metrics)

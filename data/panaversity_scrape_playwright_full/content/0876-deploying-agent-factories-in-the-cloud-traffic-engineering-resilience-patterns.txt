@@ -1,0 +1,812 @@
+Resilience Patterns
+
+Your service is healthy. All pods are running, health checks pass, metrics look green. Then a network glitch causes a database connection to drop for 200 milliseconds. Without retry logic, that request fails permanently. A user sees an error. They refresh, it works—but trust erodes. Meanwhile, during a Kubernetes node upgrade, all your pods get evicted simultaneously because you forgot to create a PodDisruptionBudget. Your service goes down for 90 seconds while new pods start. Both failures were preventable.
+
+Resilience patterns prepare your services for the failures that will happen. Networks are unreliable. Pods get evicted. Dependencies slow down. The question is not whether failures occur, but whether your system handles them gracefully. This lesson teaches production-grade patterns: retry policies that recover from transient failures, timeouts that prevent resource exhaustion, PodDisruptionBudgets that protect during maintenance, and graceful shutdown that completes in-flight requests.
+
+By the end, you will configure retry policies with exponential backoff, set request and connection timeouts, create PDBs that guarantee minimum availability, and implement graceful shutdown with preStop hooks.
+
+The Resilience Stack​
+
+Production resilience operates at multiple layers. Each layer handles different failure modes:
+
+Layer	Pattern	What It Protects Against
+Request	Retries	Transient failures (network blips, temporary overload)
+Request	Timeouts	Slow dependencies (prevent thread exhaustion)
+Connection	Outlier detection	Unhealthy backends (exclude failing pods)
+Pod	Liveness/Readiness probes	Application failures (restart unhealthy pods)
+Pod	Graceful shutdown	Termination (complete in-flight work)
+Deployment	PDB	Maintenance disruptions (guarantee availability)
+                     ┌────────────────────────────────────────────────┐
+                     │             Resilience Stack                   │
+                     └────────────────────────────────────────────────┘
+                                          │
+    ┌─────────────────────────────────────┼─────────────────────────────────────┐
+    │                                     │                                     │
+    ▼                                     ▼                                     ▼
+┌──────────────┐                   ┌──────────────┐                   ┌──────────────┐
+│   Request    │                   │     Pod      │                   │  Deployment  │
+│   Layer      │                   │    Layer     │                   │    Layer     │
+│              │                   │              │                   │              │
+│ • Retries    │                   │ • Probes     │                   │ • PDB        │
+│ • Timeouts   │                   │ • preStop    │                   │ • Rolling    │
+│ • Outliers   │                   │ • Grace pd   │                   │   updates    │
+└──────────────┘                   └──────────────┘                   └──────────────┘
+
+Retry Policies​
+
+Retries automatically resend failed requests. A 500ms network timeout does not mean the operation failed—the server may have completed successfully. Retry policies distinguish between failures worth retrying (transient) and failures that should not be retried (permanent).
+
+Understanding Retry Behavior​
+Failure Type	Should Retry?	Example
+Network timeout	Yes	TCP connection dropped
+502 Bad Gateway	Yes	Upstream temporarily unavailable
+503 Service Unavailable	Yes	Server overloaded
+504 Gateway Timeout	Yes	Upstream too slow
+500 Internal Server Error	Maybe	Depends on idempotency
+400 Bad Request	No	Client error, won't fix on retry
+401 Unauthorized	No	Auth failure, won't fix on retry
+404 Not Found	No	Resource doesn't exist
+Configuring Retry Policy with BackendTrafficPolicy​
+
+Configure retries using Envoy Gateway's BackendTrafficPolicy:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-retry
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  retry:
+    numRetries: 3
+    perRetry:
+      backOff:
+        baseInterval: 100ms
+        maxInterval: 2s
+      timeout: 500ms
+    retryOn:
+      httpStatusCodes:
+        - 502
+        - 503
+        - 504
+      triggers:
+        - connect-failure
+        - retriable-status-codes
+        - reset
+
+
+Apply and verify:
+
+kubectl apply -f task-api-retry.yaml
+kubectl get backendtrafficpolicy -n task-api
+
+
+Output:
+
+NAME             AGE
+task-api-retry   5s
+
+Understanding Retry Fields​
+Field	Purpose	Recommended Values
+numRetries	Maximum retry attempts	2-5 (higher = more latency)
+perRetry.timeout	Timeout per individual attempt	100ms-1s (based on expected latency)
+perRetry.backOff.baseInterval	Initial delay between retries	25ms-200ms
+perRetry.backOff.maxInterval	Maximum delay (exponential caps here)	1s-5s
+retryOn.httpStatusCodes	Status codes that trigger retry	502, 503, 504 (server errors)
+retryOn.triggers	Failure conditions that trigger retry	connect-failure, reset
+Exponential Backoff​
+
+Exponential backoff increases delay between retries to avoid overwhelming a recovering service:
+
+Attempt 1: Immediate
+Attempt 2: Wait baseInterval (100ms)
+Attempt 3: Wait 2 × baseInterval (200ms)
+Attempt 4: Wait 4 × baseInterval (400ms), capped at maxInterval
+
+
+Why exponential? If the server is overloaded, retrying immediately adds more load. Exponential backoff gives the server time to recover.
+
+Testing Retry Behavior​
+
+Create a service that fails intermittently:
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flaky-app
+  namespace: task-api
+data:
+  main.py: |
+    from flask import Flask
+    import random
+    app = Flask(__name__)
+
+    @app.route('/api/tasks')
+    def tasks():
+        if random.random() < 0.5:  # 50% failure rate
+            return "Service temporarily unavailable", 503
+        return "Success", 200
+
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=8080)
+
+
+Test without retries:
+
+for i in {1..10}; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/tasks
+done | sort | uniq -c
+
+
+Output (no retries):
+
+   5 200
+   5 503
+
+
+With retry policy applied, same requests:
+
+for i in {1..10}; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/tasks
+done | sort | uniq -c
+
+
+Output (with retries):
+
+   9 200
+   1 503
+
+
+Most failures recovered through automatic retry.
+
+Timeout Configuration​
+
+Timeouts prevent slow dependencies from exhausting resources. Without timeouts, a thread waiting for a response that never comes holds resources indefinitely. Multiply by concurrent requests, and your service runs out of threads.
+
+Types of Timeouts​
+Timeout Type	What It Controls	When to Set
+Request timeout	Total time for complete request	Always
+Per-retry timeout	Time for single retry attempt	With retry policy
+Idle timeout	Time connection can be idle	Long-lived connections
+Connection timeout	Time to establish TCP connection	Always
+Configuring Timeouts​
+
+Configure timeouts in BackendTrafficPolicy:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-timeouts
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  timeout:
+    http:
+      requestTimeout: 30s
+      idleTimeout: 5m
+      connectionIdleTimeout: 1h
+
+
+Apply and verify:
+
+kubectl apply -f task-api-timeouts.yaml
+
+
+Output:
+
+backendtrafficpolicy.gateway.envoyproxy.io/task-api-timeouts created
+
+Timeout Field Meanings​
+Field	Description	Recommended
+requestTimeout	Max time from first byte to last byte	10-60s for APIs
+idleTimeout	Max time with no data on connection	30s-5m
+connectionIdleTimeout	Max time to keep idle connection in pool	1h-24h
+Testing Timeout Behavior​
+
+Simulate slow responses:
+
+# Create slow endpoint (sleeps 45 seconds)
+curl http://localhost:8080/api/tasks?delay=45s
+
+
+Output (with 30s timeout):
+
+upstream request timeout
+
+
+The request times out after 30 seconds instead of waiting 45 seconds.
+
+Combining Retries and Timeouts​
+
+When using retries, set per-retry timeout shorter than request timeout:
+
+retry:
+  numRetries: 3
+  perRetry:
+    timeout: 5s    # Each attempt gets 5s
+timeout:
+  http:
+    requestTimeout: 20s   # Total request gets 20s
+
+
+Why? If each retry takes the full request timeout, 3 retries × 30s = 90s total wait. With 5s per-retry timeout: 3 retries × 5s + backoff = ~20s maximum.
+
+PodDisruptionBudget​
+
+Kubernetes may evict pods for many reasons: node upgrades, scaling down, resource pressure. Without protection, Kubernetes can evict all your pods simultaneously, causing an outage. PodDisruptionBudget (PDB) guarantees minimum availability during voluntary disruptions.
+
+What PDB Protects​
+Disruption Type	PDB Applies?	Examples
+Voluntary	Yes	Node drain, cluster upgrade, kubectl delete
+Involuntary	No	Node crash, OOM kill, hardware failure
+
+PDB does not protect against node failures—it protects against planned maintenance.
+
+Creating a PodDisruptionBudget​
+
+Guarantee at least 2 pods available during disruptions:
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: task-api-pdb
+  namespace: task-api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: task-api
+
+
+Apply and verify:
+
+kubectl apply -f task-api-pdb.yaml
+kubectl get pdb -n task-api
+
+
+Output:
+
+NAME           MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+task-api-pdb   2               N/A               1                     10s
+
+PDB Field Options​
+Field	Purpose	When to Use
+minAvailable	Minimum pods that must be available	When you know minimum needed for traffic
+maxUnavailable	Maximum pods that can be unavailable	When you know how many can fail
+
+Either minAvailable OR maxUnavailable, not both.
+
+Examples:
+
+# Option 1: At least 2 pods always available
+spec:
+  minAvailable: 2
+
+# Option 2: At most 1 pod unavailable at a time
+spec:
+  maxUnavailable: 1
+
+# Option 3: Percentage (at least 50% available)
+spec:
+  minAvailable: "50%"
+
+Testing PDB Behavior​
+
+Try to drain a node when PDB would be violated:
+
+# With 3 replicas and minAvailable: 2
+kubectl drain node-1 --ignore-daemonsets
+
+
+Output (if 2 pods on node-1):
+
+error when evicting pod "task-api-xxx": Cannot evict pod as it would violate the
+pod's disruption budget.
+
+
+Kubernetes refuses to drain the node because it would leave fewer than 2 pods.
+
+PDB Best Practices​
+Scenario	Recommended PDB
+3 replicas	minAvailable: 2 or maxUnavailable: 1
+5+ replicas	minAvailable: "60%" or maxUnavailable: "40%"
+Single replica	No PDB (or maxUnavailable: 0 blocks all drains)
+Stateful workload	maxUnavailable: 1 (sequential drains)
+Liveness and Readiness Probes​
+
+Probes tell Kubernetes whether your pod is healthy. Without probes, Kubernetes cannot detect application failures—a crashed process inside a running container looks healthy from outside.
+
+Probe Types​
+Probe	Purpose	Action on Failure
+Liveness	Is the container alive?	Restart container
+Readiness	Is the container ready for traffic?	Remove from Service endpoints
+Startup	Is the container starting up?	Delay liveness/readiness checks
+Configuring Probes​
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+    spec:
+      containers:
+        - name: task-api
+          image: task-api:v1
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 30  # 30 × 5s = 150s startup time
+
+
+Apply and verify:
+
+kubectl apply -f task-api-deployment.yaml
+kubectl get pods -n task-api
+
+
+Output:
+
+NAME                        READY   STATUS    RESTARTS   AGE
+task-api-7b9c4d6f5-abc12   1/1     Running   0          30s
+task-api-7b9c4d6f5-def34   1/1     Running   0          30s
+task-api-7b9c4d6f5-ghi56   1/1     Running   0          30s
+
+Understanding Probe Fields​
+Field	Purpose	Guidance
+initialDelaySeconds	Wait before first probe	App startup time
+periodSeconds	Time between probes	5-10s typical
+timeoutSeconds	Max time for probe response	1-5s
+failureThreshold	Failures before action	2-5 (avoid flapping)
+successThreshold	Successes to recover	1 (for liveness), 1-3 (for readiness)
+Liveness vs Readiness​
+
+Liveness probe failure → Container restarts. Use for detecting deadlocks, infinite loops, or crashed applications.
+
+Readiness probe failure → Traffic stops. Use for temporary unavailability (database reconnecting, cache warming).
+
+Common mistake: Using liveness probe for dependency health. If your database is down, restarting your app won't fix it—and creates restart loops.
+
+Graceful Shutdown​
+
+When Kubernetes terminates a pod, it sends SIGTERM. If your application does not handle SIGTERM, in-flight requests fail. Graceful shutdown completes ongoing work before exiting.
+
+The Termination Sequence​
+1. Pod marked for termination
+2. Pod removed from Service endpoints (new traffic stops)
+3. preStop hook executes (if configured)
+4. SIGTERM sent to container
+5. Wait terminationGracePeriodSeconds
+6. SIGKILL sent (forced termination)
+
+
+The race condition: Steps 2-4 happen nearly simultaneously. Traffic may still arrive while preStop is running.
+
+Configuring Graceful Shutdown​
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: task-api
+          image: task-api:v1
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "sleep 10"  # Wait for endpoints to propagate
+
+
+Why sleep 10? Kubernetes endpoints propagation is not instant. The preStop delay ensures traffic stops arriving before your app begins shutdown.
+
+Application-Level Graceful Shutdown​
+
+Your application should handle SIGTERM:
+
+# Python example
+import signal
+import sys
+import time
+
+# Global flag for shutdown
+shutting_down = False
+
+def handle_sigterm(signum, frame):
+    global shutting_down
+    print("Received SIGTERM, starting graceful shutdown")
+    shutting_down = True
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+
+# In your request handler
+def handle_request(request):
+    if shutting_down:
+        return Response("Service shutting down", status=503)
+    # Process request...
+
+# In your main loop
+while not shutting_down:
+    # Accept and process requests
+    pass
+
+# Wait for in-flight requests to complete
+time.sleep(5)
+print("Graceful shutdown complete")
+sys.exit(0)
+
+
+Output (during termination):
+
+Received SIGTERM, starting graceful shutdown
+Completing 3 in-flight requests...
+Graceful shutdown complete
+
+Graceful Shutdown Timing​
+Setting	Purpose	Recommended
+terminationGracePeriodSeconds	Total time for graceful shutdown	30-60s
+preStop sleep	Wait for endpoints propagation	5-15s
+Application drain	Complete in-flight work	Remaining time
+
+Formula: terminationGracePeriodSeconds = preStop sleep + max request duration + buffer
+
+Outlier Detection​
+
+Outlier detection automatically excludes unhealthy backends from the load balancer. If one pod starts returning errors while others are healthy, outlier detection removes it from rotation without waiting for probes.
+
+Configuring Outlier Detection​
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-outlier
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  healthCheck:
+    passive:
+      consecutiveGatewayErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+
+
+Apply and verify:
+
+kubectl apply -f task-api-outlier.yaml
+
+
+Output:
+
+backendtrafficpolicy.gateway.envoyproxy.io/task-api-outlier created
+
+Outlier Detection Fields​
+Field	Purpose	Recommended
+consecutiveGatewayErrors	Errors before ejection	3-10
+interval	Time between error checks	5-30s
+baseEjectionTime	Initial ejection duration	30s-5m
+maxEjectionPercent	Max backends that can be ejected	10-50%
+How Outlier Detection Works​
+Normal State
+─────────────
+Pod A: Serving traffic ✓
+Pod B: Serving traffic ✓
+Pod C: Serving traffic ✓
+
+Pod B Returns 5 Consecutive Errors
+──────────────────────────────────
+Pod A: Serving traffic ✓
+Pod B: EJECTED (30s timeout) ✗
+Pod C: Serving traffic ✓
+
+After 30s, Pod B Allowed Back
+─────────────────────────────
+Pod A: Serving traffic ✓
+Pod B: Serving traffic (on probation) ✓
+Pod C: Serving traffic ✓
+
+Combining Outlier Detection with Retries​
+
+Outlier detection works well with retries:
+
+Request to Pod B fails (error #1)
+Retry policy retries to Pod A (success)
+After 5 errors, Pod B ejected
+All traffic goes to healthy pods
+Pod B recovers, rejoins rotation
+Exercises​
+Exercise 1: Configure Retry Policy​
+
+Create retry policy with exponential backoff:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: exercise-retry
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  retry:
+    numRetries: 3
+    perRetry:
+      backOff:
+        baseInterval: 100ms
+        maxInterval: 1s
+      timeout: 500ms
+    retryOn:
+      httpStatusCodes:
+        - 503
+      triggers:
+        - connect-failure
+EOF
+
+
+Verify:
+
+kubectl get backendtrafficpolicy exercise-retry
+
+
+Expected Output:
+
+NAME             AGE
+exercise-retry   5s
+
+Exercise 2: Configure Timeouts​
+
+Add timeout configuration:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: exercise-timeout
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  timeout:
+    http:
+      requestTimeout: 15s
+      idleTimeout: 60s
+EOF
+
+
+Test with slow request:
+
+# This should timeout after 15s
+time curl http://localhost:8080/api/tasks?delay=20s
+
+
+Expected Output:
+
+upstream request timeout
+real    0m15.xxx
+
+Exercise 3: Create PodDisruptionBudget​
+
+Protect your deployment with PDB:
+
+kubectl apply -f - <<EOF
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: exercise-pdb
+  namespace: default
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: task-api
+EOF
+
+
+Verify:
+
+kubectl get pdb exercise-pdb
+
+
+Expected Output:
+
+NAME           MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+exercise-pdb   2               N/A               1                     5s
+
+Exercise 4: Configure Graceful Shutdown​
+
+Add preStop hook to your deployment:
+
+kubectl patch deployment task-api -n default --patch '
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: task-api
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+'
+
+
+Verify:
+
+kubectl get deployment task-api -o jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}'
+
+
+Expected Output:
+
+45
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about resilience patterns:
+
+Which Patterns Should ALWAYS Be Included?​
+Pattern	Always Include?	Reason
+PDB	Yes	Zero cost, prevents maintenance outages
+Graceful shutdown	Yes	Prevents dropped requests during deploy
+Readiness probe	Yes	Prevents traffic to unready pods
+Request timeout	Yes	Prevents resource exhaustion
+Retries	Almost always	Handles transient failures automatically
+Which Patterns Are Situational?​
+Pattern	When to Include	When to Skip
+Liveness probe	Complex apps that can deadlock	Simple stateless apps
+Outlier detection	Multi-replica deployments	Single replica
+Startup probe	Slow-starting apps (>30s)	Fast-starting apps
+Per-retry timeout	With retry policy	Without retries
+Add Resilience Templates to Your Skill​
+
+Retry policy template:
+
+# Template: retry-policy
+retry:
+  numRetries: {{ retries | default(3) }}
+  perRetry:
+    backOff:
+      baseInterval: {{ base_interval | default("100ms") }}
+      maxInterval: {{ max_interval | default("2s") }}
+    timeout: {{ per_retry_timeout | default("500ms") }}
+  retryOn:
+    httpStatusCodes: [502, 503, 504]
+    triggers: [connect-failure, retriable-status-codes]
+
+
+PDB template:
+
+# Template: pdb
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ service }}-pdb
+  namespace: {{ namespace }}
+spec:
+  minAvailable: {{ min_available | default(2) }}
+  selector:
+    matchLabels:
+      app: {{ service }}
+
+
+Graceful shutdown template:
+
+# Template: graceful-shutdown
+terminationGracePeriodSeconds: {{ grace_period | default(45) }}
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep {{ prestop_sleep | default(10) }}"]
+
+Update Troubleshooting Guidance​
+Symptom	Check	Likely Cause
+Requests fail during deploy	preStop hook configured?	Missing graceful shutdown
+All pods evicted at once	PDB exists?	Missing PodDisruptionBudget
+Slow requests never complete	Request timeout set?	No timeout configured
+Transient errors reach users	Retry policy configured?	Missing retry configuration
+Traffic to unready pods	Readiness probe configured?	Missing readiness probe
+Try With AI​
+Generate Resilience Configuration​
+
+Ask your traffic-engineer skill:
+
+Using my traffic-engineer skill, generate a complete resilience configuration
+for my Task API that includes:
+
+- Retry policy: 3 retries with 100ms-2s exponential backoff
+- Request timeout: 30 seconds
+- PDB: minimum 2 pods available
+- Graceful shutdown: 45 second grace period with 10 second preStop
+
+
+What you're learning: AI generates multiple resilience patterns. Review the output—did AI include all four components? Are the retry and timeout values consistent (per-retry timeout < request timeout)?
+
+Evaluate and Refine​
+
+Check AI's output for common issues:
+
+Does retry policy include retryOn conditions?
+Is terminationGracePeriodSeconds greater than preStop sleep + expected request duration?
+Does PDB selector match your deployment labels?
+
+If something is missing:
+
+The retry policy should only retry on 502, 503, 504 status codes—not 500.
+Please update retryOn.httpStatusCodes.
+
+Add Health Probes​
+
+Extend to include health probes:
+
+Now add liveness and readiness probe configuration to my deployment:
+
+- Liveness: HTTP GET /healthz, check every 10s, 3 failures to restart
+- Readiness: HTTP GET /ready, check every 5s, 2 failures to remove from rotation
+- Startup: HTTP GET /healthz, allow 2 minutes for startup
+
+
+What you're learning: AI generates probe configuration. Verify the timing makes sense—startup probe should allow enough time, liveness should not be too aggressive.
+
+Validate Complete Configuration​
+
+Before applying:
+
+# Validate all resources
+kubectl apply --dry-run=client -f resilience-config.yaml
+
+# Check for conflicts
+kubectl get pdb -A | grep task-api
+kubectl get backendtrafficpolicy -n task-api
+
+
+This iteration—specifying requirements, evaluating output, validating before apply—produces production-ready resilience configurations.
+
+Safety Note​
+
+Resilience patterns interact with each other. Aggressive retries with long timeouts can cause request amplification during outages. Start with conservative settings: lower retry counts (2-3), shorter timeouts (10-30s), and longer backoff intervals (100ms-2s). Monitor your services during incident simulations before production deployment.

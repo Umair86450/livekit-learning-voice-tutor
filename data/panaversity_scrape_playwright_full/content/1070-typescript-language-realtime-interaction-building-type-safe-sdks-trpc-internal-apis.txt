@@ -1,0 +1,711 @@
+tRPC for Internal APIs
+
+You have built an external SDK for your FastAPI backend. Now you need to build internal APIs for your Next.js application. You could create REST endpoints with /api/ routes, manually define TypeScript types, and hope the frontend and backend stay synchronized. Or you could use tRPC.
+
+The scenario is common: you have a Next.js monorepo where frontend React components call backend API routes. Every time you change an API response shape, you manually update TypeScript types in two places. Every time you add a field, you wonder if you caught all the call sites. Every time you rename a property, your IDE cannot trace the impact across the client-server boundary.
+
+tRPC eliminates this friction entirely. You define a procedure once on the server, and TypeScript automatically knows the exact types on the client. No code generation. No schema files. No runtime validation overhead beyond what you explicitly add. Just the TypeScript compiler doing what it does best: tracing types through your entire codebase.
+
+In this lesson, you will learn how tRPC works, when to use it instead of REST, and how to build type-safe internal APIs with React Query integration.
+
+The tRPC Mental Model​
+
+tRPC takes a fundamentally different approach from REST and GraphQL. Instead of defining API contracts through OpenAPI schemas or GraphQL type definitions, tRPC uses TypeScript's type system directly:
+
+// server/router.ts
+import { initTRPC } from "@trpc/server";
+import { z } from "zod";
+
+const t = initTRPC.create();
+
+export const appRouter = t.router({
+  // This is a "query" procedure - for reading data
+  getUser: t.procedure
+    .input(z.object({ id: z.string() }))
+    .query(async ({ input }) => {
+      // Fetch user from database
+      return { id: input.id, name: "Alice", email: "alice@example.com" };
+    }),
+
+  // This is a "mutation" procedure - for writing data
+  updateUser: t.procedure
+    .input(z.object({
+      id: z.string(),
+      name: z.string().optional(),
+      email: z.string().email().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      // Update user in database
+      return { success: true, updated: input };
+    }),
+});
+
+// Export the router type for client usage
+export type AppRouter = typeof appRouter;
+
+
+Output:
+
+// The AppRouter type encapsulates the entire API shape
+// Clients import this type - not the implementation
+
+
+On the client, you import only the type and get full autocomplete:
+
+// client/api.ts
+import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
+import type { AppRouter } from "../server/router";
+
+const client = createTRPCProxyClient<AppRouter>({
+  links: [
+    httpBatchLink({
+      url: "/api/trpc",
+    }),
+  ],
+});
+
+// TypeScript knows: input requires { id: string }
+// TypeScript knows: output is { id: string, name: string, email: string }
+const user = await client.getUser.query({ id: "123" });
+console.log(user.name); // Autocomplete works
+
+// TypeScript knows: input allows { id, name?, email? }
+const result = await client.updateUser.mutate({
+  id: "123",
+  name: "Alice Updated",
+});
+console.log(result.success); // true
+
+
+Output:
+
+Alice
+true
+
+
+The magic happens at compile time. TypeScript traces the AppRouter type through the createTRPCProxyClient generic, giving you complete type inference without any runtime type information shipped to the client.
+
+Setting Up tRPC with Next.js App Router​
+
+tRPC v11 provides first-class support for Next.js App Router. The setup involves three pieces: the server router, the API route handler, and the client provider.
+
+Step 1: Create the Server Router​
+// server/trpc.ts
+import { initTRPC, TRPCError } from "@trpc/server";
+import { z } from "zod";
+
+// Create tRPC instance
+const t = initTRPC.create();
+
+// Export reusable router and procedure helpers
+export const router = t.router;
+export const publicProcedure = t.procedure;
+
+// Create a protected procedure for authenticated routes
+export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
+  // In a real app, verify session/JWT here
+  if (!ctx.session) {
+    throw new TRPCError({ code: "UNAUTHORIZED" });
+  }
+  return next({ ctx: { ...ctx, user: ctx.session.user } });
+});
+
+// server/routers/tasks.ts
+import { z } from "zod";
+import { router, publicProcedure } from "../trpc";
+
+// Input schemas defined with Zod
+const TaskInput = z.object({
+  title: z.string().min(1).max(100),
+  description: z.string().optional(),
+  completed: z.boolean().default(false),
+});
+
+const TaskIdInput = z.object({
+  id: z.string().uuid(),
+});
+
+// In-memory store for demo (use database in production)
+const tasks = new Map<string, { id: string; title: string; description?: string; completed: boolean }>();
+
+export const tasksRouter = router({
+  // List all tasks
+  list: publicProcedure.query(() => {
+    return Array.from(tasks.values());
+  }),
+
+  // Get single task by ID
+  byId: publicProcedure
+    .input(TaskIdInput)
+    .query(({ input }) => {
+      const task = tasks.get(input.id);
+      if (!task) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Task not found" });
+      }
+      return task;
+    }),
+
+  // Create new task
+  create: publicProcedure
+    .input(TaskInput)
+    .mutation(({ input }) => {
+      const id = crypto.randomUUID();
+      const task = { id, ...input };
+      tasks.set(id, task);
+      return task;
+    }),
+
+  // Update existing task
+  update: publicProcedure
+    .input(z.object({
+      id: z.string().uuid(),
+      data: TaskInput.partial(),
+    }))
+    .mutation(({ input }) => {
+      const task = tasks.get(input.id);
+      if (!task) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Task not found" });
+      }
+      const updated = { ...task, ...input.data };
+      tasks.set(input.id, updated);
+      return updated;
+    }),
+
+  // Delete task
+  delete: publicProcedure
+    .input(TaskIdInput)
+    .mutation(({ input }) => {
+      const existed = tasks.delete(input.id);
+      return { success: existed };
+    }),
+});
+
+// server/routers/index.ts
+import { router } from "../trpc";
+import { tasksRouter } from "./tasks";
+
+export const appRouter = router({
+  tasks: tasksRouter,
+});
+
+export type AppRouter = typeof appRouter;
+
+
+Output:
+
+// AppRouter type captures nested structure:
+// - appRouter.tasks.list (query)
+// - appRouter.tasks.byId (query with input)
+// - appRouter.tasks.create (mutation)
+// - appRouter.tasks.update (mutation)
+// - appRouter.tasks.delete (mutation)
+
+Step 2: Create the API Route Handler​
+// app/api/trpc/[trpc]/route.ts
+import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
+import { appRouter } from "@/server/routers";
+
+const handler = (req: Request) =>
+  fetchRequestHandler({
+    endpoint: "/api/trpc",
+    req,
+    router: appRouter,
+    createContext: async () => {
+      // Return context available to all procedures
+      // Add session, database connection, etc.
+      return {};
+    },
+  });
+
+export { handler as GET, handler as POST };
+
+
+Output:
+
+// All tRPC calls go through /api/trpc/[procedurePath]
+// GET for queries, POST for mutations
+// Batched requests supported automatically
+
+Step 3: Set Up React Query Integration​
+// lib/trpc.ts
+"use client";
+
+import { createTRPCReact } from "@trpc/react-query";
+import type { AppRouter } from "@/server/routers";
+
+export const trpc = createTRPCReact<AppRouter>();
+
+// app/providers.tsx
+"use client";
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { httpBatchLink } from "@trpc/client";
+import { useState } from "react";
+import { trpc } from "@/lib/trpc";
+
+export function TRPCProvider({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(() => new QueryClient());
+  const [trpcClient] = useState(() =>
+    trpc.createClient({
+      links: [
+        httpBatchLink({
+          url: "/api/trpc",
+        }),
+      ],
+    })
+  );
+
+  return (
+    <trpc.Provider client={trpcClient} queryClient={queryClient}>
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
+    </trpc.Provider>
+  );
+}
+
+
+Output:
+
+// Provider wraps application in app/layout.tsx
+// All components get access to type-safe tRPC hooks
+
+Using tRPC in React Components​
+
+With the setup complete, using tRPC in components feels like calling local functions:
+
+"use client";
+
+import { trpc } from "@/lib/trpc";
+import { useState } from "react";
+
+export function TaskList() {
+  const [newTitle, setNewTitle] = useState("");
+
+  // Query: automatically fetches, caches, and refetches
+  const { data: tasks, isLoading, error } = trpc.tasks.list.useQuery();
+
+  // Mutation: provides mutate function and status
+  const createTask = trpc.tasks.create.useMutation({
+    onSuccess: () => {
+      // Invalidate and refetch the list after creating
+      trpc.useUtils().tasks.list.invalidate();
+      setNewTitle("");
+    },
+  });
+
+  const deleteTask = trpc.tasks.delete.useMutation({
+    onSuccess: () => {
+      trpc.useUtils().tasks.list.invalidate();
+    },
+  });
+
+  if (isLoading) return <div>Loading tasks...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          createTask.mutate({ title: newTitle });
+        }}
+      >
+        <input
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          placeholder="New task title"
+        />
+        <button type="submit" disabled={createTask.isPending}>
+          {createTask.isPending ? "Creating..." : "Add Task"}
+        </button>
+      </form>
+
+      <ul>
+        {tasks?.map((task) => (
+          <li key={task.id}>
+            <span style={{ textDecoration: task.completed ? "line-through" : "none" }}>
+              {task.title}
+            </span>
+            <button
+              onClick={() => deleteTask.mutate({ id: task.id })}
+              disabled={deleteTask.isPending}
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+
+Output:
+
+// Browser renders:
+// [Input field: "New task title"] [Add Task button]
+// - Task 1 [Delete]
+// - Task 2 [Delete]
+
+// All operations are type-safe:
+// - createTask.mutate({ title: "x" }) ✓
+// - createTask.mutate({ titl: "x" }) ✗ TypeScript error
+// - tasks[0].title ✓
+// - tasks[0].titel ✗ TypeScript error
+
+
+Notice how the React Query hooks (useQuery, useMutation) come with tRPC's type inference baked in. The tasks variable has the exact type returned by your server procedure. The createTask.mutate function requires exactly the input your Zod schema defined.
+
+Real-Time Subscriptions with SSE​
+
+tRPC v11 introduced Server-Sent Events as the recommended approach for subscriptions, simpler than WebSockets for many use cases:
+
+// server/routers/notifications.ts
+import { z } from "zod";
+import { router, publicProcedure } from "../trpc";
+import { observable } from "@trpc/server/observable";
+
+// Event emitter for broadcasting (use Redis pub/sub in production)
+import { EventEmitter } from "events";
+const ee = new EventEmitter();
+
+export const notificationsRouter = router({
+  // Subscription: yields multiple values over time
+  onNewTask: publicProcedure.subscription(() => {
+    return observable<{ id: string; title: string }>((emit) => {
+      const handler = (task: { id: string; title: string }) => {
+        emit.next(task);
+      };
+
+      ee.on("task:created", handler);
+
+      // Cleanup when subscription ends
+      return () => {
+        ee.off("task:created", handler);
+      };
+    });
+  }),
+
+  // Trigger a notification (called when tasks are created)
+  broadcastTask: publicProcedure
+    .input(z.object({ id: z.string(), title: z.string() }))
+    .mutation(({ input }) => {
+      ee.emit("task:created", input);
+      return { sent: true };
+    }),
+});
+
+
+Output:
+
+// Subscription procedure returns observable
+// Clients receive events as they're emitted
+// Cleanup happens automatically on disconnect
+
+
+On the client, subscriptions integrate with React:
+
+"use client";
+
+import { trpc } from "@/lib/trpc";
+import { useEffect, useState } from "react";
+
+export function NotificationListener() {
+  const [notifications, setNotifications] = useState<Array<{ id: string; title: string }>>([]);
+
+  // Subscribe to real-time updates
+  trpc.notifications.onNewTask.useSubscription(undefined, {
+    onData: (task) => {
+      setNotifications((prev) => [task, ...prev].slice(0, 10)); // Keep last 10
+    },
+    onError: (err) => {
+      console.error("Subscription error:", err);
+    },
+  });
+
+  return (
+    <div>
+      <h3>Live Notifications</h3>
+      {notifications.length === 0 ? (
+        <p>No new tasks yet...</p>
+      ) : (
+        <ul>
+          {notifications.map((n) => (
+            <li key={n.id}>New task: {n.title}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+
+Output:
+
+// Browser shows:
+// Live Notifications
+// - New task: Build dashboard
+// - New task: Review PR
+// (updates in real-time as tasks are created)
+
+
+For SSE subscriptions, you need to configure the link:
+
+// lib/trpc.ts (updated with SSE support)
+import { createTRPCReact } from "@trpc/react-query";
+import { splitLink, httpBatchLink, unstable_httpSubscriptionLink } from "@trpc/client";
+import type { AppRouter } from "@/server/routers";
+
+export const trpc = createTRPCReact<AppRouter>();
+
+// Split link routes subscriptions to SSE, everything else to HTTP
+export const trpcClientOptions = {
+  links: [
+    splitLink({
+      condition: (op) => op.type === "subscription",
+      true: unstable_httpSubscriptionLink({
+        url: "/api/trpc",
+      }),
+      false: httpBatchLink({
+        url: "/api/trpc",
+      }),
+    }),
+  ],
+};
+
+
+Output:
+
+// Queries and mutations: HTTP batch requests
+// Subscriptions: Server-Sent Events stream
+// Both share the same type system
+
+When to Use tRPC vs REST vs GraphQL​
+
+The choice between tRPC, REST, and GraphQL depends on your architecture:
+
+Factor	tRPC	REST	GraphQL
+Type safety	Automatic, compile-time	Manual (OpenAPI codegen)	Schema-based (codegen)
+Learning curve	Low (just TypeScript)	Low (HTTP conventions)	Medium (query language)
+Code generation	None required	Often needed	Required
+Best for	Monorepos, internal APIs	Public APIs, microservices	Complex queries, mobile
+Runtime overhead	Minimal	Minimal	Query parsing
+Client-server coupling	Tight (same codebase)	Loose (API contract)	Medium (schema)
+Use tRPC When​
+
+You should reach for tRPC when building internal APIs within a TypeScript monorepo:
+
+// Perfect fit: Next.js app with tRPC backend
+// - Frontend and backend share types automatically
+// - No API documentation to maintain
+// - Refactoring traces through entire codebase
+// - React Query caching built-in
+
+const { data } = trpc.users.byId.useQuery({ id: "123" });
+// IDE: "Go to definition" jumps to server implementation
+// Rename "byId" → updates everywhere automatically
+
+Use REST When​
+
+REST remains the right choice for public APIs or microservices:
+
+// Public API consumed by external clients
+// - Clients may not use TypeScript
+// - API versioning matters
+// - Need OpenAPI documentation
+// - Multiple teams with different tech stacks
+
+// REST with OpenAPI + codegen gives similar type safety
+// without tight coupling
+
+Use GraphQL When​
+
+GraphQL excels at complex, flexible queries:
+
+// Mobile app with bandwidth constraints
+// - Clients need exactly the fields they request
+// - Multiple client types with different needs
+// - Complex relationships between entities
+// - Established GraphQL tooling (Apollo, Relay)
+
+Common Patterns and Best Practices​
+Input Validation with Zod​
+
+Always validate inputs with descriptive error messages:
+
+const CreatePostInput = z.object({
+  title: z.string()
+    .min(1, "Title is required")
+    .max(200, "Title must be under 200 characters"),
+  content: z.string()
+    .min(10, "Content must be at least 10 characters"),
+  tags: z.array(z.string())
+    .max(5, "Maximum 5 tags allowed")
+    .default([]),
+});
+
+// Errors are returned to client with helpful messages
+// No need to write manual validation logic
+
+
+Output:
+
+{
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Validation error",
+    "issues": [
+      { "path": ["title"], "message": "Title is required" }
+    ]
+  }
+}
+
+Context for Shared State​
+
+Pass database connections, sessions, and services through context:
+
+// server/trpc.ts
+import { initTRPC } from "@trpc/server";
+import { db } from "@/lib/database";
+import { getSession } from "@/lib/auth";
+
+interface Context {
+  db: typeof db;
+  session: Awaited<ReturnType<typeof getSession>> | null;
+}
+
+const t = initTRPC.context<Context>().create();
+
+// All procedures receive context
+export const publicProcedure = t.procedure;
+
+// Usage in router
+const usersRouter = router({
+  list: publicProcedure.query(async ({ ctx }) => {
+    // ctx.db is typed, ctx.session is typed
+    return ctx.db.user.findMany();
+  }),
+});
+
+
+Output:
+
+// Context is type-safe throughout the application
+// ctx.db.user.findMany() has full Prisma autocomplete
+// ctx.session?.user.id is properly typed
+
+Error Handling​
+
+Use TRPCError for typed error responses:
+
+import { TRPCError } from "@trpc/server";
+
+// Throw typed errors
+throw new TRPCError({
+  code: "NOT_FOUND",       // Becomes HTTP 404
+  message: "User not found",
+  cause: originalError,    // Optional: original error for logging
+});
+
+// Available codes:
+// UNAUTHORIZED (401), FORBIDDEN (403), NOT_FOUND (404),
+// BAD_REQUEST (400), INTERNAL_SERVER_ERROR (500), etc.
+
+
+Output:
+
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "User not found"
+  }
+}
+
+Batching Requests​
+
+The httpBatchLink automatically batches concurrent requests:
+
+// These three queries become ONE HTTP request
+const [users, posts, comments] = await Promise.all([
+  client.users.list.query(),
+  client.posts.list.query(),
+  client.comments.recent.query(),
+]);
+
+
+Output:
+
+// Network tab shows single request to /api/trpc
+// Body contains batched operations
+// Response contains all three results
+
+Building Your SDK Layer​
+
+For your chapter capstone, you can combine tRPC for internal APIs with the external SDK patterns from earlier lessons:
+
+// Internal: tRPC for Next.js frontend ↔ backend
+// Full type inference, no codegen, tight coupling is fine
+
+// External: Custom SDK for third-party consumers
+// OpenAPI-generated types, loose coupling, versioned API
+
+// Architecture:
+// [React Components]
+//        ↓
+//    [tRPC Client] ← Type inference
+//        ↓
+//    [tRPC Router] ← Internal API
+//        ↓
+//    [Service Layer] ← Business logic
+//        ↓
+//    [FastAPI Backend] ← External API (from Part 7)
+//        ↑
+//    [Custom SDK] ← For external consumers
+
+
+This hybrid approach gives you the best of both worlds: frictionless internal development with tRPC, and stable external APIs with your custom SDK.
+
+Try With AI​
+Prompt 1: Design a tRPC Router​
+Help me design a tRPC router for a blog application with these features:
+- Posts with title, content, published status, and author
+- Comments on posts
+- User authentication (protected procedures for creating/editing)
+
+Show me the Zod schemas, router structure, and how to organize
+multiple routers. Include proper error handling for not found
+and unauthorized cases.
+
+
+What you're learning: Router organization patterns that scale with application complexity. You will see how to compose multiple routers and share middleware across procedures.
+
+Prompt 2: Integrate with Existing Database​
+I have a Prisma schema with User, Post, and Comment models.
+Help me create tRPC procedures that:
+1. Use Prisma through context (not direct imports)
+2. Return exactly what the frontend needs (no over-fetching)
+3. Handle relations properly (posts with their authors)
+
+Show me the context setup, a sample query with includes,
+and how types flow from Prisma → tRPC → React component.
+
+
+What you're learning: Real-world integration patterns where tRPC connects to your database layer. The type flow from Prisma through tRPC to your components is where tRPC's value becomes most apparent.
+
+Prompt 3: Migrate from REST to tRPC​
+I have existing Next.js API routes at /api/users and /api/posts
+that return JSON. I want to gradually migrate to tRPC while
+keeping some REST endpoints for backward compatibility.
+
+Show me:
+1. How to run tRPC and REST routes together
+2. How to share business logic between them
+3. A migration strategy that doesn't break existing clients
+
+
+What you're learning: Practical migration strategies for existing applications. Most teams do not start greenfield; they need to introduce tRPC incrementally alongside existing REST APIs.
+
+Safety Note​
+
+tRPC shares types between client and server, which means changing a procedure signature on the server immediately causes TypeScript errors on the client. This is a feature for catching bugs, but it also means you cannot deploy server changes independently if the client is in a separate package. For monorepos, this tight coupling is beneficial. For distributed teams or separate deployments, consider whether tRPC's coupling model fits your deployment strategy.

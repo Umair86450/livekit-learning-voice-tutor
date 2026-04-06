@@ -1,0 +1,689 @@
+Interactive CLI Features
+
+Your CLI works. Commands parse correctly, arguments validate properly, and help text appears when needed. But the user experience feels flat. When your AI chat command sends a request, users stare at a blank terminal wondering if anything is happening. When the response finally arrives, it dumps as a wall of text with no visual distinction between prompts and responses.
+
+This lesson transforms static CLI output into engaging, professional experiences. You will add spinners that show processing is underway, colors that make output scannable, streaming that reveals AI responses in real-time, and progress bars that communicate batch operation status.
+
+The difference is dramatic. Compare these two experiences:
+
+Before (static):
+
+$ ai-chat "Explain async patterns"
+[15 seconds of nothing...]
+Async patterns in TypeScript allow non-blocking operations...
+
+
+After (interactive):
+
+$ ai-chat "Explain async patterns"
+⠋ Thinking...
+AI: Async patterns in TypeScript allow non-blocking operations...
+    [tokens stream in real-time]
+✓ 847 tokens in 3.2s
+
+
+The functionality is identical. The user experience is completely different.
+
+Streaming Output to Terminal​
+
+Terminal streaming is simpler than browser DOM updates. No React state, no virtual DOM reconciliation. Just write bytes to stdout:
+
+// Basic streaming - write character by character
+process.stdout.write("A");  // No newline
+process.stdout.write("I");  // Still same line
+process.stdout.write(":");  // Continues
+process.stdout.write(" ");  // Still going
+console.log("");            // NOW add newline
+
+
+Output:
+
+AI:
+
+
+The key distinction: console.log() adds a newline, process.stdout.write() does not. For streaming AI responses, you want tokens to appear on the same line until a natural break.
+
+The Spinner-to-Stream Pattern​
+
+The most common CLI streaming pattern shows a spinner while waiting for the first token, then switches to streaming text:
+
+import ora from "ora";
+
+interface StreamChunk {
+  type: "content" | "tool_call" | "done";
+  delta?: string;
+  name?: string;
+  usage?: { total: number };
+}
+
+async function streamAIResponse(
+  prompt: string,
+  stream: AsyncIterable<StreamChunk>
+): Promise<void> {
+  const spinner = ora("Thinking...").start();
+
+  let firstChunk = true;
+  let totalTokens = 0;
+
+  for await (const chunk of stream) {
+    if (firstChunk && chunk.type === "content") {
+      // First content token: stop spinner, start output
+      spinner.stop();
+      process.stdout.write("\x1b[32mAI:\x1b[0m "); // Green "AI:"
+      firstChunk = false;
+    }
+
+    switch (chunk.type) {
+      case "content":
+        process.stdout.write(chunk.delta ?? "");
+        break;
+
+      case "tool_call":
+        // Tool calls might come before or during content
+        if (!firstChunk) {
+          console.log(); // Newline if we were streaming
+        } else {
+          spinner.stop();
+        }
+        console.log(`\x1b[33m🔧 Calling ${chunk.name}...\x1b[0m`);
+        break;
+
+      case "done":
+        console.log(); // Final newline after content
+        console.log(`\x1b[90m✓ ${chunk.usage?.total ?? 0} tokens\x1b[0m`);
+        break;
+    }
+  }
+}
+
+
+Output:
+
+⠋ Thinking...
+AI: TypeScript's async/await syntax provides a cleaner way to work with
+promises compared to callback-based approaches...
+✓ 234 tokens
+
+
+The pattern:
+
+Start spinner immediately (user knows something is happening)
+On first content chunk, stop spinner and print role prefix
+Stream subsequent tokens directly to stdout
+On completion, add final newline and show metrics
+Handling Streaming Errors​
+
+Errors can occur at any point during streaming. Handle them without leaving the terminal in a broken state:
+
+async function safeStreamOutput(
+  stream: AsyncIterable<StreamChunk>
+): Promise<void> {
+  const spinner = ora("Thinking...").start();
+  let firstChunk = true;
+
+  try {
+    for await (const chunk of stream) {
+      if (firstChunk && chunk.type === "content") {
+        spinner.stop();
+        process.stdout.write("\x1b[32mAI:\x1b[0m ");
+        firstChunk = false;
+      }
+
+      if (chunk.type === "content") {
+        process.stdout.write(chunk.delta ?? "");
+      }
+    }
+    console.log(); // Ensure newline at end
+
+  } catch (error) {
+    // Clean up terminal state on error
+    if (firstChunk) {
+      spinner.fail("Request failed");
+    } else {
+      console.log(); // Newline after partial output
+      console.error("\x1b[31m[Error during streaming]\x1b[0m");
+    }
+    throw error;
+  }
+}
+
+
+Output (on error mid-stream):
+
+AI: TypeScript provides excellent type safe[Error during streaming]
+
+
+The terminal remains usable even when streaming fails partway through.
+
+Spinners with ora​
+
+ora provides elegant loading spinners that work cross-platform. Unlike raw ANSI codes, ora handles terminal capability detection and cleanup automatically.
+
+Basic Spinner Usage​
+import ora from "ora";
+
+async function fetchConfig(): Promise<void> {
+  const spinner = ora("Loading configuration...").start();
+
+  try {
+    // Simulate async operation
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    spinner.succeed("Configuration loaded");
+  } catch (error) {
+    spinner.fail("Failed to load configuration");
+    throw error;
+  }
+}
+
+
+Output:
+
+⠋ Loading configuration...
+⠙ Loading configuration...
+⠹ Loading configuration...
+✓ Configuration loaded
+
+
+ora animates the spinner character, then replaces the entire line with the success message.
+
+Spinner States and Transitions​
+import ora, { Ora } from "ora";
+
+async function deployApplication(): Promise<void> {
+  const spinner = ora();
+
+  // Phase 1: Build
+  spinner.start("Building application...");
+  await simulateWork(1500);
+  spinner.succeed("Build complete");
+
+  // Phase 2: Test
+  spinner.start("Running tests...");
+  await simulateWork(2000);
+  spinner.succeed("All tests passed");
+
+  // Phase 3: Deploy
+  spinner.start("Deploying to production...");
+  await simulateWork(3000);
+  spinner.succeed("Deployed successfully");
+}
+
+async function simulateWork(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+Output:
+
+⠋ Building application...
+✓ Build complete
+⠋ Running tests...
+✓ All tests passed
+⠋ Deploying to production...
+✓ Deployed successfully
+
+Updating Spinner Text​
+
+For long operations, update the spinner text to show progress:
+
+import ora from "ora";
+
+async function processFiles(files: string[]): Promise<void> {
+  const spinner = ora("Processing files...").start();
+
+  for (let i = 0; i < files.length; i++) {
+    spinner.text = `Processing ${files[i]} (${i + 1}/${files.length})`;
+    await processFile(files[i]);
+  }
+
+  spinner.succeed(`Processed ${files.length} files`);
+}
+
+async function processFile(name: string): Promise<void> {
+  // Simulate processing
+  await new Promise(resolve => setTimeout(resolve, 500));
+}
+
+
+Output:
+
+⠋ Processing file1.ts (1/3)
+⠙ Processing file2.ts (2/3)
+⠹ Processing file3.ts (3/3)
+✓ Processed 3 files
+
+Spinner with Prefixes and Colors​
+import ora from "ora";
+
+const spinner = ora({
+  text: "Connecting to API...",
+  prefixText: "\x1b[90m[api]\x1b[0m",
+  color: "cyan",
+  spinner: "dots12", // Different animation
+});
+
+spinner.start();
+// ...later
+spinner.stopAndPersist({
+  symbol: "→",
+  text: "Connected to api.openai.com",
+});
+
+
+Output:
+
+[api] ⠁ Connecting to API...
+[api] → Connected to api.openai.com
+
+Colors with chalk​
+
+chalk provides a fluent API for terminal colors that's type-safe and cross-platform:
+
+import chalk from "chalk";
+
+// Basic colors
+console.log(chalk.blue("Info message"));
+console.log(chalk.green("Success message"));
+console.log(chalk.yellow("Warning message"));
+console.log(chalk.red("Error message"));
+
+// Styles
+console.log(chalk.bold("Bold text"));
+console.log(chalk.italic("Italic text"));
+console.log(chalk.underline("Underlined text"));
+
+// Combinations
+console.log(chalk.bold.green("Bold green success"));
+console.log(chalk.bgRed.white(" ERROR "));
+
+
+Output:
+
+Info message          (blue)
+Success message       (green)
+Warning message       (yellow)
+Error message         (red)
+Bold text             (bold)
+Italic text           (italic)
+Underlined text       (underlined)
+Bold green success    (bold + green)
+ ERROR                (white on red background)
+
+Semantic Color Scheme for AI CLI​
+
+Design a consistent color scheme that makes output scannable:
+
+import chalk from "chalk";
+
+// Define semantic colors
+const colors = {
+  // Roles
+  user: chalk.cyan.bold,
+  assistant: chalk.green,
+  system: chalk.gray,
+
+  // States
+  success: chalk.green,
+  error: chalk.red,
+  warning: chalk.yellow,
+  info: chalk.blue,
+
+  // Elements
+  command: chalk.yellow,
+  code: chalk.cyan,
+  emphasis: chalk.bold,
+  muted: chalk.gray,
+};
+
+// Usage in chat display
+function displayMessage(role: string, content: string): void {
+  switch (role) {
+    case "user":
+      console.log(colors.user("You: ") + content);
+      break;
+    case "assistant":
+      console.log(colors.assistant("AI: ") + content);
+      break;
+    case "system":
+      console.log(colors.system("[system] ") + colors.muted(content));
+      break;
+  }
+}
+
+// Usage in status messages
+function logSuccess(message: string): void {
+  console.log(colors.success("✓ ") + message);
+}
+
+function logError(message: string): void {
+  console.log(colors.error("✗ ") + message);
+}
+
+function logWarning(message: string): void {
+  console.log(colors.warning("⚠ ") + message);
+}
+
+// Example conversation
+displayMessage("user", "Explain TypeScript generics");
+displayMessage("assistant", "Generics provide a way to create reusable components...");
+displayMessage("system", "Response completed in 2.3s");
+logSuccess("Conversation saved");
+
+
+Output:
+
+You: Explain TypeScript generics           (cyan, bold)
+AI: Generics provide a way to create...   (green)
+[system] Response completed in 2.3s        (gray)
+✓ Conversation saved                       (green check)
+
+Highlighting Code in Output​
+
+When AI responses include code, highlight it distinctly:
+
+import chalk from "chalk";
+
+function formatResponse(text: string): string {
+  // Simple code block detection
+  return text.replace(
+    /`([^`]+)`/g,
+    (_, code) => chalk.cyan.bgGray(` ${code} `)
+  );
+}
+
+const response = "Use the `async` keyword with `await` for promises.";
+console.log(chalk.green("AI: ") + formatResponse(response));
+
+
+Output:
+
+AI: Use the  async  keyword with  await  for promises.
+
+
+(Code portions appear with cyan text on gray background)
+
+Progress Bars for Batch Operations​
+
+When processing multiple items, progress bars communicate completion status better than spinners:
+
+import cliProgress from "cli-progress";
+import chalk from "chalk";
+
+async function batchEmbed(texts: string[]): Promise<void> {
+  const bar = new cliProgress.SingleBar({
+    format:
+      chalk.cyan("{bar}") +
+      " | {percentage}% | {value}/{total} texts | ETA: {eta}s",
+    barCompleteChar: "\u2588",
+    barIncompleteChar: "\u2591",
+    hideCursor: true,
+  });
+
+  bar.start(texts.length, 0);
+
+  for (const text of texts) {
+    await embedText(text); // Your embedding function
+    bar.increment();
+  }
+
+  bar.stop();
+  console.log(chalk.green("✓ All texts embedded"));
+}
+
+async function embedText(text: string): Promise<void> {
+  // Simulate API call
+  await new Promise(resolve => setTimeout(resolve, 200));
+}
+
+// Usage
+await batchEmbed(["text1", "text2", "text3", "text4", "text5"]);
+
+
+Output:
+
+████████████░░░░░░░░ | 60% | 3/5 texts | ETA: 1s
+████████████████████ | 100% | 5/5 texts | ETA: 0s
+✓ All texts embedded
+
+Multi-Bar Progress for Parallel Operations​
+
+When running multiple operations in parallel, show individual progress:
+
+import cliProgress from "cli-progress";
+import chalk from "chalk";
+
+async function parallelProcess(): Promise<void> {
+  const multibar = new cliProgress.MultiBar({
+    format: " {name} |" + chalk.cyan("{bar}") + "| {percentage}%",
+    barCompleteChar: "\u2588",
+    barIncompleteChar: "\u2591",
+    hideCursor: true,
+    clearOnComplete: false,
+  });
+
+  // Create bars for different tasks
+  const bar1 = multibar.create(100, 0, { name: "Embedding " });
+  const bar2 = multibar.create(100, 0, { name: "Indexing  " });
+  const bar3 = multibar.create(100, 0, { name: "Validating" });
+
+  // Simulate parallel work
+  const tasks = [
+    simulateProgress(bar1, 100),
+    simulateProgress(bar2, 80),
+    simulateProgress(bar3, 120),
+  ];
+
+  await Promise.all(tasks);
+  multibar.stop();
+
+  console.log(chalk.green("\n✓ All operations complete"));
+}
+
+async function simulateProgress(
+  bar: cliProgress.SingleBar,
+  duration: number
+): Promise<void> {
+  for (let i = 0; i <= 100; i++) {
+    bar.update(i);
+    await new Promise(r => setTimeout(r, duration / 100));
+  }
+}
+
+
+Output:
+
+ Embedding  |████████████░░░░░░░░| 60%
+ Indexing   |████████████████░░░░| 80%
+ Validating |████████░░░░░░░░░░░░| 40%
+
+
+(All three bars update simultaneously)
+
+Complete Interactive Streaming Example​
+
+Combining all patterns into a production-ready streaming function:
+
+import ora from "ora";
+import chalk from "chalk";
+
+interface StreamChunk {
+  type: "content" | "tool_call" | "done";
+  delta?: string;
+  name?: string;
+  usage?: { total: number };
+}
+
+interface StreamConfig {
+  roleColor: typeof chalk;
+  rolePrefix: string;
+  showUsage: boolean;
+}
+
+async function interactiveStream(
+  prompt: string,
+  createStream: (prompt: string) => AsyncIterable<StreamChunk>,
+  config: StreamConfig = {
+    roleColor: chalk.green,
+    rolePrefix: "AI",
+    showUsage: true,
+  }
+): Promise<string> {
+  const spinner = ora({
+    text: chalk.gray("Thinking..."),
+    color: "cyan",
+  }).start();
+
+  let fullResponse = "";
+  let firstChunk = true;
+  let tokenCount = 0;
+  const startTime = Date.now();
+
+  try {
+    const stream = createStream(prompt);
+
+    for await (const chunk of stream) {
+      switch (chunk.type) {
+        case "content":
+          if (firstChunk) {
+            spinner.stop();
+            process.stdout.write(
+              config.roleColor(`${config.rolePrefix}: `)
+            );
+            firstChunk = false;
+          }
+          process.stdout.write(chunk.delta ?? "");
+          fullResponse += chunk.delta ?? "";
+          break;
+
+        case "tool_call":
+          if (firstChunk) {
+            spinner.stop();
+            firstChunk = false;
+          } else {
+            console.log(); // Newline before tool call
+          }
+          console.log(chalk.yellow(`🔧 Using ${chunk.name}...`));
+          break;
+
+        case "done":
+          tokenCount = chunk.usage?.total ?? 0;
+          break;
+      }
+    }
+
+    // Final output
+    console.log(); // Newline after content
+
+    if (config.showUsage) {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(
+        chalk.gray(`✓ ${tokenCount} tokens in ${elapsed}s`)
+      );
+    }
+
+    return fullResponse;
+
+  } catch (error) {
+    if (firstChunk) {
+      spinner.fail(chalk.red("Request failed"));
+    } else {
+      console.log();
+      console.log(chalk.red("✗ Streaming interrupted"));
+    }
+    throw error;
+  }
+}
+
+// Usage example
+async function chat(userInput: string): Promise<void> {
+  console.log(chalk.cyan.bold("You: ") + userInput);
+  console.log();
+
+  await interactiveStream(
+    userInput,
+    async function* (prompt) {
+      // Simulated stream - replace with real API call
+      const words = "TypeScript provides excellent type safety for your code.".split(" ");
+      for (const word of words) {
+        await new Promise(r => setTimeout(r, 100));
+        yield { type: "content" as const, delta: word + " " };
+      }
+      yield { type: "done" as const, usage: { total: 15 } };
+    }
+  );
+}
+
+await chat("What is TypeScript?");
+
+
+Output:
+
+You: What is TypeScript?
+
+⠋ Thinking...
+AI: TypeScript provides excellent type safety for your code.
+✓ 15 tokens in 1.2s
+
+Choosing the Right Feedback Pattern​
+
+Different operations need different feedback:
+
+Operation Type	Feedback Pattern	Why
+Quick fetch (under 1s)	None or brief spinner	Users tolerate short waits
+AI generation (1-30s)	Spinner → streaming	Shows progress, can cancel
+Batch processing	Progress bar	Shows completion percentage
+Multi-step workflow	Sequential spinners	Shows current phase
+Parallel operations	Multi-bar progress	Shows individual status
+
+The key insight: match feedback granularity to operation uncertainty. When you know exactly how many items to process, use a progress bar. When response time is unpredictable, use streaming. When waiting for a single result, use a spinner.
+
+Try With AI​
+Prompt 1: Custom Spinner for Your Domain​
+I'm building a CLI for an AI code review tool. Design a spinner experience that:
+
+1. Shows "Analyzing code..." while scanning files
+2. Updates with file count as it discovers files
+3. Transitions to "Generating review..." during AI call
+4. Streams the review output token-by-token
+5. Shows final summary with issues found
+
+Include appropriate colors and symbols for my domain (code review).
+What ora and chalk patterns work best for this multi-phase operation?
+
+
+What you're learning: How to design phase-aware spinner experiences that communicate complex multi-step operations. Code review tools have distinct phases (scan, analyze, generate) that users want to track.
+
+Prompt 2: Color Scheme for AI Responses​
+I want to make AI responses more scannable in my CLI. Help me design a chalk
+color scheme that:
+
+1. Distinguishes code blocks from prose
+2. Highlights warnings and cautions
+3. Shows confidence levels (high/medium/low)
+4. Formats bullet points and headers
+5. Works well on both light and dark terminals
+
+Show me how to parse a markdown-like AI response and apply semantic colors.
+Consider accessibility for colorblind users.
+
+
+What you're learning: How to apply semantic coloring that enhances readability without depending solely on color. Production CLIs need to work across diverse terminal themes and user needs.
+
+Prompt 3: Progress Bar with Rate Limiting​
+I'm building a batch embedding CLI that processes thousands of texts. I need
+a progress bar that also shows:
+
+1. Current rate (items/second)
+2. Estimated cost (based on token count)
+3. Rate limit status (how close to API limits)
+4. Pause/resume capability
+
+The API has a 60 requests/minute limit, so I need to throttle. How do I combine
+cli-progress with rate limiting and show all this information without overwhelming
+the user?
+
+
+What you're learning: How to build progress displays for rate-limited operations. Real AI APIs have quotas, and your CLI needs to communicate both progress and constraints without cluttering the interface.
+
+Safety note: When using spinners and progress bars, ensure they clean up properly on errors or user interruption (Ctrl+C). Use try/finally blocks to call spinner.stop() and progressBar.stop() even when operations fail, preventing orphaned cursor states or terminal corruption.

@@ -1,0 +1,430 @@
+Transformer Architecture Essentials
+
+You're about to fine-tune a large language model. Before you adjust any weights, you need to understand what you're adjusting and why it matters. This lesson builds the mental model of transformer architecture that will inform every decision you make in LLMOps.
+
+Consider what happens when an LLM generates "The capital of France is Paris." The model doesn't just pattern-match against training data. It dynamically computes which words in your prompt matter most for predicting the next token. That dynamic computation is the attention mechanism, and understanding it changes how you think about fine-tuning.
+
+Why Architecture Matters for Fine-Tuning​
+
+When you fine-tune a model, you're not creating new architecture. You're adjusting the weights of existing components. To do this effectively, you need to understand:
+
+What each component does: Why does attention exist? What does the FFN layer accomplish?
+Where the parameters live: Which matrices contain the billions of parameters you're modifying?
+How data flows: What happens between your input prompt and the output prediction?
+
+This isn't academic knowledge. When your fine-tuning run crashes with "Out of Memory," understanding the architecture helps you diagnose whether the issue is attention computation (scales with sequence length) or FFN weights (scales with hidden dimension).
+
+The Transformer: High-Level View​
+
+A transformer-based LLM like Llama-3-8B consists of:
+
+Input Tokens → Embedding Layer → [Transformer Layers × N] → Output Projection → Predicted Token
+
+
+For Llama-3-8B:
+
+Embedding Layer: Converts tokens to vectors (vocabulary size: 128,256)
+Transformer Layers: 32 identical layers stacked
+Output Projection: Converts final hidden state back to vocabulary probabilities
+
+Key insight: The 32 transformer layers contain most of the 8 billion parameters. Each layer has two main components: Attention and Feed-Forward Network (FFN).
+
+Transformer Layer:
+┌───────────────────────────────────────────┐
+│  Input                                    │
+│    ↓                                      │
+│  Layer Norm → Multi-Head Attention        │
+│    ↓         (Q, K, V projections)        │
+│  + Residual Connection                    │
+│    ↓                                      │
+│  Layer Norm → Feed-Forward Network        │
+│    ↓         (Up projection, Down proj)   │
+│  + Residual Connection                    │
+│    ↓                                      │
+│  Output                                   │
+└───────────────────────────────────────────┘
+
+
+Each of these components has learnable weights. When you fine-tune, you're adjusting these weights to change the model's behavior.
+
+The Attention Mechanism: How Tokens Talk to Each Other​
+
+The attention mechanism is the core innovation that makes transformers work. Before transformers, models processed sequences left-to-right (like reading). Attention lets every token look at every other token simultaneously.
+
+The Problem Attention Solves​
+
+Consider the sentence: "The cat sat on the mat because it was tired."
+
+What does "it" refer to? A human knows "it" means "the cat" (not "the mat"), because:
+
+Cats get tired, mats don't
+The subject of the action is typically what gets tired
+
+The attention mechanism learns these patterns from data. When processing "it," the model computes attention weights that give high weight to "cat" and low weight to "mat."
+
+Query, Key, and Value: The Mechanics​
+
+Every attention computation involves three matrices:
+
+Query (Q): "What am I looking for?"
+Key (K): "What information do I have?"
+Value (V): "What information should I pass forward?"
+
+Think of it like a search engine:
+
+Query = your search terms
+Key = document titles (what each document is about)
+Value = document content (what you retrieve)
+
+For each token in the sequence:
+
+Compute Q, K, V by multiplying the token's embedding with learned weight matrices:
+
+Q = embedding × W_q
+K = embedding × W_k
+V = embedding × W_v
+
+
+Compute attention weights by comparing Q to all K values:
+
+attention_weights = softmax(Q × K^T / sqrt(d_k))
+
+
+Compute output by weighted sum of V:
+
+output = attention_weights × V
+
+Worked Example: 3-Token Sequence​
+
+Let's trace through "The cat sat" to see attention in action:
+
+Step 1: Each token gets Q, K, V vectors
+
+Token	Q (what am I looking for?)	K (what do I offer?)	V (my content)
+The	Q_the = [0.1, 0.3, ...]	K_the = [0.2, ...]	V_the = [0.5, ...]
+cat	Q_cat = [0.4, 0.1, ...]	K_cat = [0.8, ...]	V_cat = [0.3, ...]
+sat	Q_sat = [0.2, 0.5, ...]	K_sat = [0.1, ...]	V_sat = [0.7, ...]
+
+Step 2: Compute attention weights
+
+For the token "sat," we compute how much it should attend to each token:
+
+score("sat" → "The") = Q_sat · K_the = 0.15
+score("sat" → "cat") = Q_sat · K_cat = 0.72  ← highest!
+score("sat" → "sat") = Q_sat · K_sat = 0.28
+
+After softmax: [0.12, 0.55, 0.33]
+
+
+Step 3: Weighted combination
+
+The output for "sat" is:
+
+output_sat = 0.12 × V_the + 0.55 × V_cat + 0.33 × V_sat
+
+
+The token "sat" now contains information about what it's attending to (mostly "cat"). This is how context flows through the model.
+
+Multi-Head Attention: Learning Different Relationships​
+
+A single attention head learns one type of relationship. But language has many relationships:
+
+Grammatical (subject-verb agreement)
+Semantic (word meaning)
+Positional (what's nearby)
+Coreference (what "it" refers to)
+
+Multi-head attention runs multiple attention heads in parallel, each with its own Q, K, V weight matrices:
+
+Multi-Head Attention:
+┌──────────────────────────────────────────────────────┐
+│ Input                                                │
+│   ↓                                                  │
+│ [Head 1] [Head 2] [Head 3] ... [Head N]             │
+│     ↓        ↓        ↓           ↓                 │
+│ Concatenate all head outputs                        │
+│     ↓                                                │
+│ Output Projection (linear layer)                    │
+│     ↓                                                │
+│ Output                                               │
+└──────────────────────────────────────────────────────┘
+
+
+For Llama-3-8B:
+
+32 attention heads per layer
+4096 hidden dimension
+Each head processes 4096 / 32 = 128 dimensions
+
+Why this matters for fine-tuning: Each head learns different patterns. When you fine-tune, you're adjusting how the model allocates attention across heads. Some heads may learn your task-specific patterns while others retain general knowledge.
+
+The Feed-Forward Network: Non-Linear Transformation​
+
+After attention computes context, the FFN transforms this contextual representation. The FFN is a simple two-layer neural network:
+
+FFN(x) = Activation(x × W_up) × W_down
+
+
+Where:
+
+W_up: Projects from hidden dimension to intermediate dimension (4096 → 14336 for Llama-3-8B)
+Activation: Non-linear function (SiLU/GELU)
+W_down: Projects back to hidden dimension (14336 → 4096)
+Why Does FFN Exist?​
+
+Attention alone is linear. The FFN adds non-linearity, enabling the model to learn complex patterns:
+
+Without FFN: Model could only learn weighted combinations
+With FFN: Model can learn arbitrary transformations
+
+FFN parameters dominate: In Llama-3-8B, each layer's FFN has:
+
+W_up: 4096 × 14336 = 58M parameters
+W_down: 14336 × 4096 = 58M parameters
+116M per layer × 32 layers = 3.7B parameters (nearly half the model!)
+Layer Normalization: Training Stability​
+
+Between components, transformers use layer normalization:
+
+LayerNorm(x) = (x - mean(x)) / std(x) × γ + β
+
+
+Where γ (scale) and β (shift) are learned parameters.
+
+Purpose: Keep activations in a reasonable range during training. Without normalization:
+
+Activations can explode (→ NaN errors)
+Gradients can vanish (→ no learning)
+
+Modern placement (Llama uses "Pre-Norm"):
+
+Layer Norm → Attention → Add Residual → Layer Norm → FFN → Add Residual
+
+
+This differs from the original transformer ("Post-Norm") but trains more stably.
+
+Residual Connections: Preserving Information​
+
+Notice the "Add Residual" steps:
+
+output = LayerNorm(input) → Attention → output + input
+
+
+The input is added back to the output. This residual connection:
+
+Lets gradients flow directly through layers (easier training)
+Preserves original information (attention/FFN are additive modifications)
+Enables deeper networks (original transformer had 6 layers; modern LLMs have 80+)
+Putting It All Together: One Transformer Layer​
+
+Here's the complete data flow through a single transformer layer:
+
+def transformer_layer(x):
+    # Attention block
+    norm_x = layer_norm_1(x)
+    attn_output = multi_head_attention(norm_x)
+    x = x + attn_output  # Residual connection
+
+    # FFN block
+    norm_x = layer_norm_2(x)
+    ffn_output = feed_forward(norm_x)
+    x = x + ffn_output  # Residual connection
+
+    return x
+
+
+For Llama-3-8B, this repeats 32 times. Each layer refines the representation, building from surface patterns (early layers) to abstract concepts (later layers).
+
+What Gets Modified During Fine-Tuning?​
+
+Now you understand the architecture, here's what changes during fine-tuning:
+
+Component	Parameters	Modified During Fine-Tuning?
+Embedding	vocab × hidden	Usually frozen or updated minimally
+Q, K, V projections	3 × hidden × hidden per layer	Yes - primary target
+Output projection (attention)	hidden × hidden per layer	Yes
+FFN W_up	hidden × intermediate per layer	Yes
+FFN W_down	intermediate × hidden per layer	Yes
+Layer Norm γ, β	2 × hidden per layer	Usually frozen
+Output head	hidden × vocab	Sometimes updated
+
+Key insight for LoRA: Instead of updating all of Q, K, V, FFN directly, LoRA adds small adapter matrices. You'll learn this technique in Chapter 94.
+
+Architecture Comparison: Model Sizes​
+
+Different models vary in these dimensions:
+
+Model	Layers	Hidden Dim	Heads	Head Dim	FFN Dim	Total Params
+Llama-3-8B	32	4096	32	128	14336	8B
+Mistral-7B	32	4096	32	128	14336	7B
+Llama-3-70B	80	8192	64	128	28672	70B
+
+Why this matters:
+
+More layers = deeper reasoning but more VRAM
+Larger hidden dim = more capacity per layer
+More heads = richer attention patterns
+
+For fine-tuning on consumer hardware, you target 7-8B models. Their architecture fits in GPU memory with quantization.
+
+The Decoder-Only Architecture​
+
+Modern LLMs like Llama are "decoder-only" transformers. This means:
+
+No encoder: Unlike translation models (encoder-decoder), LLMs only have the decoder stack
+Causal attention: Each token can only attend to previous tokens (not future ones)
+Autoregressive: Generate one token at a time, feeding output back as input
+Causal Attention Mask:
+Token:  The  cat  sat  on   mat
+The     ✓    ✗    ✗    ✗    ✗
+cat     ✓    ✓    ✗    ✗    ✗
+sat     ✓    ✓    ✓    ✗    ✗
+on      ✓    ✓    ✓    ✓    ✗
+mat     ✓    ✓    ✓    ✓    ✓
+
+
+✓ = can attend, ✗ = masked (cannot see future)
+
+This mask is applied inside the attention computation, ensuring the model can only use past context when predicting the next token.
+
+Visualizing Information Flow​
+
+Here's the complete picture from input to output:
+
+"What is the capital of France?"
+              ↓
+     Token IDs: [1841, 338, 278, 7483, 310, 3444, 29973]
+              ↓
+     Embedding Layer (token → 4096-dim vector)
+              ↓
+     ┌─────────────────────────────────┐
+     │   Transformer Layer 1          │
+     │   (Attention → FFN)            │
+     └─────────────────────────────────┘
+              ↓
+     ...32 layers total...
+              ↓
+     ┌─────────────────────────────────┐
+     │   Transformer Layer 32         │
+     │   (Attention → FFN)            │
+     └─────────────────────────────────┘
+              ↓
+     Output Projection (4096 → 128256)
+              ↓
+     Softmax → probabilities for each token
+              ↓
+     Highest probability: "Paris" (token 3681)
+
+
+Each layer refines the hidden states. By layer 32, the model has computed that "Paris" is the most likely next token given the context.
+
+Code: Inspecting Model Architecture​
+
+Use this code to explore a model's architecture:
+
+from transformers import AutoModelForCausalLM
+
+# Load model configuration (doesn't load weights)
+model_name = "meta-llama/Llama-3.2-1B"
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype="auto",
+    device_map="auto"
+)
+
+# Print architecture summary
+print(model)
+
+
+Output:
+
+LlamaForCausalLM(
+  (model): LlamaModel(
+    (embed_tokens): Embedding(128256, 2048)
+    (layers): ModuleList(
+      (0-15): 16 x LlamaDecoderLayer(
+        (self_attn): LlamaSdpaAttention(
+          (q_proj): Linear(in=2048, out=2048)
+          (k_proj): Linear(in=2048, out=512)
+          (v_proj): Linear(in=2048, out=512)
+          (o_proj): Linear(in=2048, out=2048)
+        )
+        (mlp): LlamaMLP(
+          (gate_proj): Linear(in=2048, out=8192)
+          (up_proj): Linear(in=2048, out=8192)
+          (down_proj): Linear(in=8192, out=2048)
+        )
+        (input_layernorm): LlamaRMSNorm()
+        (post_attention_layernorm): LlamaRMSNorm()
+      )
+    )
+    (norm): LlamaRMSNorm()
+  )
+  (lm_head): Linear(in=2048, out=128256)
+)
+
+
+Notice the structure:
+
+layers: 16 decoder layers (this is Llama-3.2-1B; 8B has 32)
+self_attn: Q, K, V, and output projections
+mlp: The FFN with gate, up, and down projections
+lm_head: Final projection to vocabulary
+Try With AI​
+
+Now that you understand transformer architecture, explore deeper with your AI companion.
+
+Prompt 1: Trace Through a Specific Example​
+I'm learning transformer architecture for LLMOps. I understand Q, K, V
+conceptually, but I want to trace through a concrete example.
+
+For the sentence "Alice gave Bob the book":
+1. When the model is predicting what comes after "book", which tokens
+   would have high attention weights and why?
+2. What would a "syntax head" vs a "semantic head" focus on differently?
+3. If I fine-tune this model on legal documents, how might attention
+   patterns change?
+
+Walk me through the attention computation step by step.
+
+
+What you're learning: Deep understanding of attention enables you to interpret model behavior and predict how fine-tuning will change it.
+
+Prompt 2: Connect Architecture to Fine-Tuning Decisions​
+I now understand that Llama-3-8B has:
+- 32 layers with attention and FFN
+- Q, K, V projections (4096 x 4096 each)
+- FFN with 14336 intermediate dimension
+
+When I fine-tune with LoRA, I'll add small adapter matrices to Q and V
+(not K). Help me understand:
+
+1. Why target Q and V specifically?
+2. If I increase LoRA rank from 8 to 64, how does that affect what
+   the model can learn?
+3. For a Task API fine-tuning use case (structured task creation),
+   which layers would be most important to adapt?
+
+Connect the architecture to practical fine-tuning decisions.
+
+
+What you're learning: Translating architectural knowledge into fine-tuning configuration decisions.
+
+Prompt 3: Explore the FFN's Role​
+I learned that the FFN has more parameters than attention (3.7B vs 2.6B
+in Llama-3-8B). But most fine-tuning tutorials focus on attention (Q, V).
+
+1. What does the FFN learn that attention doesn't?
+2. Research suggests FFN acts as a "key-value memory" storing factual
+   knowledge. How does this work?
+3. For my use case (fine-tuning on task management patterns), should I
+   target FFN layers in addition to attention?
+
+Help me understand when FFN fine-tuning matters.
+
+
+What you're learning: Understanding all components helps you make informed decisions about what to fine-tune, not just follow tutorials blindly.
+
+Safety Note​
+
+When experimenting with model architecture code, use small models (1B parameters or less) on CPU first. Loading full 8B models without proper configuration will crash your session with out-of-memory errors. Lesson 4 teaches VRAM budgeting to prevent this.

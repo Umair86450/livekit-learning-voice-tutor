@@ -1,0 +1,268 @@
+LaTeX Verification -- Guardrail 2
+
+In Lesson 4, you eliminated coordinate references from the Calculation layer. Every formula now reads as a business rule: Revenue_Y2 - COGS_Y2 instead of =B14-C14. Named Ranges solved the problem of formulas that nobody can read. Now you face a different problem: formulas that everyone can read but nobody verifies.
+
+A junior analyst builds a WACC formula in Named Range notation. It looks correct. The variable names are clear. The structure appears complete. But the formula is missing the tax shield on the debt component -- (1 - Tax_Rate) was never applied. That omission overstates the weighted average cost of capital by roughly 50 basis points. On a $100M acquisition, 50 basis points of WACC error moves the implied valuation by millions of dollars. The formula passed Named Range Priority. It would fail LaTeX Verification.
+
+Guardrail 2 exists because readable formulas are not the same as correct formulas. Named Ranges make formulas readable. LaTeX makes their mathematical structure verifiable.
+
+What LaTeX Verification Means​
+WHAT IS LATEX?
+
+LaTeX (pronounced "lah-tech") is a mathematical typesetting system. For IDFA purposes, you do not need to install any software or learn LaTeX syntax. You need one thing: the ability to express a formula in standard mathematical notation so you can verify its structure before committing it to the model.
+
+The comparison that explains the guardrail:
+
+Excel Named Range notation: =(Equity_Value / (Equity_Value + Debt_Value)) * Cost_of_Equity + (Debt_Value / (Equity_Value + Debt_Value)) * Cost_of_Debt * (1 - Tax_Rate)
+
+The same formula in LaTeX notation:
+
+WACC = (E / (E+D)) × Kₑ + (D / (E+D)) × K_d × (1 − T)
+
+
+In the Excel version, every component runs together on one line. Parentheses nest inside parentheses. The structure is correct but hard to inspect. In the LaTeX version, the fractions are visually separated. The weights are stacked. The tax shield is isolated. You can verify each component independently in seconds.
+
+LaTeX does not change the formula. It changes your ability to see the formula.
+
+The rule is straightforward: before any complex formula is written to the model, express it in mathematical notation and confirm the structure is correct. "Complex" means any formula involving WACC, NPV, DCF terminal value, IRR, or any multi-step calculation where a structural error would be invisible in a single line of Excel notation.
+
+You can write the LaTeX by hand, type it in Markdown, or -- most practically -- ask Claude to express the formula in LaTeX and then verify what Claude produces. The verification is yours. The typesetting is optional.
+
+The Four Formulas That Require Verification​
+WACC -- Weighted Average Cost of Capital​
+WACC = (E / (E+D)) × Kₑ + (D / (E+D)) × K_d × (1 − T)
+
+
+In IDFA Named Range notation:
+
+WACC = (Equity_Value / (Equity_Value + Debt_Value)) * Cost_of_Equity
+     + (Debt_Value / (Equity_Value + Debt_Value)) * Cost_of_Debt * (1 - Tax_Rate)
+
+
+Three things LaTeX makes verifiable:
+
+Weights sum to 1.0. The equity weight E/(E+D) and the debt weight D/(E+D) must add up to exactly 1.0. If someone accidentally writes E / D instead of E / (E+D), the LaTeX makes the error visible immediately.
+
+Tax shield on debt only. The (1-T) factor multiplies only the debt term. Interest on debt is tax-deductible; returns to equity holders are not. If (1-T) is missing, the formula overstates the after-tax cost of debt, which overstates WACC, which understates the valuation in any DCF that uses it.
+
+Consistent units. Cost of equity and cost of debt must both be expressed as percentages or both as decimals. Mixing 12% with 0.05 produces a WACC that is mathematically valid but financially meaningless.
+
+Common errors caught by LaTeX:
+
+Error	What happens	Financial impact
+Missing (1-T) on debt	Overstates cost of debt	WACC too high, DCF undervalues the company
+Weights not summing to 1.0	Formula produces a number that is not a weighted average	Entire WACC is wrong -- no reliable valuation possible
+Mixed units (% and decimal)	One component dominates incorrectly	WACC could be off by several percentage points
+NPV -- Net Present Value​
+NPV = Σ(t=1 to n) [ CF_t / (1+r)^t ] − Initial_Investment
+
+
+In IDFA Named Range notation:
+
+NPV_Result = NPV(Inp_Discount_Rate, CF_Y1, CF_Y2, CF_Y3, CF_Y4, CF_Y5)
+           - Inp_Initial_Investment
+
+
+What LaTeX makes verifiable:
+
+The summation starts at t=1, not t=0. This is the single most important thing to verify. Excel's NPV() function assumes cash flows begin at period 1. The initial investment -- which occurs at period 0 -- must be subtracted separately. If the initial investment is included inside the NPV() function, it gets discounted by one period, understating the true cost and overstating the project's value.
+
+The period-0 trap: A $10M initial investment discounted at 10% for one period becomes $9.09M inside the NPV() function. That $910K difference is not a rounding error -- it is a structural mistake that makes unprofitable projects appear profitable.
+
+Terminal Value -- Gordon Growth Model​
+TV = [ FCF_n × (1+g) ] / (WACC − g)
+
+
+In IDFA Named Range notation:
+
+Terminal_Value = (FCF_Final * (1 + Inp_Terminal_Growth))
+              / (WACC - Inp_Terminal_Growth)
+
+
+What LaTeX makes verifiable:
+
+The numerator is FCF_n × (1+g), not FCF_n alone. The Gordon Growth Model values a perpetuity starting one period after the final projection year. That means the first cash flow of the perpetuity is the final projected cash flow grown by one year at the terminal growth rate. Using FCF_n directly -- without the (1+g) factor -- understates the terminal value.
+
+The growth factor trap: On a $50M final-year free cash flow with 2% terminal growth, the correct numerator is $51M. Using $50M directly understates terminal value by roughly 2%, which can move an enterprise valuation by tens of millions on a large deal.
+
+Additional check: The denominator (WACC - g) must be positive. If the terminal growth rate equals or exceeds WACC, the formula produces a negative or infinite terminal value -- which is mathematically valid but economically meaningless. This is a constraint check, not just a structural check.
+
+IRR -- Internal Rate of Return​
+
+IRR has no closed-form LaTeX expression. It is defined as the discount rate r at which:
+
+NPV = Σ(t=0 to n) [ CF_t / (1+r)^t ] = 0
+
+
+Excel solves this iteratively. You cannot verify IRR by inspecting a LaTeX formula. Instead, verify it by confirming that NPV equals zero at the computed IRR:
+
+IRR_Result     = IRR(CF_Y0, CF_Y1, CF_Y2, CF_Y3, CF_Y4, CF_Y5)
+IRR_Validation = NPV(IRR_Result, CF_Y1, CF_Y2, CF_Y3, CF_Y4, CF_Y5) + CF_Y0
+
+
+If IRR_Validation equals zero (or within floating-point tolerance), the IRR is correct.
+
+The Verification Workflow with Claude​
+
+LaTeX Verification is not something you do alone with pen and paper -- though you can. The practical workflow uses Claude as a verification partner.
+
+Your request: "I have a WACC formula in my model. Express it in LaTeX and verify that each component is structurally correct."
+
+Claude's response: "Here is the WACC formula from your model expressed in LaTeX:
+
+WACC = (E / (E+D)) × Kₑ + (D / (E+D)) × K_d × (1 − T)
+
+
+Verification checklist:
+
+Equity weight: E/(E+D) -- uses total capital in denominator. Correct.
+Debt weight: D/(E+D) -- uses total capital in denominator. Correct.
+Weights sum: E/(E+D) + D/(E+D) = 1.0. Confirmed.
+Tax shield: (1-T) applied to debt term only. Correct.
+Units: Both Kₑ and K_d should be in the same format (both decimal or both percentage)."
+
+Your refinement: "Now check this version -- I think there might be an error."
+
+You provide a formula with the tax shield removed:
+
+WACC = (Equity_Value / (Equity_Value + Debt_Value)) * Cost_of_Equity
+     + (Debt_Value / (Equity_Value + Debt_Value)) * Cost_of_Debt
+
+
+Claude's catch: "The (1-T) factor is missing from the debt component. Without the tax shield:
+
+WACC_wrong = (E / (E+D)) × Kₑ + (D / (E+D)) × K_d
+
+
+This overstates the after-tax cost of debt. With a 5% cost of debt and 25% tax rate, the correct after-tax cost is 3.75%, but this formula uses 5%. For a company with 40% debt, that adds approximately 50 basis points to WACC."
+
+What emerged from this exchange: Claude identified a specific error, explained why it matters financially, and quantified the impact. You verified Claude's LaTeX against your understanding of the formula. Neither of you working alone would have been as fast or as thorough.
+
+Exercise: Add WACC to the GP Waterfall and Verify in LaTeX​
+
+The GP Waterfall formulas you built in Lesson 4: Revenue_Y2 = Revenue_Y1 * (1 + Inp_Rev_Growth): are too straightforward to need LaTeX verification. You can read them as English sentences and confirm they are correct. But WACC is different. It has weights, a tax shield, and nested fractions that hide structural errors in a single line of Excel notation. This is the first formula in your model that genuinely needs Guardrail 2.
+
+Step 1: Add WACC Assumptions​
+
+Open the GP Waterfall spreadsheet you built in Lessons 3-4. You already have five assumptions (including Inp_Tax_Rate from the L03 extension step). Add the remaining WACC inputs:
+
+Add these assumptions to the Assumptions layer of my GP Waterfall
+spreadsheet, using Named Ranges with the Inp_ prefix:
+
+- Inp_Equity_Value = 60,000,000 (equity financing)
+- Inp_Debt_Value = 40,000,000 (debt financing)
+- Inp_Cost_of_Equity = 0.12 (12% required return on equity)
+- Inp_Cost_of_Debt = 0.05 (5% interest rate on debt)
+
+I already have Inp_Tax_Rate from earlier — do not duplicate it.
+Keep all existing Named Ranges and calculations intact.
+
+
+Verify by asking Cowork to list all Named Ranges. You should now have nine assumptions in Layer 1 (five original plus four new) and twelve calculations in Layer 2.
+
+Step 2: Build the WACC Formula​
+Add a WACC calculation to the Calculation layer. The formula must
+use only Named Ranges — zero cell coordinates, zero hardcoded
+constants. Create a Named Range called WACC for the result.
+
+
+Ask Cowork to show you the formula it created. Read it. Does it pass the compliance test from Lesson 4: can you understand what it calculates without clicking any cell?
+
+Step 3: Verify in LaTeX​
+
+The Named Range formula from Step 2 passes Guardrail 1 (you can read it as English. But WACC has three structural properties that are hard to verify in a single flat line: do the weights sum to 1.0? Is the tax shield on the right term? Are the units consistent? Asking Cowork to rewrite the formula in mathematical notation separates the fractions and isolates each component visually) so you can check each one independently.
+
+This is Guardrail 2. Ask Cowork:
+
+Express the WACC formula you just created in mathematical notation
+with the fractions written out. Then verify three things:
+1. Do the equity and debt weights sum to 1.0?
+2. Is the tax shield (1 - Tax_Rate) applied to the debt term only?
+3. Are Cost_of_Equity and Cost_of_Debt in consistent units?
+
+
+Cowork will show the formula in the chat with the weights as visible fractions: something like (E/(E+D)) × Kₑ + (D/(E+D)) × K_d × (1−T). The spreadsheet is unchanged; you are looking at a second representation of the same formula to verify its structure.
+
+Check each verification point yourself before reading Cowork's analysis. The correct WACC with these inputs is 8.7%.
+
+What to look for:
+
+WACC = 9.2% instead of 8.7%? The tax shield is missing. That 50 basis point difference (on a $100M acquisition, $5M-$8M of valuation swing) is exactly the error this guardrail exists to catch. Ask Cowork: "The WACC formula is missing (1 - Tax_Rate) on the debt component. Add the tax shield and recalculate."
+Weights don't sum to 1.0? The denominators are wrong: both equity and debt weights should divide by (Equity_Value + Debt_Value). Ask Cowork to fix the weight calculation.
+WACC = 8.7%? The formula is correct. Confirm by checking the LaTeX yourself: equity weight (0.6) × 12% = 7.2%, plus debt weight (0.4) × 5% × (1 − 0.25) = 1.5%, total = 8.7%.
+Step 4: Extend: Add NPV​
+
+Your GP Waterfall now has three years of Gross Profit and a verified WACC. Add a simple NPV to see whether a hypothetical $8M investment in this business is worthwhile:
+
+Add an assumption Inp_Initial_Investment = 8,000,000 to the
+Assumptions layer.
+
+Then add an NPV calculation to the Calculation layer. Use WACC as
+the discount rate, and Gross_Profit_Y1 through Gross_Profit_Y3 as
+the cash flows. Important: the initial investment happens at
+period 0 — subtract it separately, do not include it inside the
+NPV function.
+
+Create a Named Range called NPV_Result.
+
+
+After Cowork builds it, ask for the LaTeX expression and verify the period-0 adjustment. The initial investment should appear as − Initial_Investment outside the summation, not inside the NPV() function where it would be incorrectly discounted by one period.
+
+KEEP THIS FILE
+
+Save this spreadsheet: you will add Intent Notes to these formulas in Lesson 6.
+
+What you have built: A GP Waterfall with Assumptions, Calculations, WACC, and NPV: all using Named Ranges, all verified in LaTeX. The model now spans both guardrails: every formula passes the compliance test (Guardrail 1), and the complex formulas have been structurally verified in mathematical notation (Guardrail 2).
+
+Try With AI​
+
+Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1: Verify Your Model's WACC in LaTeX​
+Look at the WACC formula in my spreadsheet. Express it in LaTeX
+notation and run the full verification checklist:
+1. Do the weights sum to 1.0?
+2. Is the tax shield on the debt term only?
+3. Are all inputs in consistent units?
+4. What is the numerical result?
+
+If you find any errors, explain the financial impact before
+correcting them.
+
+
+What you're learning: How to use an AI agent as a LaTeX verification partner on your own model. The agent reads the actual formula from your spreadsheet, translates it to mathematical notation, and checks each structural component. Your job is to verify the agent's analysis; not to trust it blindly.
+
+Prompt 2: Verify NPV Period-0 Adjustment​
+Look at the NPV_Result formula in my spreadsheet. Express it in
+LaTeX with explicit summation bounds (start period and end period).
+
+Check: is the initial investment subtracted at period 0 (outside
+the summation), or is it discounted inside the NPV function?
+
+If it is inside the function, calculate the dollar impact of the
+error and show the corrected formula.
+
+
+What you're learning: The period-0 trap in Excel's NPV() function. The LaTeX summation notation Σ(t=1 to n) makes the bounds explicit: you can immediately see whether the initial investment is inside or outside the discounting. This single check has caught millions of dollars in valuation errors across the finance industry.
+
+Prompt 3: Spot the Error in a Terminal Value Formula​
+A colleague sends you this Terminal Value formula for review:
+
+Terminal_Value = FCF_Final / (WACC - Inp_Terminal_Growth)
+
+Their inputs:
+- FCF_Final (Year 5 free cash flow): $50,000,000
+- WACC: 9.0%
+- Terminal growth rate: 2.0%
+
+Express the correct Gordon Growth Model Terminal Value formula
+in LaTeX. Compare it to the colleague's formula. What is missing?
+Calculate the Terminal Value both ways and show the dollar
+difference.
+
+
+What you're learning: The growth factor trap in the Gordon Growth Model. The correct numerator is FCF_n × (1+g), not FCF_n alone: the perpetuity starts one period after the final projection year. Missing the (1+g) factor understates terminal value by approximately the growth rate percentage, which compounds to tens of millions on large deals.
+
+Flashcards Study Aid​
+
+Continue to Lesson 6: Intent Notes -- Guardrail 3 →

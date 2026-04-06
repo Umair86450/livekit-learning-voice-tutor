@@ -1,0 +1,723 @@
+Capstone: Deploy Task API Model
+
+This is the culmination of Chapter 100. You have learned about export formats, quantization, Ollama configuration, local serving, vLLM architecture, and performance optimization. Now you will apply all of that knowledge to deploy your Task API model as a production-ready Digital FTE.
+
+By the end of this lesson, you will have:
+
+A deployed Task API model serving structured JSON responses
+A FastAPI wrapper with proper error handling and documentation
+Monitoring and health checks for production reliability
+Documentation package for clients or marketplace listing
+
+This is Layer 4: Spec-Driven Integration. You will work from a specification and compose the skills and patterns you built throughout this chapter.
+
+The Deployment Specification​
+
+Before writing any code, define what you are building:
+
+# Task API Deployment Specification
+
+## Overview
+Deploy a fine-tuned 3B parameter model that processes natural language
+task management requests and returns structured JSON responses.
+
+## Functional Requirements
+FR-1: Accept natural language task requests via REST API
+FR-2: Return structured JSON for all task operations
+FR-3: Support streaming for real-time response display
+FR-4: Provide health check endpoint for monitoring
+FR-5: Document all endpoints with OpenAPI/Swagger
+
+## Non-Functional Requirements
+NFR-1: P99 latency under 500ms for typical requests
+NFR-2: Support 10 concurrent users on consumer hardware
+NFR-3: Graceful degradation when model is loading
+NFR-4: Structured logging for debugging and analytics
+
+## Success Criteria
+SC-1: API returns valid JSON for all documented task operations
+SC-2: Health check returns 200 when ready, 503 when loading
+SC-3: Latency meets NFR-1 for 99% of requests in load test
+SC-4: OpenAPI documentation is complete and accurate
+
+## Non-Goals
+- Authentication (defer to infrastructure layer)
+- Multi-model serving (single model deployment)
+- GPU cluster deployment (local/single-server only)
+
+Step 1: Prepare the Model​
+
+Ensure your fine-tuned model is ready for deployment.
+
+Verify GGUF File​
+# Check your model file exists
+ls -la ~/models/task-api/
+
+
+Output:
+
+-rw-r--r--  1 user  staff  4.1G Jan  1 10:00 task-api-q4_k_m.gguf
+-rw-r--r--  1 user  staff  1.2K Jan  1 10:00 Modelfile
+
+Create Production Modelfile​
+cat > ~/models/task-api/Modelfile << 'EOF'
+# Task API Production Configuration
+FROM ./task-api-q4_k_m.gguf
+
+# Optimized for structured output and low latency
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+PARAMETER num_ctx 2048
+PARAMETER num_predict 256
+PARAMETER repeat_penalty 1.1
+
+# Stop tokens
+PARAMETER stop "<|end|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "```"
+
+# Production system prompt
+SYSTEM """Task API v1.0 - Respond with JSON only.
+
+Actions: create_task, list_tasks, update_task, delete_task, complete_task
+
+Response format:
+{"action": "...", "params": {...}, "success": true}
+
+Error format:
+{"action": "error", "message": "...", "success": false}
+
+Never include text outside the JSON object."""
+
+# Chat template
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>"""
+EOF
+
+Register with Ollama​
+cd ~/models/task-api
+ollama create task-api-prod -f Modelfile
+ollama run task-api-prod "Create a task: Test production model"
+
+
+Output:
+
+{"action": "create_task", "params": {"title": "Test production model"}, "success": true}
+
+Step 2: Build the FastAPI Wrapper​
+
+Create a production-ready API wrapper around Ollama.
+
+Project Structure​
+mkdir -p ~/task-api-service/{app,tests}
+cd ~/task-api-service
+
+Create Requirements​
+cat > requirements.txt << 'EOF'
+fastapi==0.109.0
+uvicorn==0.27.0
+ollama==0.1.6
+pydantic==2.5.3
+python-json-logger==2.0.7
+httpx==0.26.0
+pytest==7.4.4
+pytest-asyncio==0.23.3
+EOF
+
+Create the Application​
+# app/main.py
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from typing import Optional, AsyncGenerator
+from contextlib import asynccontextmanager
+import ollama
+import json
+import logging
+import time
+from datetime import datetime
+
+# Configure structured logging
+from pythonjsonlogger import jsonlogger
+
+logger = logging.getLogger("task-api")
+handler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter(
+    '%(timestamp)s %(level)s %(name)s %(message)s'
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+
+# Global state
+class AppState:
+    model_name: str = "task-api-prod"
+    is_ready: bool = False
+    startup_time: datetime = None
+    request_count: int = 0
+
+
+state = AppState()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler."""
+    # Startup
+    state.startup_time = datetime.utcnow()
+    logger.info("Starting Task API service", extra={
+        "model": state.model_name,
+        "startup_time": state.startup_time.isoformat()
+    })
+
+    # Warm up the model
+    try:
+        ollama.chat(
+            model=state.model_name,
+            messages=[{"role": "user", "content": "ping"}]
+        )
+        state.is_ready = True
+        logger.info("Model loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        state.is_ready = False
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down Task API service")
+
+
+app = FastAPI(
+    title="Task API",
+    description="AI-powered task management API using fine-tuned LLM",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+# Request/Response Models
+class TaskRequest(BaseModel):
+    """Request to process a task command."""
+    command: str = Field(..., description="Natural language task command")
+    stream: bool = Field(default=False, description="Enable streaming response")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"command": "Create a task: Review PR #42 by Friday", "stream": False},
+                {"command": "List all high priority tasks", "stream": True}
+            ]
+        }
+    }
+
+
+class TaskResponse(BaseModel):
+    """Response from task command."""
+    action: str = Field(..., description="The action performed")
+    params: dict = Field(default_factory=dict, description="Action parameters")
+    success: bool = Field(..., description="Whether the action succeeded")
+    message: Optional[str] = Field(None, description="Error message if failed")
+    latency_ms: float = Field(..., description="Processing time in milliseconds")
+
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str
+    model: str
+    uptime_seconds: float
+    request_count: int
+    is_ready: bool
+
+
+# Endpoints
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Check service health and readiness."""
+    uptime = (datetime.utcnow() - state.startup_time).total_seconds() if state.startup_time else 0
+
+    if not state.is_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not ready"
+        )
+
+    return HealthResponse(
+        status="healthy",
+        model=state.model_name,
+        uptime_seconds=uptime,
+        request_count=state.request_count,
+        is_ready=state.is_ready
+    )
+
+
+@app.post("/task", response_model=TaskResponse)
+async def process_task(request: TaskRequest):
+    """Process a task command and return structured response."""
+    start_time = time.perf_counter()
+    state.request_count += 1
+
+    logger.info("Processing task request", extra={
+        "command": request.command[:100],
+        "stream": request.stream,
+        "request_id": state.request_count
+    })
+
+    if not state.is_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not ready"
+        )
+
+    try:
+        if request.stream:
+            return StreamingResponse(
+                stream_response(request.command),
+                media_type="text/event-stream"
+            )
+
+        # Non-streaming response
+        response = ollama.chat(
+            model=state.model_name,
+            messages=[{"role": "user", "content": request.command}]
+        )
+
+        content = response["message"]["content"]
+        latency = (time.perf_counter() - start_time) * 1000
+
+        # Parse JSON response
+        try:
+            parsed = json.loads(content)
+            return TaskResponse(
+                action=parsed.get("action", "unknown"),
+                params=parsed.get("params", {}),
+                success=parsed.get("success", True),
+                message=parsed.get("message"),
+                latency_ms=latency
+            )
+        except json.JSONDecodeError:
+            logger.warning("Model returned invalid JSON", extra={
+                "raw_response": content[:200]
+            })
+            return TaskResponse(
+                action="error",
+                params={},
+                success=False,
+                message="Model returned invalid JSON",
+                latency_ms=latency
+            )
+
+    except ollama.ResponseError as e:
+        logger.error(f"Ollama error: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+async def stream_response(command: str) -> AsyncGenerator[str, None]:
+    """Stream response tokens as server-sent events."""
+    try:
+        stream = ollama.chat(
+            model=state.model_name,
+            messages=[{"role": "user", "content": command}],
+            stream=True
+        )
+
+        for chunk in stream:
+            content = chunk["message"]["content"]
+            if content:
+                yield f"data: {json.dumps({'token': content})}\n\n"
+
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    except Exception as e:
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+
+# Metrics endpoint for monitoring
+@app.get("/metrics")
+async def get_metrics():
+    """Get service metrics for monitoring."""
+    return {
+        "request_count": state.request_count,
+        "model": state.model_name,
+        "is_ready": state.is_ready,
+        "uptime_seconds": (datetime.utcnow() - state.startup_time).total_seconds() if state.startup_time else 0
+    }
+
+Create Test Suite​
+# tests/test_api.py
+import pytest
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+
+def test_health_check():
+    """Test health endpoint returns valid response."""
+    response = client.get("/health")
+    # Note: May be 503 if model not loaded in test environment
+    assert response.status_code in [200, 503]
+
+
+def test_create_task():
+    """Test task creation."""
+    response = client.post(
+        "/task",
+        json={"command": "Create a task: Test task", "stream": False}
+    )
+
+    if response.status_code == 200:
+        data = response.json()
+        assert data["action"] == "create_task"
+        assert data["success"] is True
+        assert "latency_ms" in data
+
+
+def test_list_tasks():
+    """Test task listing."""
+    response = client.post(
+        "/task",
+        json={"command": "List all tasks", "stream": False}
+    )
+
+    if response.status_code == 200:
+        data = response.json()
+        assert data["action"] == "list_tasks"
+        assert data["success"] is True
+
+
+def test_invalid_empty_command():
+    """Test handling of empty command."""
+    response = client.post(
+        "/task",
+        json={"command": "", "stream": False}
+    )
+    # Should still process (model handles empty input)
+    assert response.status_code in [200, 422]
+
+Step 3: Run and Verify​
+Start the Service​
+cd ~/task-api-service
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+
+Output:
+
+INFO:     Started server process [12345]
+INFO:     Waiting for application startup.
+{"timestamp": "2024-01-01T12:00:00", "level": "INFO", "name": "task-api", "message": "Starting Task API service", "model": "task-api-prod"}
+{"timestamp": "2024-01-01T12:00:02", "level": "INFO", "name": "task-api", "message": "Model loaded successfully"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+
+Test the Endpoints​
+# Health check
+curl http://localhost:8000/health | jq
+
+# Create a task
+curl -X POST http://localhost:8000/task \
+  -H "Content-Type: application/json" \
+  -d '{"command": "Create a task: Review quarterly report by Friday", "stream": false}' | jq
+
+# List tasks
+curl -X POST http://localhost:8000/task \
+  -H "Content-Type: application/json" \
+  -d '{"command": "Show all high priority tasks", "stream": false}' | jq
+
+
+Output:
+
+{
+  "action": "create_task",
+  "params": {
+    "title": "Review quarterly report",
+    "due_date": "Friday",
+    "priority": "normal"
+  },
+  "success": true,
+  "message": null,
+  "latency_ms": 287.5
+}
+
+Access API Documentation​
+
+Open http://localhost:8000/docs for interactive Swagger documentation.
+
+Step 4: Package as Digital FTE​
+
+Transform your deployment into a sellable product.
+
+Create README for Clients​
+# Task API - Digital FTE
+
+## Overview
+AI-powered task management API that understands natural language commands
+and returns structured JSON for integration with your applications.
+
+## Quick Start
+
+### Prerequisites
+- Ollama installed (https://ollama.com)
+- Python 3.10+
+- 8GB RAM minimum
+
+### Installation
+1. Download the Task API model: `task-api-prod.gguf`
+2. Install dependencies: `pip install -r requirements.txt`
+3. Start the service: `uvicorn app.main:app --port 8000`
+
+## API Reference
+
+### POST /task
+Process a task management command.
+
+**Request:**
+```json
+{
+  "command": "Create a task: Review PR #42 by Friday",
+  "stream": false
+}
+
+
+Response:
+
+{
+  "action": "create_task",
+  "params": {"title": "Review PR #42", "due_date": "Friday"},
+  "success": true,
+  "latency_ms": 285.3
+}
+
+Supported Actions​
+Action	Example Command
+create_task	"Create a task: [description]"
+list_tasks	"List all tasks" or "Show high priority tasks"
+update_task	"Update task 5: change priority to high"
+delete_task	"Delete task 3"
+complete_task	"Mark task 2 as complete"
+Performance​
+P50 latency: ~250ms
+P99 latency: ~450ms
+Throughput: ~30 tokens/second on consumer GPU
+Support​
+
+Contact: support@example.com Documentation: https://docs.example.com/task-api
+
+
+### Create Docker Deployment
+
+```dockerfile
+# Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY app/ ./app/
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Run application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# docker-compose.yml
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  task-api:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=ollama:11434
+
+volumes:
+  ollama_data:
+
+Define Pricing Model​
+# Task API Pricing
+
+## Subscription Tiers
+
+### Starter - $99/month
+- Up to 10,000 requests/month
+- Standard latency (<500ms P99)
+- Email support
+- Single deployment
+
+### Professional - $299/month
+- Up to 100,000 requests/month
+- Priority latency (<300ms P99)
+- Priority support
+- Up to 3 deployments
+
+### Enterprise - Custom
+- Unlimited requests
+- Custom SLAs
+- Dedicated support
+- Unlimited deployments
+- Custom fine-tuning included
+
+## On-Premise License
+
+### Annual License - $5,000/year
+- Deploy on your infrastructure
+- Includes model weights
+- Quarterly updates
+- Email support
+
+### Perpetual License - $15,000 one-time
+- Permanent deployment rights
+- Model weights included
+- 1 year updates included
+- Priority support
+
+Step 5: Validate Your Skill​
+
+This capstone validates your model-serving skill. Review what you built:
+
+# Skill Validation Checklist
+
+## Export and Quantization (L01-L02)
+[x] Exported model to GGUF format
+[x] Selected appropriate quantization (Q4_K_M)
+[x] Verified model size and quality
+
+## Ollama Configuration (L03)
+[x] Created production Modelfile
+[x] Configured optimized parameters
+[x] Registered model with Ollama
+
+## Python Integration (L04)
+[x] Built FastAPI wrapper
+[x] Implemented error handling
+[x] Added streaming support
+
+## Performance (L05-L06)
+[x] Measured latency breakdown
+[x] Optimized for target SLA
+[x] Implemented caching strategy
+
+## Productization (L07)
+[x] Created API documentation
+[x] Built Docker deployment
+[x] Defined pricing model
+
+Reflect on Your Skill​
+
+Update your model-serving skill with the complete deployment pattern:
+
+## Complete Deployment Pattern
+
+### End-to-End Workflow
+1. Export: safetensors → GGUF with quantization
+2. Configure: Modelfile with production settings
+3. Register: ollama create <name> -f Modelfile
+4. Wrap: FastAPI with health checks and error handling
+5. Document: OpenAPI/Swagger for clients
+6. Package: Docker + deployment guides
+7. Price: Subscription or license model
+
+### Production Checklist
+[ ] Model tested with representative prompts
+[ ] Latency meets SLA targets
+[ ] Health check endpoint working
+[ ] Error handling covers all cases
+[ ] Logging structured for monitoring
+[ ] Documentation complete
+[ ] Deployment scripts tested
+
+### Monitoring Essentials
+- Health endpoint: /health
+- Metrics endpoint: /metrics
+- Structured JSON logging
+- Latency tracking per request
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Review Your Deployment​
+I just completed deploying my Task API model. Here is my setup:
+- Model: 3B Q4_K_M quantized
+- Server: FastAPI with Ollama backend
+- Metrics: P50=250ms, P99=450ms
+- Features: Streaming, health checks, structured logging
+
+Review my deployment and suggest:
+1. What did I do well?
+2. What could be improved?
+3. What should I add before going to production?
+4. How does this compare to industry standard practices?
+
+
+What you are learning: Deployment review. Getting external feedback on your architecture helps identify blind spots.
+
+Prompt 2: Plan Your Go-to-Market​
+I have a deployed Task API model I want to monetize. My situation:
+- Unique value: Fine-tuned for task management with 95% JSON accuracy
+- Target market: Small businesses using task management tools
+- Competition: Generic LLM APIs (OpenAI, Anthropic)
+- Resources: Solo developer, can handle ~10 customers initially
+
+Help me create a go-to-market plan:
+1. Who are my ideal first customers?
+2. How should I price relative to competition?
+3. What channels should I use to reach customers?
+4. What metrics should I track for product-market fit?
+
+
+What you are learning: Digital FTE productization. Technical deployment is only half the journey; monetization requires business strategy.
+
+Prompt 3: Scale Planning​
+My Task API is gaining traction:
+- Current: 50 requests/hour on Ollama + consumer GPU
+- Goal: Handle 5,000 requests/hour within 6 months
+
+Help me plan the scaling journey:
+1. When should I migrate from Ollama to vLLM?
+2. What infrastructure changes are needed at each scale point?
+3. How do costs scale with traffic?
+4. What can I do now to make scaling easier later?
+
+
+What you are learning: Growth planning. Successful Digital FTEs need architecture that scales with demand.
+
+Safety Note​
+
+When deploying LLM-powered APIs for external users, implement input validation and output filtering. Users may attempt to extract the system prompt, bypass JSON formatting, or cause the model to generate harmful content. Consider adding a content filter layer and rate limiting per user before accepting production traffic.

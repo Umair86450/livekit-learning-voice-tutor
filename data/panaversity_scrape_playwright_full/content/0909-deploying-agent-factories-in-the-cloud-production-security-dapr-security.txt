@@ -1,0 +1,486 @@
+Dapr Security: mTLS, API Tokens, and Component Scopes
+
+When you deploy Dapr sidecars alongside your Task API, traffic between sidecars is already encrypted with mTLS. This happens automatically—Dapr's Sentry service acts as a Certificate Authority, issuing short-lived certificates to each sidecar. But "automatically encrypted" is not the same as "production secure."
+
+In January 2024, a fintech company discovered their Dapr deployment had a critical gap: while sidecar-to-sidecar traffic was encrypted, any application in the cluster could access any Dapr component. Their Redis statestore—containing session tokens—was accessible from a compromised logging pod in a different namespace. The fix was component scopes: a single YAML field that took 30 seconds to add but prevented a potential breach.
+
+This lesson teaches you to verify the security Dapr provides automatically, then add the isolation controls it doesn't enable by default.
+
+Verify mTLS is Active​
+
+Before adding security controls, confirm Dapr's automatic protections are working. The Sentry service must be healthy and issuing certificates.
+
+Check Dapr System Health​
+dapr status -k
+
+
+Output:
+
+  NAME                   NAMESPACE    HEALTHY  STATUS   REPLICAS  VERSION  AGE  CREATED
+  dapr-sidecar-injector  dapr-system  True     Running  1         1.12.0   7d   2024-01-15 10:23:45
+  dapr-operator          dapr-system  True     Running  1         1.12.0   7d   2024-01-15 10:23:45
+  dapr-sentry            dapr-system  True     Running  1         1.12.0   7d   2024-01-15 10:23:45
+  dapr-placement-server  dapr-system  True     Running  1         1.12.0   7d   2024-01-15 10:23:45
+
+
+What to verify:
+
+Component	Status	Meaning
+dapr-sentry	Running	CA is healthy, can issue certificates
+dapr-sidecar-injector	Running	Sidecars will be injected into pods
+dapr-operator	Running	Component reconciliation works
+
+If dapr-sentry shows anything other than Running, mTLS certificates cannot be issued and sidecar communication fails.
+
+Verify Sentry Certificate​
+
+Check the root certificate that Sentry uses to sign sidecar certificates:
+
+kubectl get pods -n dapr-system -l app=dapr-sentry -o name | head -1 | \
+  xargs -I {} kubectl exec {} -n dapr-system -- \
+  openssl x509 -in /var/run/secrets/dapr.io/tls/ca.crt -noout -dates
+
+
+Output:
+
+notBefore=Jan 15 10:23:45 2024 GMT
+notAfter=Jan 15 10:23:45 2025 GMT
+
+
+What this tells you:
+
+notBefore: When the CA certificate became valid
+notAfter: When the CA certificate expires (plan rotation before this date)
+
+Sidecar certificates have a 24-hour TTL by default, but they depend on this root CA. If the root expires, all sidecars lose their trust anchor.
+
+Verify mTLS Between Sidecars​
+
+From inside a sidecar, verify certificates are being used:
+
+kubectl exec -n task-api deploy/task-api -c daprd -- \
+  ls /var/run/secrets/dapr.io/tls/
+
+
+Output:
+
+ca.crt
+cert.pem
+key.pem
+
+
+The presence of these files confirms:
+
+ca.crt: Root CA for validating other sidecars
+cert.pem: This sidecar's identity certificate
+key.pem: Private key for this certificate
+
+If these files are missing, mTLS is not configured—check your Dapr installation.
+
+Discovering mTLS Commands with AI​
+
+You've verified mTLS is working, but the commands you just ran aren't obvious. Let's see how AI collaboration helps you discover these verification techniques.
+
+Your Initial Request​
+
+You need to verify Dapr security but aren't sure what to check:
+
+I deployed Dapr on Kubernetes. How do I verify that mTLS is actually
+working between my sidecars?
+
+AI's Recommendation​
+
+AI suggests a verification approach you hadn't considered:
+
+"Beyond checking dapr-sentry status, you should verify three levels:
+
+System level: dapr status -k confirms Sentry is running
+Certificate level: Examine the CA certificate expiry in Sentry pods
+Runtime level: Check that sidecar pods have certificates mounted at /var/run/secrets/dapr.io/tls/
+
+For ongoing monitoring, I'd also suggest enabling the Dapr metrics endpoint and tracking certificate renewal events. Here's a command to check certificate days until expiry:
+
+kubectl exec -n dapr-system deploy/dapr-sentry -- \
+  openssl x509 -in /var/run/secrets/dapr.io/tls/ca.crt -noout -enddate | \
+  cut -d= -f2 | xargs -I {} date -d {} +%s | \
+  xargs -I {} bash -c 'echo $(( ({} - $(date +%s)) / 86400 )) days until expiry'
+
+
+This gives you a single number for monitoring dashboards."
+
+What Emerged​
+
+The AI suggested a monitoring approach—certificate expiry tracking—that you hadn't asked about but is critical for production. This is knowledge transfer: AI teaches you a pattern you didn't know existed.
+
+Configure Component Scopes​
+
+By default, any Dapr-enabled application can access any Dapr component. This violates least privilege—your Task API shouldn't be able to access another service's statestore.
+
+Understanding the Risk​
+
+Without scopes, your cluster has this access matrix:
+
+Application	statestore (redis)	pubsub (kafka)	secrets (vault)
+task-api	Yes	Yes	Yes
+auth-service	Yes	Yes	Yes
+logging-pod	Yes	Yes	Yes
+
+Any compromised pod with a Dapr sidecar can access all components.
+
+Add Scopes to Your Statestore​
+
+Update your Redis statestore component to restrict access:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: production
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis:6379
+  - name: redisPassword
+    secretKeyRef:
+      name: redis-secret
+      key: password
+  scopes:
+  - task-api  # Only task-api can access this component
+
+
+Output (after applying):
+
+kubectl apply -f statestore-scoped.yaml
+
+component.dapr.io/statestore configured
+
+Verify Scope Enforcement​
+
+Try to access the statestore from a different application:
+
+# From a pod with app-id: test-app (not in scopes list)
+curl http://localhost:3500/v1.0/state/statestore
+
+
+Output:
+
+{
+  "errorCode": "ERR_STATE_STORE_NOT_FOUND",
+  "message": "state store statestore is not found"
+}
+
+
+The component exists, but it's invisible to applications not in the scopes list. This is security through explicit allowlisting—the same pattern as NetworkPolicy default-deny.
+
+Scoped Access Matrix​
+
+After adding scopes, your access matrix becomes:
+
+Application	statestore	pubsub	secrets
+task-api	Yes	No	No
+auth-service	No	No	No
+logging-pod	No	No	No
+
+Each component should have a minimal scopes list.
+
+Refining Requirements with AI Collaboration​
+
+Your initial component scope configuration assumed production requirements. But development and production have different needs. Let's iterate with AI to handle both environments.
+
+Your Environment Concern​
+
+After configuring scopes, you realize a gap:
+
+My component scopes work for production, but in development I need
+multiple services to access the statestore for testing. I don't want
+to maintain two completely different component files.
+
+AI's Initial Suggestion​
+
+"You could use Helm values to template the scopes list:
+
+scopes:
+{{- range .Values.statestore.allowedApps }}
+- {{ . }}
+{{- end }}
+
+
+With values-dev.yaml:
+
+statestore:
+  allowedApps:
+    - task-api
+    - test-runner
+    - debug-tools
+
+
+And values-prod.yaml:
+
+statestore:
+  allowedApps:
+    - task-api
+
+
+This keeps one component template with environment-specific scope lists."
+
+Your Refinement​
+
+The Helm approach adds complexity you don't want yet. You push back:
+
+I'm not using Helm for Dapr components yet. Can I solve this with
+Kubernetes namespaces instead? Production and development are already
+in different namespaces.
+
+AI's Adapted Approach​
+
+"Good constraint. Dapr components are namespace-scoped, so you can create separate component resources in each namespace:
+
+production/statestore.yaml:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: production
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis.production:6379
+  scopes:
+  - task-api  # Strict: production only
+
+
+development/statestore.yaml:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: development
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis.development:6379
+  scopes:
+  - task-api
+  - test-runner
+  - debug-tools  # Relaxed: development convenience
+
+
+Each namespace has its own component with appropriate scopes. No templating, standard Kubernetes patterns."
+
+What Changed Through Iteration​
+
+Neither you nor AI started with the namespace-per-environment approach:
+
+You initially wanted one file for both environments
+AI suggested Helm templating based on common patterns
+You added the constraint (no Helm yet)
+Together you converged on namespace isolation—simpler and using tools already in place
+
+This is collaborative refinement: the final solution emerged from iterating together.
+
+API Token Authentication (Optional)​
+
+mTLS encrypts traffic and verifies sidecar identity. API tokens add another layer: authenticating individual requests between the Dapr sidecar and your application.
+
+When to Enable API Tokens​
+Scenario	mTLS Sufficient?	Add API Token?
+Sidecar-to-sidecar calls	Yes	Optional
+App-to-sidecar (localhost)	Usually	Yes if shared pod network
+Exposing Dapr API externally	No	Required
+
+For most Kubernetes deployments, mTLS between sidecars is sufficient. Add API tokens when:
+
+Multiple containers share a pod's network namespace
+You're exposing Dapr APIs outside the cluster
+Compliance requires request-level authentication
+Create API Token Secret​
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dapr-api-token
+  namespace: production
+type: Opaque
+data:
+  token: c3VwZXItc2VjcmV0LXRva2VuLTEyMw==  # base64 encoded
+
+Configure Sidecar to Require Token​
+
+Add annotation to your deployment:
+
+annotations:
+  dapr.io/enabled: "true"
+  dapr.io/app-id: "task-api"
+  dapr.io/app-port: "8000"
+  dapr.io/app-token-secret: "dapr-api-token"  # Require token from app
+
+
+Your application now must include the token in requests to its sidecar:
+
+import httpx
+
+headers = {"dapr-api-token": "super-secret-token-123"}
+response = httpx.get(
+    "http://localhost:3500/v1.0/state/statestore/mykey",
+    headers=headers
+)
+
+Verify Token Enforcement​
+
+Without the token:
+
+curl http://localhost:3500/v1.0/state/statestore/mykey
+
+
+Output:
+
+{
+  "errorCode": "ERR_UNAUTHORIZED",
+  "message": "invalid token"
+}
+
+
+With the token:
+
+curl -H "dapr-api-token: super-secret-token-123" \
+  http://localhost:3500/v1.0/state/statestore/mykey
+
+
+Output:
+
+{"value": "my-stored-data"}
+
+Restrict Sidecar Listen Addresses​
+
+By default, the Dapr sidecar listens on all interfaces (0.0.0.0). In a shared pod network, this could allow other containers to call your sidecar. Restrict to localhost:
+
+annotations:
+  dapr.io/enabled: "true"
+  dapr.io/app-id: "task-api"
+  dapr.io/sidecar-listen-addresses: "127.0.0.1"  # Localhost only
+
+
+This ensures only the main application container can reach the sidecar—defense in depth alongside component scopes.
+
+Complete Task API Dapr Security Configuration​
+
+Here's the full security configuration for your Task API deployment:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+      annotations:
+        # Dapr sidecar configuration
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "task-api"
+        dapr.io/app-port: "8000"
+
+        # Security hardening
+        dapr.io/sidecar-listen-addresses: "127.0.0.1"
+        dapr.io/enable-api-logging: "true"
+    spec:
+      serviceAccountName: task-api-sa
+      containers:
+      - name: task-api
+        image: ghcr.io/org/task-api:v1.0.0
+        ports:
+        - containerPort: 8000
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: production
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis:6379
+  - name: redisPassword
+    secretKeyRef:
+      name: redis-secret
+      key: password
+  scopes:
+  - task-api  # Isolated to Task API only
+
+
+Security checklist applied:
+
+ mTLS verified (Sentry healthy)
+ Component scopes restrict statestore to task-api only
+ Sidecar listens only on localhost
+ API logging enabled for audit trail
+ Secrets referenced via secretKeyRef (not plaintext)
+Reflect on Your Skill​
+
+Test your cloud-security skill against Dapr security patterns:
+
+Using my cloud-security skill, configure Dapr security for a payment
+processing service that:
+- Must have mTLS verification documented
+- Needs isolated access to a statestore and pubsub component
+- Requires API tokens because it shares pod network with a sidecar proxy
+
+
+Evaluation questions:
+
+Does your skill include mTLS verification commands?
+Does your skill configure component scopes correctly?
+Does your skill know when to recommend API tokens vs rely on mTLS alone?
+Does your skill differentiate development vs production requirements?
+
+If any answers are "no," update your skill with the patterns from this lesson.
+
+Try With AI​
+
+Test your understanding of Dapr security configuration and troubleshooting.
+
+Prompt 1:
+
+My Dapr sidecars are running but I see "certificate expired" errors in
+the logs. What verification commands should I run, and what's the fix?
+
+
+What you're learning: Certificate lifecycle management. The solution involves checking Sentry CA expiry with openssl x509 -enddate and running dapr mtls renew-certificate -k if needed. Notice if AI explains the difference between sidecar certificates (24h TTL, auto-renewed) and the root CA (1 year, manual renewal).
+
+Prompt 2:
+
+I have three services: order-api, inventory-api, and notification-service.
+Design Dapr component scopes so that:
+- order-api can access statestore and pubsub
+- inventory-api can access only statestore
+- notification-service can access only pubsub
+
+
+What you're learning: Least-privilege component design. Each component needs its own scopes array, not a single shared configuration. Notice if AI creates separate component definitions or tries to use a single component with multiple scopes.
+
+Prompt 3:
+
+When should I enable API tokens for Dapr in Kubernetes? My pods each
+have a single container and I'm using standard Kubernetes networking.
+
+
+What you're learning: Security threat modeling. For single-container pods with mTLS, API tokens add minimal value since localhost is already isolated. The scenario where tokens matter is multi-container pods or external Dapr API exposure. Notice if AI asks clarifying questions about your deployment model.
+
+SECURITY REMINDER
+
+Component scopes are your primary defense against lateral movement through Dapr. A compromised pod without Dapr components in its scope list cannot access state stores, pub/sub, or secrets through Dapr APIs—even if the attacker has full control of the pod. Always apply least-privilege scopes before deploying to production.

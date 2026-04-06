@@ -1,0 +1,670 @@
+Multi-App Workflows
+
+Your TaskProcessingWorkflow is working well. It validates tasks, assigns them, and sends notifications. But now you're scaling the team. The notification team has their own service with a dedicated deployment pipeline. The ML team wants to run inference activities on GPU-equipped nodes. The security team requires sensitive operations to run in isolated environments with different access controls.
+
+Suddenly, your single-app workflow needs to orchestrate activities across multiple services. You could duplicate code, but that creates maintenance nightmares. You could use pub/sub, but you'd lose the durable orchestration guarantees. What you need is workflow coordination that spans service boundaries while maintaining the same fault-tolerance you've built.
+
+This is the domain of multi-app workflows. Dapr enables a single workflow to coordinate activities and child workflows across different applications, namespaces, and even programming languages. Your orchestrator workflow maintains control and execution history while delegating work to specialized services. The workflow engine handles the complexity of cross-service communication, retries, and state management.
+
+In this lesson, you'll extend your TaskProcessingWorkflow to call activities on a notification-service. You'll learn the deployment requirements that make multi-app workflows possible, and you'll implement error handling for the scenarios where remote services are unavailable.
+
+Why Multi-App Workflows?​
+
+Consider a task management system with specialized services:
+
+task-orchestrator-service
+├── TaskProcessingWorkflow (orchestrates everything)
+│
+├── Call activity: validate_task (local)
+├── Call activity: assign_task (local)
+│
+├── Call activity: send_notification → notification-service
+│   └── Specialized for email, SMS, push notifications
+│
+├── Call activity: run_ml_inference → ml-inference-service
+│   └── GPU nodes, Python + PyTorch
+│
+└── Call child workflow: audit_workflow → audit-service
+    └── Compliance team's separate deployment
+
+
+Each service has its own:
+
+Deployment lifecycle: Teams deploy independently
+Infrastructure requirements: GPU nodes, high-memory, etc.
+Access controls: Different service accounts, secrets
+Technology stack: Python, Go, Java working together
+
+Multi-app workflows let you maintain orchestration logic in one place while distributing execution across your microservices architecture.
+
+Approach	Durability	Orchestration Control	Service Independence
+Direct HTTP calls	No	Workflow maintains	High
+Pub/sub events	At-least-once	Event-driven, loose	Very high
+Multi-app workflows	Yes (replay-safe)	Workflow maintains	High
+
+Multi-app workflows give you both durability AND service independence.
+
+Cross-App Activity Invocation​
+
+The key to multi-app workflows is the app_id parameter. When calling an activity, you specify which Dapr application should execute it.
+
+The Notification Service​
+
+First, create a separate notification service with its own activities:
+
+# notification-service/main.py
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from dapr.ext.workflow import WorkflowRuntime
+
+wfr = WorkflowRuntime()
+
+@wfr.activity(name="send_email")
+def send_email(ctx, notification: dict) -> dict:
+    """Activity that sends email notifications."""
+    recipient = notification["recipient"]
+    subject = notification["subject"]
+    body = notification["body"]
+
+    # In production: integrate with email service (SendGrid, SES, etc.)
+    print(f"Sending email to {recipient}: {subject}")
+
+    return {
+        "sent": True,
+        "recipient": recipient,
+        "channel": "email",
+        "sent_at": ctx.current_utc_datetime.isoformat()
+    }
+
+@wfr.activity(name="send_push")
+def send_push(ctx, notification: dict) -> dict:
+    """Activity that sends push notifications."""
+    user_id = notification["user_id"]
+    title = notification["title"]
+    message = notification["message"]
+
+    # In production: integrate with push service (Firebase, APNs, etc.)
+    print(f"Sending push to {user_id}: {title}")
+
+    return {
+        "sent": True,
+        "user_id": user_id,
+        "channel": "push",
+        "sent_at": ctx.current_utc_datetime.isoformat()
+    }
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    wfr.start()
+    yield
+    wfr.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "service": "notification-service"}
+
+
+Deploy this as a separate Dapr application with app-id: notification-service.
+
+Calling Remote Activities​
+
+Now, your orchestrator workflow can call these activities using app_id:
+
+# task-orchestrator-service/workflows.py
+import dapr.ext.workflow as wf
+from dataclasses import dataclass
+from datetime import timedelta
+
+@dataclass
+class TaskOrder:
+    task_id: str
+    title: str
+    assignee_email: str
+    assignee_user_id: str
+
+@dataclass
+class TaskResult:
+    task_id: str
+    status: str
+    notifications_sent: list
+
+@wf.workflow(name="task_processing_multi_app")
+def task_processing_multi_app(ctx: wf.DaprWorkflowContext, order: TaskOrder):
+    """Workflow that orchestrates activities across multiple services."""
+
+    # Step 1: Validate task (local activity)
+    validation = yield ctx.call_activity(
+        validate_task,
+        input={"task_id": order.task_id, "title": order.title}
+    )
+
+    if not validation["valid"]:
+        return TaskResult(order.task_id, "rejected", [])
+
+    # Step 2: Assign task (local activity)
+    assignment = yield ctx.call_activity(
+        assign_task,
+        input={"task_id": order.task_id, "assignee": order.assignee_email}
+    )
+
+    # Step 3: Send email notification (REMOTE activity on notification-service)
+    email_result = yield ctx.call_activity(
+        "send_email",  # Activity name on remote service
+        input={
+            "recipient": order.assignee_email,
+            "subject": f"Task Assigned: {order.title}",
+            "body": f"You have been assigned task {order.task_id}"
+        },
+        app_id="notification-service"  # Target Dapr app-id
+    )
+
+    # Step 4: Send push notification (REMOTE activity on notification-service)
+    push_result = yield ctx.call_activity(
+        "send_push",
+        input={
+            "user_id": order.assignee_user_id,
+            "title": "New Task Assignment",
+            "message": f"Task: {order.title}"
+        },
+        app_id="notification-service"
+    )
+
+    return TaskResult(
+        task_id=order.task_id,
+        status="completed",
+        notifications_sent=[email_result, push_result]
+    )
+
+# Local activities (defined in the same service)
+@wf.activity(name="validate_task")
+def validate_task(ctx, task: dict) -> dict:
+    return {"valid": True, "validated_at": ctx.current_utc_datetime.isoformat()}
+
+@wf.activity(name="assign_task")
+def assign_task(ctx, task: dict) -> dict:
+    return {"assigned": True, "assignee": task["assignee"]}
+
+
+Output when workflow runs:
+
+# On task-orchestrator-service:
+Starting workflow task_processing_multi_app for task-123
+Calling local activity: validate_task
+Calling local activity: assign_task
+Calling remote activity: send_email on notification-service
+Calling remote activity: send_push on notification-service
+Workflow completed: {"task_id": "task-123", "status": "completed", "notifications_sent": [...]}
+
+# On notification-service (separate logs):
+Sending email to alice@example.com: Task Assigned: Review PR
+Sending push to user-alice: New Task Assignment
+
+
+The orchestrator workflow maintains the execution history. The notification-service has no idea it's being called from a workflow; it just executes activities.
+
+Cross-App Child Workflows​
+
+For more complex scenarios, you can invoke entire workflows on remote services:
+
+@wf.workflow(name="task_with_audit")
+def task_with_audit(ctx: wf.DaprWorkflowContext, order: TaskOrder):
+    """Workflow that includes a child workflow on a different service."""
+
+    # Process task locally
+    yield ctx.call_activity(validate_task, input=order)
+    yield ctx.call_activity(assign_task, input=order)
+
+    # Send notifications via remote activities
+    yield ctx.call_activity(
+        "send_email",
+        input={"recipient": order.assignee_email, ...},
+        app_id="notification-service"
+    )
+
+    # Run audit workflow on audit-service (REMOTE child workflow)
+    audit_result = yield ctx.call_child_workflow(
+        workflow="compliance_audit_workflow",
+        input={
+            "task_id": order.task_id,
+            "action": "task_assigned",
+            "actor": order.assignee_email,
+            "timestamp": ctx.current_utc_datetime.isoformat()
+        },
+        app_id="audit-service",  # Remote app runs the child workflow
+        instance_id=f"audit-{order.task_id}"
+    )
+
+    return {
+        "task_id": order.task_id,
+        "status": "completed",
+        "audit_status": audit_result["status"]
+    }
+
+
+On the audit-service, you define the child workflow:
+
+# audit-service/workflows.py
+@wf.workflow(name="compliance_audit_workflow")
+def compliance_audit_workflow(ctx: wf.DaprWorkflowContext, audit_data: dict):
+    """Child workflow that runs on audit-service."""
+
+    # Log to compliance database
+    yield ctx.call_activity(log_audit_event, input=audit_data)
+
+    # Check compliance rules
+    compliance_check = yield ctx.call_activity(
+        check_compliance_rules,
+        input=audit_data
+    )
+
+    if not compliance_check["compliant"]:
+        yield ctx.call_activity(
+            raise_compliance_alert,
+            input={"task_id": audit_data["task_id"], "violations": compliance_check["violations"]}
+        )
+
+    return {"status": "audited", "compliant": compliance_check["compliant"]}
+
+
+Workflow execution flow:
+
+task-orchestrator-service (parent workflow)
+├── validate_task (local)
+├── assign_task (local)
+├── send_email (notification-service)
+└── compliance_audit_workflow (audit-service) → child workflow
+    ├── log_audit_event (local to audit-service)
+    ├── check_compliance_rules (local to audit-service)
+    └── raise_compliance_alert (local to audit-service)
+
+
+The parent workflow's execution history includes the child workflow invocation. If the parent crashes and replays, the child workflow result is already recorded; it won't re-execute.
+
+Deployment Requirements​
+
+Multi-app workflows have strict requirements. Violating them causes subtle, hard-to-debug failures.
+
+Requirement 1: Same Namespace​
+
+All participating applications must be in the same Kubernetes namespace:
+
+# CORRECT: Both apps in 'default' namespace
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-orchestrator
+  namespace: default  # Same namespace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: default  # Same namespace
+
+# WRONG: Different namespaces
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-orchestrator
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: notifications  # Different namespace - WILL FAIL
+
+
+Why? Dapr's placement service manages actor and workflow state within namespace boundaries. Cross-namespace workflow calls are not supported.
+
+Requirement 2: Shared State Store​
+
+All apps must use the same workflow state store:
+
+# components/workflow-statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: default  # Applied to namespace
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis-master.default.svc.cluster.local:6379
+    - name: actorStateStore
+      value: "true"  # Required for workflows (built on actors)
+
+
+Both task-orchestrator and notification-service must see this same component. The workflow engine uses this store for execution history and activity results.
+
+Verification:
+
+# Check both apps see the state store
+kubectl exec -it task-orchestrator-pod -- curl http://localhost:3500/v1.0/metadata | jq '.components[] | select(.name=="statestore")'
+kubectl exec -it notification-service-pod -- curl http://localhost:3500/v1.0/metadata | jq '.components[] | select(.name=="statestore")'
+
+
+Both should return the same state store configuration.
+
+Requirement 3: Activity/Workflow Must Be Registered​
+
+The target app must have the activity or workflow registered. If you call send_email on notification-service but the notification-service doesn't have that activity defined, you'll get an immediate error (not a retry).
+
+Common mistake:
+
+# On task-orchestrator
+yield ctx.call_activity(
+    "send_notification",  # Typo: activity is named "send_email"
+    input={...},
+    app_id="notification-service"
+)
+
+
+Error:
+
+WorkflowTaskError: Activity 'send_notification' not found on app 'notification-service'
+
+
+Debug with:
+
+# List registered activities on notification-service
+curl http://localhost:3500/v1.0/metadata | jq '.actorRuntime.activeActors'
+
+Error Handling for Cross-Service Failures​
+
+When activities run on remote services, new failure modes emerge:
+
+Failure Mode	Cause	Dapr Behavior
+Service unavailable	Pod crashed, scaling to zero	Retry with backoff
+Activity not found	Typo, missing registration	Immediate error
+Network partition	Cluster issues	Retry with backoff
+Activity timeout	Slow operation	Retry or fail based on policy
+Retry Policies for Remote Activities​
+
+Configure retry policies for cross-service calls:
+
+from datetime import timedelta
+import dapr.ext.workflow as wf
+
+@wf.workflow(name="resilient_task_processing")
+def resilient_task_processing(ctx: wf.DaprWorkflowContext, order: TaskOrder):
+    """Workflow with retry policies for remote activities."""
+
+    # Local activities (lower retry needs)
+    yield ctx.call_activity(validate_task, input=order)
+
+    # Remote activity with explicit retry policy
+    try:
+        email_result = yield ctx.call_activity(
+            "send_email",
+            input={
+                "recipient": order.assignee_email,
+                "subject": f"Task Assigned: {order.title}",
+                "body": f"Task {order.task_id} assigned to you"
+            },
+            app_id="notification-service",
+            retry_policy=wf.RetryPolicy(
+                max_attempts=5,
+                initial_interval=timedelta(seconds=1),
+                backoff_coefficient=2.0,  # Exponential backoff
+                max_interval=timedelta(seconds=30)
+            )
+        )
+    except Exception as e:
+        # Fallback: Log failure and continue without notification
+        yield ctx.call_activity(
+            log_notification_failure,
+            input={"task_id": order.task_id, "error": str(e)}
+        )
+        email_result = {"sent": False, "error": str(e)}
+
+    return TaskResult(
+        task_id=order.task_id,
+        status="completed",
+        notifications_sent=[email_result]
+    )
+
+
+Retry behavior:
+
+Attempt 1: Call send_email on notification-service → Service unavailable
+Wait 1 second
+Attempt 2: Call send_email on notification-service → Service unavailable
+Wait 2 seconds (1 * 2.0 backoff)
+Attempt 3: Call send_email on notification-service → Service unavailable
+Wait 4 seconds
+Attempt 4: Call send_email on notification-service → Service unavailable
+Wait 8 seconds
+Attempt 5: Call send_email on notification-service → Success
+
+Handling Permanent Failures​
+
+Some failures shouldn't be retried. Use error handling for graceful degradation:
+
+@wf.workflow(name="task_with_fallback")
+def task_with_fallback(ctx: wf.DaprWorkflowContext, order: TaskOrder):
+    """Workflow that degrades gracefully when remote services fail."""
+
+    # Core task processing (must succeed)
+    yield ctx.call_activity(validate_task, input=order)
+    yield ctx.call_activity(assign_task, input=order)
+
+    # Notifications are best-effort
+    notification_results = []
+
+    # Try email (primary)
+    email_sent = yield attempt_notification(
+        ctx, "send_email",
+        {"recipient": order.assignee_email, "subject": "Task Assigned", "body": "..."},
+        "notification-service"
+    )
+    notification_results.append({"channel": "email", "sent": email_sent})
+
+    # Try push (secondary)
+    push_sent = yield attempt_notification(
+        ctx, "send_push",
+        {"user_id": order.assignee_user_id, "title": "New Task", "message": "..."},
+        "notification-service"
+    )
+    notification_results.append({"channel": "push", "sent": push_sent})
+
+    # Task succeeds even if notifications fail
+    return TaskResult(
+        task_id=order.task_id,
+        status="completed",
+        notifications_sent=notification_results
+    )
+
+def attempt_notification(ctx, activity_name, input_data, app_id):
+    """Helper that attempts notification with fallback."""
+    try:
+        yield ctx.call_activity(
+            activity_name,
+            input=input_data,
+            app_id=app_id,
+            retry_policy=wf.RetryPolicy(max_attempts=3, initial_interval=timedelta(seconds=1))
+        )
+        return True
+    except Exception:
+        return False
+
+Multi-App Workflow Architecture Patterns​
+Pattern 1: Centralized Orchestrator​
+
+One service owns all orchestration logic:
+
+task-orchestrator (owns workflows)
+├── workflow: task_processing
+├── workflow: bulk_task_processing
+├── workflow: task_escalation
+│
+├── notification-service (activities only)
+├── ml-service (activities only)
+└── audit-service (activities only)
+
+
+Pros: Clear ownership, simple debugging Cons: Orchestrator becomes bottleneck
+
+Pattern 2: Domain-Specific Workflows​
+
+Each domain owns its workflows:
+
+task-service
+├── workflow: task_processing
+├── activity: validate_task
+└── activity: assign_task
+
+notification-service
+├── workflow: notification_campaign
+├── activity: send_email
+└── activity: send_push
+
+audit-service
+├── workflow: compliance_audit
+├── activity: log_event
+└── activity: check_rules
+
+
+Cross-service coordination happens through child workflows:
+
+# task-service calls notification-service's workflow
+yield ctx.call_child_workflow(
+    workflow="notification_campaign",
+    input={"task_id": order.task_id, "channels": ["email", "push"]},
+    app_id="notification-service"
+)
+
+
+Pros: Team autonomy, independent deployments Cons: Distributed debugging is harder
+
+Pattern 3: Gateway Orchestrator​
+
+Edge service orchestrates multiple backends:
+
+api-gateway (orchestrates user requests)
+├── workflow: process_user_request
+│
+├── user-service (activities: get_user, update_user)
+├── task-service (activities: create_task, get_task)
+├── notification-service (activities: send_notification)
+└── billing-service (activities: charge_user)
+
+
+Pros: Single entry point, request correlation Cons: Gateway complexity
+
+Reflect on Your Skill​
+
+Your dapr-deployment skill should now include multi-app workflow patterns. Test it:
+
+Test Your Skill​
+Using my dapr-deployment skill, design a multi-app workflow architecture.
+
+I have three services:
+- order-service: Creates and manages orders
+- inventory-service: Manages stock levels
+- shipping-service: Handles delivery
+
+I need a workflow on order-service that:
+1. Validates the order locally
+2. Calls reserve_inventory activity on inventory-service
+3. Calls schedule_delivery activity on shipping-service
+4. If shipping fails, calls release_inventory on inventory-service (compensation)
+
+Show me the workflow code and the deployment requirements.
+
+
+Does your skill produce:
+
+Workflow code with app_id parameters for cross-service calls?
+Saga-style compensation for cross-service failures?
+Deployment YAML ensuring same namespace and shared state store?
+Identify Gaps​
+
+Ask yourself:
+
+Can my skill explain why multi-app workflows need same namespace?
+Does it know to configure actorStateStore: "true" for workflow state?
+Can it design retry policies appropriate for cross-service calls?
+Improve Your Skill​
+
+If gaps exist:
+
+My dapr-deployment skill needs better multi-app workflow coverage. Update it to include:
+- The three requirements for multi-app workflows (namespace, state store, registration)
+- Cross-app activity invocation syntax with app_id parameter
+- Retry policy patterns for remote service calls
+- Saga compensation patterns for cross-service transactions
+
+Try With AI​
+
+Open your AI companion and explore multi-app workflow scenarios.
+
+Prompt 1: Design Cross-Service Orchestration​
+Help me design a multi-app workflow for an e-commerce order fulfillment system.
+
+I have these services:
+- order-api: Receives customer orders (orchestrator)
+- payment-service: Processes payments
+- inventory-service: Manages warehouse stock
+- shipping-service: Schedules deliveries
+- notification-service: Sends customer updates
+
+The workflow should:
+1. Validate the order
+2. Reserve inventory
+3. Process payment
+4. Schedule shipping
+5. Send confirmation email
+
+If any step fails after inventory is reserved, it needs compensation.
+
+Show me:
+- The workflow code with cross-app activity calls
+- Retry policies for each cross-service call
+- Compensation logic for failures
+- Deployment requirements (namespace, state store)
+
+
+What you're learning: How to design production-grade multi-app workflows. The AI helps you map business requirements to cross-service orchestration with proper failure handling.
+
+Prompt 2: Debug Multi-App Workflow Failures​
+My multi-app workflow is failing with this error:
+"Activity 'process_payment' not found on app 'payment-service'"
+
+But I know the activity is defined in payment-service. Walk me through debugging:
+
+1. How do I verify the activity is registered?
+2. What namespace/state store issues could cause this?
+3. How do I check both apps see the same components?
+4. What logs should I examine on both services?
+
+Give me specific kubectl and curl commands.
+
+
+What you're learning: Systematic debugging of distributed workflow failures. The AI guides you through the diagnostic workflow specific to multi-app scenarios.
+
+Prompt 3: Scale Multi-App Workflows​
+My TaskProcessingWorkflow calls activities on notification-service. Under load,
+notification-service is overwhelmed. I'm seeing:
+- High retry counts
+- Activity timeouts
+- Workflow completion times increasing
+
+How should I:
+1. Configure retry policies to back off appropriately?
+2. Add circuit breaker behavior for overwhelmed services?
+3. Implement bulkhead pattern to limit concurrent cross-service calls?
+4. Monitor cross-app workflow health in Prometheus?
+
+Show me configuration and code for each approach.
+
+
+What you're learning: Scaling patterns for distributed workflows. The AI helps you apply resilience patterns to multi-app orchestration.
+
+Safety Note​
+
+Multi-app workflows create tight coupling between services. If the orchestrator service and the activity service use different Dapr or SDK versions, you may encounter serialization incompatibilities. Before upgrading any participating service, test the full workflow end-to-end in a staging environment. Consider implementing feature flags to gradually roll out changes to multi-app workflow code.

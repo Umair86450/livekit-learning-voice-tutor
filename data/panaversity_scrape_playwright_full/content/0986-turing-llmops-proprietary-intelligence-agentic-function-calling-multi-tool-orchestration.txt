@@ -1,0 +1,534 @@
+Multi-Tool Orchestration Training
+
+Your model calls tools correctly—one at a time. But real agent workflows require something harder: calling multiple tools in sequence, passing results between them, and sometimes executing parallel calls when tasks are independent.
+
+A user says "Create a high-priority task to review the Q4 budget, then add a subtask for each department." Your single-tool-trained model might create the parent task perfectly. But then it stops, waiting for another prompt, not understanding it should continue with subtasks using the parent task's ID.
+
+This lesson teaches you to train models that orchestrate multi-tool workflows—planning chains, handling dependencies, and knowing when to call tools in parallel versus sequence.
+
+The Multi-Tool Gap​
+Why Single-Tool Training Falls Short​
+
+Consider training data that looks like this:
+
+{
+  "messages": [
+    {"role": "user", "content": "Create a task called 'Review budget'"},
+    {"role": "assistant", "tool_calls": [
+      {"function": {"name": "create_task", "arguments": "{\"title\": \"Review budget\"}"}}
+    ]}
+  ]
+}
+
+
+The model learns: user requests task → call create_task. But it never learns:
+
+What to do after the tool returns a result
+How to use that result in a subsequent call
+When a single request requires multiple tools
+Real-World Orchestration Patterns​
+Pattern	Example Request	Required Behavior
+Sequential	"Create a project and add three tasks to it"	create_project → use ID → create_task x3
+Parallel	"What tasks are due today and what's my schedule?"	list_tasks AND get_calendar (independent)
+Conditional	"If I have meetings tomorrow, create a prep task"	get_calendar → check result → maybe create_task
+Loop	"Add a subtask for each team member"	list_team → for each → create_subtask
+
+Training for these patterns requires multi-turn examples with tool results.
+
+Sequential Chaining: The Core Pattern​
+Anatomy of a Sequential Chain​
+
+The model must understand that tool results become inputs for subsequent calls:
+
+User Request: "Create a project called Q4 Planning and add a budget review task to it"
+
+Step 1: Parse intent → Two operations, dependent
+Step 2: Call create_project("Q4 Planning")
+Step 3: Receive result: {"project_id": "proj_789", "name": "Q4 Planning"}
+Step 4: Call create_task(project_id="proj_789", title="Budget review")
+Step 5: Receive result: {"task_id": "task_123", ...}
+Step 6: Generate final response
+
+Training Data for Sequential Chains​
+
+Training examples must include the full conversation with tool results:
+
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a task assistant. Available tools: create_project, create_task, list_tasks..."
+    },
+    {
+      "role": "user",
+      "content": "Create a project called Q4 Planning and add a budget review task to it"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {
+            "name": "create_project",
+            "arguments": "{\"name\": \"Q4 Planning\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_001",
+      "content": "{\"project_id\": \"proj_789\", \"name\": \"Q4 Planning\", \"created_at\": \"2024-01-15T10:00:00Z\"}"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_002",
+          "type": "function",
+          "function": {
+            "name": "create_task",
+            "arguments": "{\"project_id\": \"proj_789\", \"title\": \"Budget review\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_002",
+      "content": "{\"task_id\": \"task_456\", \"title\": \"Budget review\", \"project_id\": \"proj_789\"}"
+    },
+    {
+      "role": "assistant",
+      "content": "I've created the Q4 Planning project and added a budget review task to it."
+    }
+  ]
+}
+
+
+Key insight: The model learns to extract proj_789 from the first tool result and use it in the second call.
+
+Generating Sequential Training Data​
+
+Here's a pattern for creating sequential chain examples:
+
+def generate_sequential_example(parent_op: str, child_op: str, user_intent: str):
+    """Generate a two-step sequential chain training example."""
+    # Step 1: Parent operation
+    parent_args = extract_parent_args(user_intent)
+    parent_result = simulate_tool_result(parent_op, parent_args)
+
+    # Step 2: Child operation using parent's result
+    child_args = extract_child_args(user_intent, parent_result)
+    child_result = simulate_tool_result(child_op, child_args)
+
+    return {
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT_WITH_TOOLS},
+            {"role": "user", "content": user_intent},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [format_tool_call("call_001", parent_op, parent_args)]
+            },
+            {"role": "tool", "tool_call_id": "call_001", "content": json.dumps(parent_result)},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [format_tool_call("call_002", child_op, child_args)]
+            },
+            {"role": "tool", "tool_call_id": "call_002", "content": json.dumps(child_result)},
+            {"role": "assistant", "content": generate_summary(parent_result, child_result)}
+        ]
+    }
+
+# Example usage
+example = generate_sequential_example(
+    parent_op="create_project",
+    child_op="create_task",
+    user_intent="Create a project called Q4 Planning and add a budget task"
+)
+
+
+Output:
+
+{
+  "messages": [
+    {"role": "system", "content": "You are a task assistant..."},
+    {"role": "user", "content": "Create a project called Q4 Planning and add a budget task"},
+    {"role": "assistant", "content": null, "tool_calls": [...]},
+    {"role": "tool", "tool_call_id": "call_001", "content": "{\"project_id\": \"proj_001\", ...}"},
+    {"role": "assistant", "content": null, "tool_calls": [...]},
+    {"role": "tool", "tool_call_id": "call_002", "content": "{\"task_id\": \"task_001\", ...}"},
+    {"role": "assistant", "content": "Created project Q4 Planning with a budget task."}
+  ]
+}
+
+Parallel Tool Calls: Independent Operations​
+When Tools Are Independent​
+
+Some requests contain multiple independent operations:
+
+User: "What tasks are due today? Also, what's on my calendar?"
+
+
+These don't depend on each other—they can execute in parallel:
+
+{
+  "role": "assistant",
+  "content": null,
+  "tool_calls": [
+    {
+      "id": "call_001",
+      "type": "function",
+      "function": {"name": "list_tasks", "arguments": "{\"due_date\": \"today\"}"}
+    },
+    {
+      "id": "call_002",
+      "type": "function",
+      "function": {"name": "get_calendar", "arguments": "{\"date\": \"today\"}"}
+    }
+  ]
+}
+
+Training Data for Parallel Calls​
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a productivity assistant with access to tasks and calendar..."
+    },
+    {
+      "role": "user",
+      "content": "What tasks are due today and what meetings do I have?"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {"name": "list_tasks", "arguments": "{\"due_date\": \"2024-01-15\"}"}
+        },
+        {
+          "id": "call_002",
+          "type": "function",
+          "function": {"name": "get_calendar", "arguments": "{\"date\": \"2024-01-15\"}"}
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_001",
+      "content": "[{\"title\": \"Review budget\", \"due\": \"2024-01-15\"}]"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_002",
+      "content": "[{\"title\": \"Team standup\", \"time\": \"09:00\"}, {\"title\": \"1:1 with Sarah\", \"time\": \"14:00\"}]"
+    },
+    {
+      "role": "assistant",
+      "content": "Today you have one task due: Review budget. You also have two meetings: Team standup at 9 AM and a 1:1 with Sarah at 2 PM."
+    }
+  ]
+}
+
+
+Key insight: The model learns to issue multiple tool_calls in a single response when operations are independent.
+
+Mixed Patterns: Real-World Complexity​
+
+Real requests often combine patterns:
+
+User: "Check my tasks for this week, and for each high-priority one, add a reminder
+for tomorrow morning"
+
+
+This requires:
+
+list_tasks (initial call)
+Analyze results (find high-priority)
+create_reminder x N (one per high-priority task)
+Training Data Structure​
+{
+  "messages": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "Check my tasks for this week, and for each high-priority one, add a reminder for tomorrow morning"},
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {"id": "call_001", "function": {"name": "list_tasks", "arguments": "{\"due_before\": \"2024-01-21\"}"}}
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_001",
+      "content": "[{\"id\": \"t1\", \"title\": \"Budget review\", \"priority\": \"high\"}, {\"id\": \"t2\", \"title\": \"Email cleanup\", \"priority\": \"low\"}, {\"id\": \"t3\", \"title\": \"Client call prep\", \"priority\": \"high\"}]"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {"id": "call_002", "function": {"name": "create_reminder", "arguments": "{\"task_id\": \"t1\", \"remind_at\": \"2024-01-16T09:00:00Z\"}"}},
+        {"id": "call_003", "function": {"name": "create_reminder", "arguments": "{\"task_id\": \"t3\", \"remind_at\": \"2024-01-16T09:00:00Z\"}"}}
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_002",
+      "content": "{\"reminder_id\": \"r1\", \"task_id\": \"t1\"}"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_003",
+      "content": "{\"reminder_id\": \"r2\", \"task_id\": \"t3\"}"
+    },
+    {
+      "role": "assistant",
+      "content": "You have 3 tasks this week. I've added tomorrow morning reminders for the 2 high-priority ones: Budget review and Client call prep."
+    }
+  ]
+}
+
+
+Patterns demonstrated:
+
+Initial query returns list
+Model filters for high-priority (reasoning over results)
+Parallel tool calls for each matching task
+Summary synthesizes all results
+Training Data Requirements​
+Distribution for Multi-Tool Capability​
+Example Type	Proportion	Purpose
+Single tool calls	40%	Baseline accuracy
+Two-tool sequential	25%	Basic chaining
+Two-tool parallel	15%	Independence recognition
+Three+ tool chains	10%	Complex orchestration
+Mixed patterns	10%	Real-world complexity
+Minimum Examples for Each Pattern​
+Pattern	Minimum Examples	Reasoning
+Sequential 2-step	100+	Core skill, needs variety
+Sequential 3+ step	50+	Extends 2-step learning
+Parallel 2-call	75+	Different skill than sequential
+Mixed patterns	50+	Integration of skills
+Quality Signals​
+Quality Marker	What to Check
+ID consistency	Results IDs match subsequent call arguments
+Dependency accuracy	Child calls use correct parent result fields
+Pattern correctness	Parallel calls are truly independent
+Result synthesis	Final response correctly summarizes all operations
+Generating Multi-Tool Training Data​
+Template-Based Generation​
+class MultiToolGenerator:
+    """Generate multi-tool training examples from templates."""
+
+    def __init__(self, tools: list[dict], faker):
+        self.tools = {t["function"]["name"]: t for t in tools}
+        self.faker = faker
+
+    def generate_sequential(self, chain: list[tuple[str, str]]) -> dict:
+        """Generate sequential chain from [(tool, dep_field), ...]."""
+        messages = [{"role": "system", "content": self.system_prompt}]
+
+        # Generate user intent from chain
+        user_intent = self.synthesize_intent(chain)
+        messages.append({"role": "user", "content": user_intent})
+
+        prev_result = {}
+        for i, (tool_name, dep_field) in enumerate(chain):
+            # Build arguments (may reference prev_result)
+            args = self.build_args(tool_name, prev_result, dep_field)
+
+            # Add assistant tool call
+            call_id = f"call_{i:03d}"
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [self.format_call(call_id, tool_name, args)]
+            })
+
+            # Simulate and add tool result
+            result = self.simulate_result(tool_name, args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps(result)
+            })
+            prev_result = result
+
+        # Add final summary
+        messages.append({
+            "role": "assistant",
+            "content": self.generate_summary(chain, messages)
+        })
+
+        return {"messages": messages}
+
+    def generate_parallel(self, tools: list[str]) -> dict:
+        """Generate parallel calls for independent tools."""
+        messages = [{"role": "system", "content": self.system_prompt}]
+
+        # User intent for multiple independent queries
+        user_intent = self.synthesize_parallel_intent(tools)
+        messages.append({"role": "user", "content": user_intent})
+
+        # Single assistant message with multiple tool_calls
+        tool_calls = []
+        for i, tool_name in enumerate(tools):
+            args = self.build_args(tool_name, {}, None)
+            tool_calls.append(self.format_call(f"call_{i:03d}", tool_name, args))
+
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls
+        })
+
+        # Add all tool results
+        for i, tool_name in enumerate(tools):
+            result = self.simulate_result(tool_name, {})
+            messages.append({
+                "role": "tool",
+                "tool_call_id": f"call_{i:03d}",
+                "content": json.dumps(result)
+            })
+
+        messages.append({
+            "role": "assistant",
+            "content": self.generate_parallel_summary(tools, messages)
+        })
+
+        return {"messages": messages}
+
+# Usage
+generator = MultiToolGenerator(TASK_API_TOOLS, faker)
+
+# Sequential: create_project -> create_task (using project_id)
+seq_example = generator.generate_sequential([
+    ("create_project", None),
+    ("create_task", "project_id")
+])
+
+# Parallel: list_tasks AND get_calendar
+par_example = generator.generate_parallel(["list_tasks", "get_calendar"])
+
+
+Output:
+
+Generated 150 sequential examples
+Generated 75 parallel examples
+Total multi-tool examples: 225
+
+Evaluation Metrics for Multi-Tool Models​
+Beyond Single-Call Accuracy​
+Metric	What It Measures	Target
+Chain completion rate	% of chains completed correctly	>90%
+Dependency accuracy	% of dependent calls using correct IDs	>95%
+Parallel recognition	% of parallel opportunities taken	>85%
+Over-serialization	% of parallel ops incorrectly serialized	<10%
+Synthesis quality	Final response covers all operations	>90%
+Testing Multi-Tool Capability​
+def evaluate_multi_tool(model, test_cases: list[dict]) -> dict:
+    """Evaluate model on multi-tool scenarios."""
+    results = {
+        "chain_complete": 0,
+        "dep_correct": 0,
+        "parallel_used": 0,
+        "total": len(test_cases)
+    }
+
+    for case in test_cases:
+        # Run model on test case
+        response = run_inference(model, case["input"])
+
+        # Check chain completion
+        if all_expected_tools_called(response, case["expected_tools"]):
+            results["chain_complete"] += 1
+
+        # Check dependencies
+        if dependencies_correct(response, case["dependencies"]):
+            results["dep_correct"] += 1
+
+        # Check parallel usage
+        if case["can_parallel"] and used_parallel_calls(response):
+            results["parallel_used"] += 1
+
+    return {
+        "chain_rate": results["chain_complete"] / results["total"],
+        "dep_rate": results["dep_correct"] / results["total"],
+        "parallel_rate": results["parallel_used"] / sum(1 for c in test_cases if c["can_parallel"])
+    }
+
+
+Output:
+
+Chain completion rate: 92.3%
+Dependency accuracy: 96.1%
+Parallel recognition: 87.5%
+
+Reflect on Your Skill​
+
+Update your agentic-tuning skill with orchestration patterns:
+
+Add to "Training Data Patterns": Sequential chaining, parallel calls, mixed patterns
+Add to "Data Generation": Template-based multi-tool example generator
+Add to "Evaluation Metrics": Chain completion rate, dependency accuracy
+Add to "Common Mistakes": "Training only on single-tool examples"
+Try With AI​
+Prompt 1: Design a Chain Pattern​
+I need to train my model on this workflow:
+
+"Book a meeting room for next Tuesday and invite the marketing team"
+
+This requires:
+1. find_available_rooms (for next Tuesday)
+2. book_room (using room_id from step 1)
+3. get_team_members (for marketing team)
+4. send_invites (using room booking and team member list)
+
+Help me design the training example:
+1. Which calls can be parallel vs must be sequential?
+2. What dependencies exist between calls?
+3. Write the full training example JSON
+
+
+What you're learning: Dependency analysis—breaking complex workflows into optimal call patterns.
+
+Prompt 2: Debug Orchestration Failure​
+My fine-tuned model handles single tools well (95% accuracy) but fails
+on multi-tool scenarios. Given:
+
+User: "Create a project for Q1 goals and add a task for each department"
+
+Model output:
+- Correctly calls create_project
+- Then outputs: "I've created the project. Would you like me to add tasks?"
+
+It's stopping instead of continuing. What's wrong with my training data?
+What examples do I need to add?
+
+
+What you're learning: Training gap diagnosis—identifying missing patterns from model behavior.
+
+Prompt 3: Generate Training Variations​
+I have one good multi-tool example for "create project then add tasks."
+Help me generate 10 variations that teach the same pattern but with:
+- Different project/task names
+- Different numbers of subsequent tasks (1-4)
+- Some with and some without due dates
+- Varied user phrasing
+
+Show me 3 complete examples and describe the pattern for the rest.
+
+
+What you're learning: Data augmentation—creating diverse examples from template patterns.
+
+Safety Note​
+
+Multi-tool orchestration increases the blast radius of errors. A model that chains delete_project after list_projects could cause significant damage if dependencies are misunderstood. Implement confirmation flows for destructive chain operations, and never auto-execute deletions based on list results without explicit user confirmation.

@@ -1,0 +1,263 @@
+Data Wrangling
+HALFTIME CHECK: YOUR UNIX TOOLKIT
+
+Four lessons in, you have five Python commands that behave like native Unix tools: reading stdin, writing stdout, chaining through pipes. Plus a verification habit and an installation pattern that makes each tool permanent. Everything from here builds on top of that toolkit, not beside it.
+
+In Lesson 4, you decomposed sum-expenses into composable tools (extract-column, filter, stats) each doing one job, chaining through pipes. Those generic tools answer any question you can express as "extract, filter, summarize." But tax season needs a different kind of answer.
+
+sum-expenses gives you totals. But tax season needs CATEGORIES: medical, charitable, business. Your accountant doesn't want "Total: $4,215.52." They want:
+
+Medical expenses: $1,891.20
+Charitable donations: $1,550.00
+Business supplies: $774.32
+
+The challenge: bank statements use chaotic merchant names. CVS, Walgreens, and "PHARMACY #1234" are all medical. "DR MARTINEZ MEDICAL" is a doctor visit. But "DR PEPPER SNAPPLE" is soda, not a medical expense.
+
+Let's watch Claude Code build a categorizer -- and discover why the first attempt breaks.
+
+The Conversation​
+
+Open Claude Code and describe your categorization challenge:
+
+You: Help me categorize my bank transactions for taxes. I need to identify:
+- Medical: CVS, Walgreens, pharmacy, doctor visits
+- Charitable: donations, Red Cross, United Way
+- Business: Office Depot, Staples, subscriptions
+
+
+Notice what you DIDN'T say: you didn't warn about false positives. Let's see what happens.
+
+Claude Code: I'll build a categorizer using keyword matching.
+
+[Creates: tax-categorize.py]
+
+#!/usr/bin/env python3
+import sys
+import csv
+
+CATEGORIES = {
+    'medical': ['CVS', 'WALGREENS', 'PHARMACY', 'DR', 'MEDICAL'],
+    'charitable': ['DONATION', 'RED CROSS', 'UNITED WAY'],
+    'business': ['OFFICE DEPOT', 'STAPLES', 'SUBSCRIPTION'],
+}
+
+def categorize(description):
+    desc_upper = description.upper()
+    for category, keywords in CATEGORIES.items():
+        for keyword in keywords:
+            if keyword in desc_upper:
+                return category
+    return None
+
+# Process CSV from stdin
+reader = csv.DictReader(sys.stdin)
+totals = {}
+for row in reader:
+    amount = float(row['Amount'].replace('$', '').replace(',', ''))
+    if amount >= 0:  # Skip credits/refunds
+        continue
+    cat = categorize(row['Description'])
+    if cat:
+        expense = abs(amount)
+        totals.setdefault(cat, 0.0)
+        totals[cat] += expense
+        print(f"{cat.upper()}: {row['Description']}: ${expense:.2f}")
+
+print("\n--- TOTALS ---")
+for cat, total in totals.items():
+    print(f"{cat.title()}: ${total:.2f}")
+
+[Runs: cat test_bank.csv | python tax-categorize.py]
+
+MEDICAL: CVS/PHARMACY #1234: $45.67
+MEDICAL: WALGREENS #5678: $23.45
+MEDICAL: DR MARTINEZ MEDICAL: $150.00
+MEDICAL: DR PEPPER SNAPPLE: $4.99
+CHARITABLE: UNITED WAY: $100.00
+MEDICAL: CVSMITH CONSULTING: $200.00
+BUSINESS: OFFICE DEPOT #901: $89.50
+
+--- TOTALS ---
+Medical: $424.11
+Charitable: $100.00
+Business: $89.50
+
+
+At first glance, that looks right. Medical, charitable, business: all categorized. The totals look reasonable.
+
+CHALLENGE: FIND THE FRAUD
+
+Scan the medical entries above. One of them would get you audited by the IRS. Another inflates your deductions by $200. Can you spot them both before reading on?
+
+Take 30 seconds. Read each line. Ask yourself: is this actually a medical expense?
+
+The Bug​
+
+Dr. Pepper is not a doctor.
+
+MEDICAL: DR PEPPER SNAPPLE: $4.99      <-- Soda, not a doctor
+MEDICAL: CVSMITH CONSULTING: $200.00   <-- A consultant, not CVS pharmacy
+
+
+There it is. The keyword "DR" appears in "DR PEPPER," so the categorizer flags it as medical. "CVS" appears inside "CVSMITH," so a consulting fee gets counted as a pharmacy visit.
+
+This is what simple keyword matching does. if 'CVS' in desc_upper matches ANYTHING containing those three letters in sequence: CVS Pharmacy, CVSMITH, MCVS, whatever. And if 'DR' in desc_upper matches every doctor AND every Dr. Pepper.
+
+Your medical total is inflated by $204.99. On a tax return, that's not an "oops"; it's a fraudulent deduction. The IRS doesn't care that your algorithm made the mistake. If you claim $424.11 in medical expenses when the real number is $219.12, you've filed an incorrect return. Multiply this by twelve months of bank statements and the error compounds. The categorizer doesn't just have a bug: it has a liability.
+
+The Fix​
+
+Now you know what's wrong. Tell the agent:
+
+You: The categorizer has false positives. "DR PEPPER" is showing up as
+medical, and "CVSMITH" is matching as CVS. Can you fix these?
+
+Claude Code: Good catch. The problem is simple keyword matching.
+I need two fixes: word boundaries so "CVS" only matches the
+standalone word, and false positive guards for things like Dr. Pepper.
+
+[Updates: tax-categorize.py]
+
+import re
+
+CATEGORIES = {
+    'medical': [r'\bCVS\b', r'\bWALGREENS\b', r'\bPHARMACY\b', r'\bMEDICAL\b'],
+    'charitable': [r'\bDONATION\b', r'\bRED CROSS\b', r'\bUNITED WAY\b'],
+    'business': [r'\bOFFICE DEPOT\b', r'\bSTAPLES\b', r'\bSUBSCRIPTION\b'],
+}
+
+FALSE_POSITIVES = [r'\bDR\.?\s*PEPPER\b', r'\bCVSMITH\b']
+
+def categorize(description):
+    desc_upper = description.upper()
+    for fp_pattern in FALSE_POSITIVES:
+        if re.search(fp_pattern, desc_upper, re.IGNORECASE):
+            return None
+    for category, patterns in CATEGORIES.items():
+        for pattern in patterns:
+            if re.search(pattern, desc_upper, re.IGNORECASE):
+                return category
+    return None
+
+
+Two fixes make this work:
+
+Fix	What It Does	Example
+\bCVS\b (word boundaries)	Matches "CVS" as a complete word only	Matches "CVS PHARMACY", blocks "CVSMITH"
+FALSE_POSITIVES checked first	Guards run before category matching	"DR PEPPER" excluded before "DR" triggers medical
+
+The \b is a word boundary: it marks where a word starts or ends. Without it, CVS matches any string containing those three letters in sequence. With it, \bCVS\b only matches when CVS stands alone. The same technique works for any merchant: \b(AMZN|AMAZON)\b catches Amazon without matching "AMAZONIA."
+
+EXTENDING CATEGORIES WITHOUT WRITING REGEX
+
+You don't need to understand regex to add new merchants. To add TARGET PHARMACY to medical, just tell Claude Code:
+
+Add TARGET PHARMACY to the medical category in tax-categorize.py.
+Make sure it matches "TARGET PHARMACY" but not "TARGET" by itself
+(I shop at Target for non-medical things too).
+
+
+The agent writes the regex. You describe what should and shouldn't match. That's the same pattern you've been using all chapter: describe the problem, let the agent handle the implementation.
+
+Let's verify the fix:
+
+[Runs: cat test_bank.csv | python tax-categorize.py]
+
+MEDICAL: CVS/PHARMACY #1234: $45.67
+MEDICAL: WALGREENS #5678: $23.45
+MEDICAL: DR MARTINEZ MEDICAL: $150.00
+CHARITABLE: UNITED WAY: $100.00
+BUSINESS: OFFICE DEPOT #901: $89.50
+
+--- TOTALS ---
+Medical: $219.12
+Charitable: $100.00
+Business: $89.50
+
+
+Dr. Pepper and CVSMITH are gone. DR MARTINEZ MEDICAL still matches because it contains "MEDICAL" as a standalone word. The totals are now correct.
+
+Checkpoint: Run the categorizer on YOUR bank data from Lesson 3. How many transactions does it categorize? How many false positives do you spot?
+
+REGEX IS A STOPGAP, NOT A SOLUTION
+
+The FALSE_POSITIVES list works for known edge cases. But it's brittle: every new false positive requires a manual update. You'll never anticipate every "DR SOMETHING" that isn't a doctor.
+
+In a real workflow, regex handles the high-confidence matches. Everything else goes into a "NEEDS REVIEW" file for human judgment. The capstone does exactly this: the report's NEEDS REVIEW section is the honest answer to "what do you do when pattern matching isn't enough?" Regex buys you the easy 80%. The hard 20% requires a human.
+
+Prove It Transfers: Server Logs​
+
+Your categorizer catches Dr. Pepper. Your tools chain through pipes. Your bank statement workflow is solid. But here's the question that separates a tutorial exercise from a transferable skill: does the pattern work on data that isn't bank statements?
+
+Imagine you manage a web application. Your monitoring system exports weekly log CSVs:
+
+timestamp,endpoint,status_code,response_time_ms
+2025-01-06T08:00:00,/api/users,200,45
+2025-01-06T08:01:00,/api/orders,201,120
+2025-01-06T08:02:00,/api/users,404,12
+2025-01-06T08:03:00,/health,404,3
+2025-01-06T08:04:00,/api/orders,500,5002
+2025-01-06T08:05:00,/api/payments,200,89
+2025-01-06T08:06:00,/api/payments,502,30001
+
+
+You need to categorize responses (Success, Client Error, Server Error) and flag problem endpoints. Replace "medical expenses" with "server errors" and you're running the same workflow. Start exactly where you'd start with bank data: test data with known answers:
+
+You: I have server log CSVs with timestamp, endpoint, status_code,
+response_time_ms columns. Build me a log-analyzer that categorizes
+by status code: Success (2xx), Client Error (4xx), Server Error (5xx).
+
+But first — create test data with 7 rows and verify the counts.
+Expected: Success=3, Client Error=2, Server Error=2.
+
+
+The agent builds log-analyzer.py, runs it on the test data, and the counts match. But scan the output more carefully. That /health endpoint returned 404: is that actually a problem?
+
+The Dr. Pepper of Server Logs​
+
+Health check endpoints return 404 during deployments. It's expected behavior, not an error. But your log analyzer counts it as a client error, inflating your error rate, just like Dr. Pepper inflated your medical deductions.
+
+You: The /health 404 is expected during deployments, not a real error.
+Add a KNOWN_BENIGN list like the FALSE_POSITIVES in the tax categorizer.
+
+
+The agent adds a guard list. FALSE_POSITIVES became KNOWN_BENIGN. Word boundary regex became endpoint/status_code tuples. The concept (guard against known exceptions before categorizing) is identical. The domain changed; the pattern didn't.
+
+The workflow is the workflow. Build tools, verify first, guard false positives, only the domain knowledge changed. Dr. Pepper became /health 404. Medical categories became status codes. And that domain knowledge is yours, not the agent's.
+
+Your categorizer works on one file. But tax season means 12 months of bank statements, not one. The capstone puts it all together.
+
+Flashcards Study Aid​
+Try With AI​
+Prompt 1: Design a Merchant Pattern​
+I need to match all Amazon transactions in my bank statement.
+They appear as: AMZN MKTP US, AMAZON.COM, AMAZON PRIME
+
+Write a regex pattern that matches all these but does NOT match:
+- AMAZONIA TRAVEL
+- CAMZN AUTO PARTS
+
+Explain why word boundaries matter here.
+
+
+What you're learning: You supply the real-world examples (AMZN MKTP US, AMAZON.COM, AMAZON PRIME) AND the false positives to avoid (AMAZONIA, CAMZN). The agent has the regex knowledge. You have the data knowledge. The quality of the pattern is determined by how precisely you describe what should and shouldn't match, not by your ability to write regex.
+
+Prompt 2: Handle a New False Positive​
+My tax-categorize.py marks "AMAZON RIVER CRUISE" as a purchase
+from Amazon.com. It's actually a travel expense.
+
+How do I add this to the false positive guards? Show me the pattern
+that excludes travel-related Amazon mentions.
+
+
+What you're learning: The refinement loop in practice: you discovered "AMAZON RIVER CRUISE" is wrong, which means your verification caught it. You bring the failure; the agent brings the fix. This is the same loop from Lesson 2 applied to categorization: evidence criteria (what's miscategorized) come from you, implementation (the guard pattern) comes from the agent.
+
+Prompt 3: Extend Categories​
+Help me add these categories to tax-categorize.py:
+- home_office: Home Depot, Lowes, Ikea (but NOT "IKEA RESTAURANT")
+- subscriptions: Netflix, Spotify, Hulu, Apple.com
+
+What false positives might I need to guard against?
+
+
+What you're learning: Shifting from reactive to proactive. Instead of waiting to discover a false positive, you ask the agent to surface them before they hit real data. "What false positives might I need to guard against?" leverages the agent's pattern knowledge to stress-test your domain decisions before they cause a problem.

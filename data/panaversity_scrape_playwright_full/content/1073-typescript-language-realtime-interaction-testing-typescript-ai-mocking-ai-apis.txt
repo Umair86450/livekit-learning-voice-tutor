@@ -1,0 +1,773 @@
+Mocking AI APIs
+
+Your AI application makes hundreds of API calls during a typical user session. Each call to OpenAI costs money, takes 1-3 seconds, and returns non-deterministic results. Running your test suite against the real API would be slow, expensive, and flaky. A test that passes today might fail tomorrow because the model's response changed slightly.
+
+Mocking solves this problem by replacing real API calls with predictable test doubles. Instead of calling OpenAI, your tests call mock functions that instantly return the exact response you specify. Your tests run in milliseconds, cost nothing, and produce consistent results every time.
+
+This lesson teaches the mocking patterns you'll use for AI applications: creating mock functions with vi.fn, replacing modules with vi.mock, maintaining type safety with vi.mocked, and handling the unique challenge of mocking streaming responses.
+
+Why Mocking Matters for AI Testing​
+
+Traditional web applications call APIs that return consistent responses—a user database returns the same user record every time you query it. AI APIs are different:
+
+Challenge	Impact on Testing
+Non-deterministic	Same prompt produces different outputs
+Slow	1-5 seconds per request
+Expensive	$0.01-0.03 per request adds up
+Rate limited	Can't run 1000 tests in parallel
+Streaming	Responses arrive as chunks over time
+
+Mocking addresses all of these. Your mock returns the exact response you specify, instantly, for free, with no rate limits. For streaming responses, you control exactly which chunks arrive and when.
+
+Creating Mock Functions with vi.fn​
+
+The vi.fn() function creates a mock—a function that tracks how it's called and can be configured to return specific values.
+
+Basic Mock Creation​
+import { describe, it, expect, vi } from "vitest";
+
+describe("vi.fn basics", () => {
+  it("creates a mock function", () => {
+    const mockFn = vi.fn();
+
+    // Call the mock
+    mockFn("hello");
+    mockFn("world");
+
+    // Check how it was called
+    expect(mockFn).toHaveBeenCalledTimes(2);
+    expect(mockFn).toHaveBeenCalledWith("hello");
+    expect(mockFn).toHaveBeenLastCalledWith("world");
+  });
+});
+
+
+Output:
+
+ PASS  tests/mock-basics.test.ts
+  vi.fn basics
+    ✓ creates a mock function (2ms)
+
+
+By default, vi.fn() returns undefined. You configure return values with methods like mockReturnValue and mockResolvedValue.
+
+Configuring Return Values​
+import { describe, it, expect, vi } from "vitest";
+
+describe("mock return values", () => {
+  it("returns configured values", () => {
+    const getModel = vi.fn();
+
+    // Return same value every time
+    getModel.mockReturnValue("gpt-4");
+
+    expect(getModel()).toBe("gpt-4");
+    expect(getModel()).toBe("gpt-4");
+  });
+
+  it("returns different values on each call", () => {
+    const getToken = vi.fn();
+
+    // Return values in sequence
+    getToken
+      .mockReturnValueOnce("token-1")
+      .mockReturnValueOnce("token-2")
+      .mockReturnValueOnce("token-3");
+
+    expect(getToken()).toBe("token-1");
+    expect(getToken()).toBe("token-2");
+    expect(getToken()).toBe("token-3");
+    expect(getToken()).toBeUndefined(); // No more values
+  });
+});
+
+
+Output:
+
+ PASS  tests/return-values.test.ts
+  mock return values
+    ✓ returns configured values (1ms)
+    ✓ returns different values on each call (1ms)
+
+Mocking Async Functions​
+
+AI APIs are async—they return Promises. Use mockResolvedValue for successful responses and mockRejectedValue for errors:
+
+import { describe, it, expect, vi } from "vitest";
+
+describe("async mocking", () => {
+  it("mocks successful async responses", async () => {
+    const fetchCompletion = vi.fn();
+
+    fetchCompletion.mockResolvedValue({
+      choices: [{ message: { content: "Hello!" } }],
+      usage: { total_tokens: 15 },
+    });
+
+    const response = await fetchCompletion({ prompt: "Hi" });
+
+    expect(response.choices[0].message.content).toBe("Hello!");
+    expect(response.usage.total_tokens).toBe(15);
+  });
+
+  it("mocks API errors", async () => {
+    const fetchCompletion = vi.fn();
+
+    fetchCompletion.mockRejectedValue(
+      new Error("Rate limit exceeded")
+    );
+
+    await expect(fetchCompletion({ prompt: "Hi" }))
+      .rejects.toThrow("Rate limit exceeded");
+  });
+
+  it("simulates intermittent failures", async () => {
+    const fetchCompletion = vi.fn();
+
+    // First call fails, second succeeds
+    fetchCompletion
+      .mockRejectedValueOnce(new Error("Timeout"))
+      .mockResolvedValueOnce({ choices: [{ message: { content: "Retry worked!" } }] });
+
+    // First attempt fails
+    await expect(fetchCompletion()).rejects.toThrow("Timeout");
+
+    // Retry succeeds
+    const response = await fetchCompletion();
+    expect(response.choices[0].message.content).toBe("Retry worked!");
+  });
+});
+
+
+Output:
+
+ PASS  tests/async-mocking.test.ts
+  async mocking
+    ✓ mocks successful async responses (2ms)
+    ✓ mocks API errors (1ms)
+    ✓ simulates intermittent failures (1ms)
+
+
+The mockResolvedValueOnce and mockRejectedValueOnce variants let you sequence success and failure, which is perfect for testing retry logic.
+
+Module Mocking with vi.mock​
+
+Individual mock functions work for dependencies you inject. But when code imports a module directly, you need to replace the entire module.
+
+Mocking an SDK Module​
+
+Suppose your code imports an AI SDK:
+
+// src/agent-client.ts
+import { OpenAI } from "openai";
+
+const client = new OpenAI();
+
+export async function chat(message: string): Promise<string> {
+  const response = await client.chat.completions.create({
+    model: "gpt-4",
+    messages: [{ role: "user", content: message }],
+  });
+  return response.choices[0].message.content ?? "";
+}
+
+
+To test this without calling the real API, mock the entire openai module:
+
+// tests/agent-client.test.ts
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { chat } from "../src/agent-client";
+
+// Mock the entire openai module
+vi.mock("openai", () => ({
+  OpenAI: vi.fn().mockImplementation(() => ({
+    chat: {
+      completions: {
+        create: vi.fn(),
+      },
+    },
+  })),
+}));
+
+// Import after mocking
+import { OpenAI } from "openai";
+
+describe("agent client", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns AI response content", async () => {
+    // Get the mocked instance
+    const mockCreate = (new OpenAI() as any).chat.completions.create;
+    mockCreate.mockResolvedValue({
+      choices: [{ message: { content: "I'm doing great!" } }],
+    });
+
+    const response = await chat("How are you?");
+
+    expect(response).toBe("I'm doing great!");
+    expect(mockCreate).toHaveBeenCalledWith({
+      model: "gpt-4",
+      messages: [{ role: "user", content: "How are you?" }],
+    });
+  });
+});
+
+
+Output:
+
+ PASS  tests/agent-client.test.ts
+  agent client
+    ✓ returns AI response content (3ms)
+
+How vi.mock Works​
+
+When you call vi.mock("moduleName", factory):
+
+Vitest intercepts all imports of moduleName
+Instead of loading the real module, it calls your factory function
+The factory returns an object that replaces the module's exports
+All code that imports the module gets your mock instead
+
+The vi.mock call is hoisted—Vitest moves it to the top of the file before any imports run. This means the mock is in place before your test code loads the module being tested.
+
+Mock Factory Pattern​
+
+For complex SDKs, define a reusable mock factory:
+
+// tests/mocks/openai.ts
+import { vi } from "vitest";
+
+export function createMockOpenAI() {
+  const mockCreate = vi.fn();
+  const mockStream = vi.fn();
+
+  const MockOpenAI = vi.fn().mockImplementation(() => ({
+    chat: {
+      completions: {
+        create: mockCreate,
+      },
+    },
+    beta: {
+      chat: {
+        completions: {
+          stream: mockStream,
+        },
+      },
+    },
+  }));
+
+  return { MockOpenAI, mockCreate, mockStream };
+}
+
+// tests/agent-client.test.ts
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createMockOpenAI } from "./mocks/openai";
+
+const { MockOpenAI, mockCreate } = createMockOpenAI();
+
+vi.mock("openai", () => ({
+  OpenAI: MockOpenAI,
+}));
+
+import { chat } from "../src/agent-client";
+
+describe("agent client with factory", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses the mock factory", async () => {
+    mockCreate.mockResolvedValue({
+      choices: [{ message: { content: "Hello from mock!" } }],
+    });
+
+    const response = await chat("Hi");
+    expect(response).toBe("Hello from mock!");
+  });
+});
+
+
+Output:
+
+ PASS  tests/agent-client.test.ts
+  agent client with factory
+    ✓ uses the mock factory (2ms)
+
+Type-Safe Mocking with vi.mocked​
+
+When you mock a module, TypeScript loses track of the mock methods. You know mockCreate has .mockResolvedValue, but TypeScript thinks it's the original function.
+
+The vi.mocked helper restores type information:
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { OpenAI } from "openai";
+import { chat } from "../src/agent-client";
+
+vi.mock("openai");
+
+describe("type-safe mocking", () => {
+  it("uses vi.mocked for type safety", async () => {
+    // Create a client instance
+    const client = new OpenAI();
+
+    // vi.mocked tells TypeScript this is a mock
+    const mockedCreate = vi.mocked(client.chat.completions.create);
+
+    // Now TypeScript knows about mockResolvedValue
+    mockedCreate.mockResolvedValue({
+      id: "chatcmpl-123",
+      object: "chat.completion",
+      created: Date.now(),
+      model: "gpt-4",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "Type-safe response!" },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    });
+
+    // Access mock metadata with types
+    const response = await client.chat.completions.create({
+      model: "gpt-4",
+      messages: [],
+    });
+
+    expect(response.choices[0].message.content).toBe("Type-safe response!");
+
+    // mock.calls is typed correctly
+    expect(mockedCreate.mock.calls).toHaveLength(1);
+    expect(mockedCreate.mock.calls[0][0].model).toBe("gpt-4");
+  });
+});
+
+
+Output:
+
+ PASS  tests/type-safe-mocking.test.ts
+  type-safe mocking
+    ✓ uses vi.mocked for type safety (2ms)
+
+Accessing Mock Metadata​
+
+Every mock function tracks its calls:
+
+import { describe, it, expect, vi } from "vitest";
+
+describe("mock metadata", () => {
+  it("tracks calls and results", async () => {
+    const mockFetch = vi.fn<[string], Promise<{ data: string }>>();
+
+    mockFetch
+      .mockResolvedValueOnce({ data: "first" })
+      .mockResolvedValueOnce({ data: "second" });
+
+    await mockFetch("url-1");
+    await mockFetch("url-2");
+
+    // mock.calls contains all arguments
+    expect(mockFetch.mock.calls).toEqual([["url-1"], ["url-2"]]);
+
+    // mock.results contains all return values
+    expect(mockFetch.mock.results).toHaveLength(2);
+    expect(mockFetch.mock.results[0].type).toBe("return");
+
+    // mock.lastCall is a shortcut
+    expect(mockFetch.mock.lastCall).toEqual(["url-2"]);
+  });
+});
+
+
+Output:
+
+ PASS  tests/mock-metadata.test.ts
+  mock metadata
+    ✓ tracks calls and results (2ms)
+
+Mocking Streaming Responses​
+
+AI streaming responses are async generators that yield chunks over time. Mocking them requires creating a generator function:
+
+Basic Streaming Mock​
+import { describe, it, expect, vi } from "vitest";
+
+// Type for streaming chunks
+interface StreamChunk {
+  type: "content" | "tool_call" | "done";
+  delta?: string;
+  usage?: { total_tokens: number };
+}
+
+describe("streaming mocks", () => {
+  it("mocks an async generator", async () => {
+    // Create a mock that returns an async generator
+    const mockStream = vi.fn<[], AsyncGenerator<StreamChunk>>();
+
+    mockStream.mockImplementation(async function* () {
+      yield { type: "content", delta: "Hello" };
+      yield { type: "content", delta: " " };
+      yield { type: "content", delta: "world" };
+      yield { type: "done", usage: { total_tokens: 10 } };
+    });
+
+    // Consume the stream
+    const chunks: string[] = [];
+    for await (const chunk of mockStream()) {
+      if (chunk.type === "content" && chunk.delta) {
+        chunks.push(chunk.delta);
+      }
+    }
+
+    expect(chunks.join("")).toBe("Hello world");
+  });
+});
+
+
+Output:
+
+ PASS  tests/streaming-mocks.test.ts
+  streaming mocks
+    ✓ mocks an async generator (2ms)
+
+Mocking SDK Streaming Methods​
+
+Real AI SDKs return streams as objects with helper methods. Here's a pattern for mocking them:
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Simplified SDK types
+interface ChatCompletionChunk {
+  choices: Array<{
+    delta: { content?: string };
+    finish_reason: string | null;
+  }>;
+}
+
+interface Stream<T> {
+  [Symbol.asyncIterator](): AsyncIterator<T>;
+  finalMessage(): Promise<{ content: string }>;
+}
+
+describe("SDK streaming mock", () => {
+  it("mocks a full SDK stream response", async () => {
+    // Create chunks
+    const chunks: ChatCompletionChunk[] = [
+      { choices: [{ delta: { content: "The" }, finish_reason: null }] },
+      { choices: [{ delta: { content: " answer" }, finish_reason: null }] },
+      { choices: [{ delta: { content: " is" }, finish_reason: null }] },
+      { choices: [{ delta: { content: " 42" }, finish_reason: "stop" }] },
+    ];
+
+    // Mock the stream object
+    const mockStream: Stream<ChatCompletionChunk> = {
+      async *[Symbol.asyncIterator]() {
+        for (const chunk of chunks) {
+          yield chunk;
+        }
+      },
+      async finalMessage() {
+        return { content: "The answer is 42" };
+      },
+    };
+
+    // Mock the SDK method
+    const mockCreateStream = vi.fn().mockResolvedValue(mockStream);
+
+    // Use it like the real SDK
+    const stream = await mockCreateStream({
+      model: "gpt-4",
+      messages: [{ role: "user", content: "What is 6 * 7?" }],
+    });
+
+    // Collect streamed content
+    const parts: string[] = [];
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content;
+      if (content) {
+        parts.push(content);
+      }
+    }
+
+    expect(parts.join("")).toBe("The answer is 42");
+
+    // Also test the helper method
+    const final = await stream.finalMessage();
+    expect(final.content).toBe("The answer is 42");
+  });
+});
+
+
+Output:
+
+ PASS  tests/sdk-streaming.test.ts
+  SDK streaming mock
+    ✓ mocks a full SDK stream response (3ms)
+
+Testing Stream Cancellation​
+
+AI applications need to handle user cancellation. Test this by aborting the stream:
+
+import { describe, it, expect, vi } from "vitest";
+
+describe("stream cancellation", () => {
+  it("handles abort signal", async () => {
+    const controller = new AbortController();
+
+    // Mock stream that respects abort
+    async function* mockStream(signal: AbortSignal) {
+      const chunks = ["Hello", " ", "world", "!"];
+
+      for (const chunk of chunks) {
+        if (signal.aborted) {
+          throw new Error("Stream aborted");
+        }
+        yield { content: chunk };
+        // Simulate network delay
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    // Start consuming
+    const parts: string[] = [];
+    const stream = mockStream(controller.signal);
+
+    // Abort after a short delay
+    setTimeout(() => controller.abort(), 25);
+
+    try {
+      for await (const chunk of stream) {
+        parts.push(chunk.content);
+      }
+    } catch (error) {
+      expect((error as Error).message).toBe("Stream aborted");
+    }
+
+    // Should have received some but not all chunks
+    expect(parts.length).toBeGreaterThan(0);
+    expect(parts.length).toBeLessThan(4);
+  });
+});
+
+
+Output:
+
+ PASS  tests/stream-cancellation.test.ts
+  stream cancellation
+    ✓ handles abort signal (35ms)
+
+Complete Example: Testing a Chat Function​
+
+Putting it all together—here's a complete test file for an AI chat function:
+
+// src/chat-service.ts
+import { OpenAI } from "openai";
+
+const client = new OpenAI();
+
+export interface ChatOptions {
+  message: string;
+  model?: string;
+}
+
+export interface ChatResponse {
+  content: string;
+  tokensUsed: number;
+}
+
+export async function sendMessage(options: ChatOptions): Promise<ChatResponse> {
+  const response = await client.chat.completions.create({
+    model: options.model ?? "gpt-4",
+    messages: [{ role: "user", content: options.message }],
+  });
+
+  return {
+    content: response.choices[0].message.content ?? "",
+    tokensUsed: response.usage?.total_tokens ?? 0,
+  };
+}
+
+// tests/chat-service.test.ts
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { sendMessage } from "../src/chat-service";
+
+// Mock the OpenAI module
+vi.mock("openai", () => {
+  const mockCreate = vi.fn();
+  return {
+    OpenAI: vi.fn().mockImplementation(() => ({
+      chat: {
+        completions: {
+          create: mockCreate,
+        },
+      },
+    })),
+    __mockCreate: mockCreate, // Expose for tests
+  };
+});
+
+// Get the mock reference
+import { __mockCreate as mockCreate } from "openai";
+
+describe("sendMessage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("sends message and returns response", async () => {
+    vi.mocked(mockCreate).mockResolvedValue({
+      choices: [{ message: { content: "Hello there!" } }],
+      usage: { total_tokens: 25 },
+    });
+
+    const response = await sendMessage({ message: "Hi" });
+
+    expect(response.content).toBe("Hello there!");
+    expect(response.tokensUsed).toBe(25);
+  });
+
+  it("uses gpt-4 by default", async () => {
+    vi.mocked(mockCreate).mockResolvedValue({
+      choices: [{ message: { content: "Response" } }],
+      usage: { total_tokens: 10 },
+    });
+
+    await sendMessage({ message: "Test" });
+
+    expect(mockCreate).toHaveBeenCalledWith({
+      model: "gpt-4",
+      messages: [{ role: "user", content: "Test" }],
+    });
+  });
+
+  it("allows custom model", async () => {
+    vi.mocked(mockCreate).mockResolvedValue({
+      choices: [{ message: { content: "Response" } }],
+      usage: { total_tokens: 10 },
+    });
+
+    await sendMessage({ message: "Test", model: "gpt-3.5-turbo" });
+
+    expect(mockCreate).toHaveBeenCalledWith({
+      model: "gpt-3.5-turbo",
+      messages: [{ role: "user", content: "Test" }],
+    });
+  });
+
+  it("handles missing content gracefully", async () => {
+    vi.mocked(mockCreate).mockResolvedValue({
+      choices: [{ message: { content: null } }],
+      usage: { total_tokens: 5 },
+    });
+
+    const response = await sendMessage({ message: "Empty response test" });
+
+    expect(response.content).toBe("");
+  });
+
+  it("handles API errors", async () => {
+    vi.mocked(mockCreate).mockRejectedValue(
+      new Error("API rate limit exceeded")
+    );
+
+    await expect(sendMessage({ message: "Hi" }))
+      .rejects.toThrow("API rate limit exceeded");
+  });
+});
+
+
+Output:
+
+ PASS  tests/chat-service.test.ts
+  sendMessage
+    ✓ sends message and returns response (2ms)
+    ✓ uses gpt-4 by default (1ms)
+    ✓ allows custom model (1ms)
+    ✓ handles missing content gracefully (1ms)
+    ✓ handles API errors (1ms)
+
+Test Files  1 passed (1)
+     Tests  5 passed (5)
+
+Quick Reference​
+Pattern	When to Use
+vi.fn()	Create a standalone mock function
+vi.fn().mockReturnValue(x)	Mock returns same value every time
+vi.fn().mockReturnValueOnce(x)	Mock returns value once, then continues
+vi.fn().mockResolvedValue(x)	Mock async function resolving to value
+vi.fn().mockRejectedValue(err)	Mock async function throwing error
+vi.mock("module", factory)	Replace entire module with mock
+vi.mocked(fn)	Get typed mock from a mocked function
+mock.calls	Array of all calls with arguments
+mock.lastCall	Arguments from most recent call
+vi.clearAllMocks()	Reset call history (use in beforeEach)
+Try With AI​
+Prompt 1: Mock an API Client​
+I have this function that calls an AI API:
+
+async function summarize(text: string): Promise<string> {
+  const response = await fetch("https://api.ai.com/summarize", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+  const data = await response.json();
+  return data.summary;
+}
+
+Write a Vitest test that mocks the fetch function to return
+a predefined summary. Include tests for both success and
+network error cases.
+
+
+What you're learning: How to mock global functions like fetch and structure tests for both success and error paths. This pattern applies to any HTTP-based AI API.
+
+Prompt 2: Create a Streaming Mock​
+I need to test a function that consumes an OpenAI streaming response:
+
+async function streamChat(messages: Message[]): Promise<string> {
+  const stream = await openai.chat.completions.create({
+    model: "gpt-4",
+    messages,
+    stream: true,
+  });
+
+  let content = "";
+  for await (const chunk of stream) {
+    content += chunk.choices[0]?.delta?.content ?? "";
+  }
+  return content;
+}
+
+Create a mock that simulates streaming "Hello, how can I help?"
+in 5 chunks. Use vi.mock for the openai module.
+
+
+What you're learning: How to mock async iterators and simulate chunked responses. This is essential for testing streaming UI components that show typing indicators.
+
+Prompt 3: Test Retry Logic​
+I have an API client with retry logic:
+
+async function fetchWithRetry(url: string, retries = 3): Promise<Response> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url);
+    } catch (error) {
+      if (attempt === retries) throw error;
+      await sleep(1000 * attempt); // Exponential backoff
+    }
+  }
+  throw new Error("Unreachable");
+}
+
+Write tests that verify:
+1. It retries on failure
+2. It succeeds if a retry works
+3. It throws after max retries
+Use mockRejectedValueOnce and mockResolvedValueOnce
+to control each attempt.
+
+
+What you're learning: How to test complex async control flow by configuring mocks to fail or succeed on specific calls. This pattern is critical for testing resilient AI applications that handle rate limits and transient failures.
+
+Safety note: When writing mock tests, verify your mocks match the real API structure. A mock that returns { choices: [...] } when the real API returns { data: { choices: [...] } } will pass in tests but fail in production. Keep a fixture file with real API responses as your source of truth.

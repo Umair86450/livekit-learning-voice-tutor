@@ -1,0 +1,590 @@
+Building Graders with Binary Criteria
+
+You need to evaluate whether your agent's responses are "good quality." Your first instinct might be to ask an LLM: "Rate this response from 1 to 5 on quality."
+
+Do not do this.
+
+LLMs are notoriously bad at numeric scale ratings. The same response might get a 3 on one run and a 4 on the next. The same response that one model rates 4, another rates 2. There is no stable calibration for what "3 out of 5" means across contexts, prompts, or even repeated calls to the same model.
+
+Andrew Ng, observing teams struggle with agent evaluation, identified the solution: "If you give it 5 binary criteria and add them up, that tends to give more consistent results."
+
+This insight transforms evaluation reliability. Instead of asking "how good is this?" (vague, uncalibrated), you ask "does it have X? does it have Y? does it have Z?" (specific, verifiable). Five yes/no answers sum to a 0-5 score that means the same thing every time.
+
+Why 1-5 Scales Fail​
+The Calibration Problem​
+
+When you ask an LLM "Rate this response 1-5 on helpfulness," the model must do two things:
+
+Understand what the response does well and poorly
+Map that understanding to a number on an arbitrary scale
+
+The first task is something LLMs do reasonably well. The second is where things break down.
+
+What does "3" mean?
+
+Average quality? Average compared to what?
+Meets minimum standards? Whose standards?
+Has some good aspects and some bad? What ratio?
+
+There is no universal calibration. The same model will assign different numbers to the same response depending on:
+
+What examples it has seen recently in the conversation
+How the prompt frames the task
+Random sampling (temperature)
+The specific version of the model
+Empirical Evidence​
+
+Consider this experiment. You have a customer support response that's objectively decent but not exceptional. You ask three different LLMs to rate it 1-5:
+
+Model	Run 1	Run 2	Run 3
+GPT-4	4	3	4
+Claude	3	4	3
+Gemini	3	3	4
+
+Same response. Different scores. Even the same model gives different answers on different runs. This variance makes 1-5 scale ratings nearly useless for systematic evaluation.
+
+The Underlying Issue​
+
+LLMs were trained on human text where numeric ratings appear in context-dependent ways. "4 out of 5 stars" on Amazon means something different from "4 out of 5" on a medical assessment. The models absorbed this context-dependence. They do not have stable internal calibration for numeric scales.
+
+Binary judgments are different. "Does this response have a greeting?" admits only two answers. The model either identifies a greeting or it does not. This is much closer to the classification and identification tasks where LLMs excel.
+
+The Binary Criteria Pattern​
+From Vague to Verifiable​
+
+The solution is decomposition. Instead of asking one vague question, ask multiple specific questions.
+
+Bad approach (single vague rating):
+
+Rate this customer support response 1-5 on quality.
+
+Response: {response}
+
+Rating (1-5):
+
+
+Good approach (multiple binary criteria):
+
+Evaluate this customer support response. For EACH criterion, answer YES or NO only.
+
+1. Does the response acknowledge the customer's issue?
+2. Does it provide at least one actionable next step?
+3. Is the tone professional (no slang, no rudeness)?
+4. Does it avoid making promises about specific timelines?
+5. Does it include relevant contact information or resources?
+
+Response: {response}
+
+Answer each criterion with YES or NO:
+
+
+The second approach produces consistent, meaningful scores. Five "YES" answers means the response hit all quality criteria. Three "YES" answers identifies exactly which criteria were missed.
+
+Why Binary Works​
+
+Binary questions leverage what LLMs do well:
+
+Classification: Is X present or absent? LLMs are strong classifiers.
+Identification: Can you find Y in this text? LLMs are strong at locating information.
+Verification: Does this match Z? LLMs can compare against criteria.
+
+Binary questions avoid what LLMs do poorly:
+
+Arbitrary scaling: Mapping quality to numbers without calibration reference.
+Holistic judgment: Balancing multiple factors into a single score.
+Consistency across contexts: Maintaining stable numeric interpretations.
+The Sum-of-Binaries Score​
+
+Binary answers transform into numeric scores through simple addition:
+
+5 criteria, all YES = 5/5 = 100%
+5 criteria, 3 YES = 3/5 = 60%
+5 criteria, 1 YES = 1/5 = 20%
+
+This score has meaning. A 3/5 means exactly "this response met criteria 1, 2, and 4, but missed 3 and 5." You know what was good and what needs improvement. A "3 out of 5" from a direct rating tells you nothing specific.
+
+Converting Subjective Rubrics to Binary Criteria​
+The Decomposition Process​
+
+Take any subjective quality dimension and ask: "What specific, observable things would be true if this dimension were high quality?"
+
+Example: "Professional Tone"
+
+The vague criterion "professional tone" cannot be directly measured. But you can ask what professional tone looks like:
+
+Binary Criterion	What It Checks
+No slang or casual abbreviations?	"gonna", "u", "lol" absent
+No emotional language?	"amazing", "terrible" absent
+Addresses the reader appropriately?	"Dear Customer" vs "Hey dude"
+Uses complete sentences?	No fragments or text-speak
+Avoids exclamation marks?	"Thank you." vs "Thanks!!!!!"
+
+Five binary criteria that collectively measure "professional tone." None is perfect on its own, but together they capture the dimension reliably.
+
+Example: "Helpful Response"
+
+Binary Criterion	What It Checks
+Directly addresses what the user asked?	Not a tangent
+Provides actionable information?	User can do something with it
+Appropriate detail level for the question?	Not too brief, not overwhelming
+Accurate based on context provided?	No hallucinated facts
+Complete without requiring follow-up?	Answers the full question
+Guidelines for Good Binary Criteria​
+
+Be specific enough to verify:
+
+Bad: "Is the response good?" (What is "good"?)
+Good: "Does the response include specific next steps the user can take?"
+
+Be observable, not inferential:
+
+Bad: "Would the user feel satisfied?" (Requires speculation)
+Good: "Does the response answer all questions the user asked?"
+
+Avoid double-barreled questions:
+
+Bad: "Is it accurate and helpful?" (Two criteria in one)
+Good: Separate criteria for accuracy and helpfulness
+
+Cover the dimension without overlap:
+
+Aim for 4-6 criteria that together capture the quality dimension
+Each criterion should measure something the others do not
+Together they should cover the most important aspects
+Code-Based Graders for Objective Criteria​
+
+When criteria can be checked programmatically, code graders are faster, cheaper, and more reliable than LLM judges.
+
+Basic Structure​
+def grader_response_structure(response: dict) -> dict:
+    """
+    Check if response follows required structure.
+    Returns score and individual check results.
+    """
+    # Define binary checks
+    checks = {
+        "has_greeting": "greeting" in response.get("text", "").lower()[:50],
+        "has_body": len(response.get("text", "")) > 100,
+        "has_signature": "regards" in response.get("text", "").lower()[-100:],
+        "under_word_limit": len(response.get("text", "").split()) < 500,
+        "has_next_steps": "next" in response.get("text", "").lower() or
+                         "please" in response.get("text", "").lower()
+    }
+
+    # Calculate score
+    score = sum(checks.values())
+    max_score = len(checks)
+
+    return {
+        "passed": score == max_score,
+        "score": score,
+        "max_score": max_score,
+        "percentage": (score / max_score) * 100,
+        "checks": checks,
+        "explanation": f"Passed {score}/{max_score} structure checks"
+    }
+
+
+Output:
+
+result = grader_response_structure({
+    "text": "Hello! Thank you for contacting us. We understand your concern about the billing issue. Please check your account settings first, then contact our billing team if the problem persists. Best regards, Support Team"
+})
+
+print(result)
+
+{
+    "passed": True,
+    "score": 5,
+    "max_score": 5,
+    "percentage": 100.0,
+    "checks": {
+        "has_greeting": True,
+        "has_body": True,
+        "has_signature": True,
+        "under_word_limit": True,
+        "has_next_steps": True
+    },
+    "explanation": "Passed 5/5 structure checks"
+}
+
+Task API Example​
+
+For your Task API agent, you might check task output quality:
+
+def grader_task_creation(agent_output: dict, user_input: str) -> dict:
+    """
+    Evaluate task creation quality with binary criteria.
+    """
+    task = agent_output.get("task", {})
+
+    checks = {
+        # Does the task exist?
+        "task_created": task.get("id") is not None,
+
+        # Does title relate to input?
+        "title_relevant": any(
+            word.lower() in task.get("title", "").lower()
+            for word in user_input.split()
+            if len(word) > 3
+        ),
+
+        # Is there a description?
+        "has_description": len(task.get("description", "")) > 0,
+
+        # Is due date in the future?
+        "valid_due_date": task.get("due_date") is not None and
+                         task.get("due_date") > datetime.now().isoformat(),
+
+        # Is priority set?
+        "has_priority": task.get("priority") in ["low", "medium", "high"]
+    }
+
+    score = sum(checks.values())
+
+    return {
+        "passed": score >= 4,  # Allow one miss
+        "score": score,
+        "max_score": 5,
+        "checks": checks,
+        "failed_criteria": [k for k, v in checks.items() if not v]
+    }
+
+
+Output:
+
+result = grader_task_creation(
+    agent_output={
+        "task": {
+            "id": "task_123",
+            "title": "Buy groceries for dinner",
+            "description": "Get vegetables and pasta",
+            "due_date": "2025-01-15T18:00:00",
+            "priority": "medium"
+        }
+    },
+    user_input="I need to buy groceries for dinner tonight"
+)
+
+print(result)
+
+{
+    "passed": True,
+    "score": 5,
+    "max_score": 5,
+    "checks": {
+        "task_created": True,
+        "title_relevant": True,
+        "has_description": True,
+        "valid_due_date": True,
+        "has_priority": True
+    },
+    "failed_criteria": []
+}
+
+LLM-Based Graders for Subjective Criteria​
+
+When criteria require semantic judgment, use an LLM judge with binary criteria.
+
+The Grader Prompt Template​
+BINARY_GRADER_PROMPT = """
+Evaluate the following response against these specific criteria.
+For EACH criterion, you must answer only YES or NO. Do not explain.
+
+CRITERIA:
+1. Does the response directly address the user's question?
+2. Is the information provided accurate (no obvious errors)?
+3. Is the response appropriately detailed (not too brief, not overwhelming)?
+4. Is the tone appropriate for a professional context?
+5. Could the user take action based on this response?
+
+USER QUESTION: {user_question}
+
+RESPONSE TO EVALUATE: {response}
+
+Answer each criterion with YES or NO only, in this exact format:
+1. YES/NO
+2. YES/NO
+3. YES/NO
+4. YES/NO
+5. YES/NO
+"""
+
+def grader_response_quality(
+    response: str,
+    user_question: str,
+    llm_client
+) -> dict:
+    """
+    Use LLM to evaluate response quality with binary criteria.
+    """
+    prompt = BINARY_GRADER_PROMPT.format(
+        user_question=user_question,
+        response=response
+    )
+
+    result = llm_client.complete(prompt)
+
+    # Parse YES/NO answers
+    lines = result.strip().split("\n")
+    checks = {}
+    criteria_names = [
+        "addresses_question",
+        "accurate_information",
+        "appropriate_detail",
+        "professional_tone",
+        "actionable"
+    ]
+
+    for i, line in enumerate(lines):
+        if i < len(criteria_names):
+            checks[criteria_names[i]] = "YES" in line.upper()
+
+    score = sum(checks.values())
+
+    return {
+        "passed": score >= 4,
+        "score": score,
+        "max_score": 5,
+        "checks": checks,
+        "grader_output": result
+    }
+
+
+Output:
+
+{
+    "passed": True,
+    "score": 4,
+    "max_score": 5,
+    "checks": {
+        "addresses_question": True,
+        "accurate_information": True,
+        "appropriate_detail": True,
+        "professional_tone": True,
+        "actionable": False
+    },
+    "grader_output": "1. YES\n2. YES\n3. YES\n4. YES\n5. NO"
+}
+
+Andrew Ng's Chart Quality Rubric​
+
+Andrew Ng shared this concrete example for evaluating data visualization quality. Instead of "rate this chart 1-5," use binary criteria:
+
+CHART_QUALITY_PROMPT = """
+Evaluate this data visualization against these criteria.
+For EACH, answer YES or NO only.
+
+1. Does it have a clear, descriptive title?
+2. Are the axis labels present and readable?
+3. Is it an appropriate chart type for the data?
+4. Is the data accurately represented (no distortions)?
+5. Is the legend clear and positioned appropriately?
+
+CHART DESCRIPTION: {chart_description}
+DATA CONTEXT: {data_context}
+
+Answer format:
+1. YES/NO
+2. YES/NO
+3. YES/NO
+4. YES/NO
+5. YES/NO
+"""
+
+
+Five binary criteria transform "is this a good chart?" into measurable quality.
+
+Exercise: Build a Grader for Task API Output​
+
+Your Task API agent generates task suggestions based on user goals. Build a grader that evaluates suggestion quality.
+
+The Scenario​
+
+User input: "I need to prepare for my job interview next week"
+
+Agent output:
+
+{
+    "suggestions": [
+        {"task": "Research the company", "priority": "high"},
+        {"task": "Practice common interview questions", "priority": "high"},
+        {"task": "Prepare questions to ask interviewer", "priority": "medium"},
+        {"task": "Plan your outfit", "priority": "low"},
+        {"task": "Get good sleep the night before", "priority": "medium"}
+    ]
+}
+
+Your Task​
+Define 5 binary criteria for suggestion quality
+Implement a code-based grader function
+Run it on the example and interpret the score
+Starter Code​
+def grader_task_suggestions(suggestions: list, user_goal: str) -> dict:
+    """
+    Evaluate task suggestion quality with binary criteria.
+
+    Criteria to implement:
+    1. At least 3 suggestions provided
+    2. Suggestions relate to the stated goal
+    3. High priority items are genuinely urgent
+    4. No duplicate or redundant suggestions
+    5. Actionable (user can start immediately)
+    """
+
+    checks = {
+        # TODO: Implement each check
+        "sufficient_count": None,
+        "goal_relevant": None,
+        "priority_appropriate": None,
+        "no_duplicates": None,
+        "actionable": None
+    }
+
+    # Calculate score
+    score = sum(v for v in checks.values() if v is not None)
+
+    return {
+        "passed": score >= 4,
+        "score": score,
+        "max_score": 5,
+        "checks": checks
+    }
+
+
+Hint for implementation:
+
+"sufficient_count": len(suggestions) >= 3
+"goal_relevant": Check if goal keywords appear in task titles
+"priority_appropriate": Verify high-priority items are time-sensitive
+"no_duplicates": Compare task titles for similarity
+"actionable": Check that tasks don't require external dependencies
+Combining Code and LLM Graders​
+
+Real evaluation systems often combine both approaches:
+
+def comprehensive_grader(response: dict, context: dict, llm_client) -> dict:
+    """
+    Combine code checks (fast, cheap) with LLM checks (semantic).
+    """
+    # Code-based checks (run first, instant)
+    code_checks = {
+        "valid_json": is_valid_json(response),
+        "under_token_limit": count_tokens(response) < 500,
+        "has_required_fields": all(
+            k in response for k in ["text", "confidence"]
+        )
+    }
+
+    # Only run LLM checks if code checks pass
+    if not all(code_checks.values()):
+        return {
+            "passed": False,
+            "score": sum(code_checks.values()),
+            "max_score": 8,  # 3 code + 5 LLM
+            "checks": code_checks,
+            "skipped_llm": True,
+            "reason": "Failed code checks, skipped LLM evaluation"
+        }
+
+    # LLM-based checks (run if code checks pass)
+    llm_result = grader_response_quality(
+        response["text"],
+        context["user_question"],
+        llm_client
+    )
+
+    # Combine results
+    all_checks = {**code_checks, **llm_result["checks"]}
+    total_score = sum(all_checks.values())
+
+    return {
+        "passed": total_score >= 6,  # 75% threshold
+        "score": total_score,
+        "max_score": 8,
+        "checks": all_checks,
+        "code_score": sum(code_checks.values()),
+        "llm_score": llm_result["score"]
+    }
+
+
+Output:
+
+{
+    "passed": True,
+    "score": 7,
+    "max_score": 8,
+    "checks": {
+        "valid_json": True,
+        "under_token_limit": True,
+        "has_required_fields": True,
+        "addresses_question": True,
+        "accurate_information": True,
+        "appropriate_detail": True,
+        "professional_tone": True,
+        "actionable": False
+    },
+    "code_score": 3,
+    "llm_score": 4
+}
+
+
+This pattern runs cheap code checks first. Only responses that pass structural requirements get expensive LLM evaluation. You save money while still capturing semantic quality.
+
+Reflect on Your Skill​
+
+If you are building the agent-evals skill from Lesson 0, add grader templates to your skill:
+
+Key insight to encode: Binary criteria produce more reliable scores than numeric scales because they leverage LLM classification strengths while avoiding calibration weaknesses.
+
+Templates to add:
+
+Code-based grader structure (checks dict, sum scoring, result format)
+LLM grader prompt template (numbered criteria, YES/NO only instruction)
+Combined grader pattern (code first, LLM if passes)
+
+Decision framework: When designing criteria, ask "Can I check this with code?" If yes, use code. If it requires semantic judgment, use LLM with binary criteria. Never ask for numeric ratings.
+
+Try With AI​
+Prompt 1: Decompose a Quality Dimension​
+I need to evaluate whether my agent's responses are "clear and well-organized."
+This is too vague to measure directly.
+
+Help me decompose "clear and well-organized" into 5 specific binary criteria.
+For each criterion:
+1. State it as a yes/no question
+2. Explain what specifically to look for
+3. Note whether code or LLM should check it
+
+
+What you're learning: The decomposition process that transforms subjective quality dimensions into measurable binary criteria. This skill applies to any vague rubric you encounter.
+
+Prompt 2: Debug a Grader​
+My grader keeps giving inconsistent scores. Here's my prompt:
+
+"Rate this response 1-5 on helpfulness. Consider accuracy, clarity, and relevance.
+Response: {response}
+Score:"
+
+What's wrong with this grader design? Rewrite it using the binary criteria pattern
+to produce more consistent results.
+
+
+What you're learning: Identifying why vague grader prompts fail and applying the binary criteria solution. You are recognizing the pattern in your own work.
+
+Prompt 3: Build a Domain-Specific Grader​
+I'm building an agent that [describe your agent's purpose and output type].
+Help me design a grader for its outputs:
+
+1. Identify 3 objective criteria (code can check)
+2. Identify 3 subjective criteria (need LLM judgment)
+3. Write the combined grader in Python using the pattern from the lesson
+
+Make the criteria specific to my domain, not generic quality checks.
+
+
+What you're learning: Applying the grader patterns to your specific use case. Generic criteria miss domain-specific quality dimensions. AI helps you identify what matters for your particular agent.
+
+Safety Note​
+
+Graders define what "good" means for your agent. Poorly designed criteria create perverse incentives: agents optimize for your criteria, not actual quality. Before deploying a grader, test it against edge cases. Find responses that score high but are clearly bad, or score low but are clearly good. These cases reveal gaps in your criteria that need addressing.

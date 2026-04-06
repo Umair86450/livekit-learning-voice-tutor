@@ -1,0 +1,387 @@
+The Type System Deep Dive
+
+You're building a chat interface for your AI agent. The API returns different response shapes depending on what's happening: a loading state while waiting, a success state with content, or an error state with a message. In Python, you might use a dictionary and hope for the best. In TypeScript, you can model these states so precisely that accessing the wrong property becomes impossible at compile time.
+
+This is where TypeScript's type system shines—not as bureaucracy that slows you down, but as a design tool that makes your code communicate its intent clearly. When you define that a response is either loading OR success OR error, TypeScript ensures you handle all three cases. Miss one? The compiler tells you before your users discover the bug.
+
+Python developers often ask: "Why bother with all these types when I can just write code?" The answer becomes clear when you're building real-time AI interfaces where malformed data causes silent failures. TypeScript's type system catches errors during development, not production.
+
+Union Types: Combining Possibilities​
+
+A union type represents a value that could be one of several types. In Python, you might use Union[str, int] from the typing module. TypeScript uses the pipe (|) symbol for the same concept:
+
+// A value that can be either a string or a number
+type StringOrNumber = string | number;
+
+let responseId: StringOrNumber;
+responseId = "abc123";      // Valid: string
+responseId = 42;            // Valid: number
+responseId = true;          // Error: boolean not allowed
+
+
+Output:
+
+Type 'boolean' is not assignable to type 'string | number'.
+
+
+For AI applications, union types model response variants naturally:
+
+// Basic AI response - value can be message text or null during streaming
+type MessageContent = string | null;
+
+// Token count that might not be available yet
+type TokenCount = number | undefined;
+
+// ID that comes from external API (could be string or number)
+type ResponseId = string | number;
+
+
+This pattern appears constantly in AI APIs where values might be absent, pending, or have multiple valid forms.
+
+Literal Types: Exact Values​
+
+Beyond "string" or "number," TypeScript lets you specify exact values a type can hold. These are literal types:
+
+// Only these three strings are valid
+type ResponseStatus = "loading" | "success" | "error";
+
+let status: ResponseStatus;
+status = "success";     // Valid
+status = "pending";     // Error: not one of the allowed values
+
+
+Output:
+
+Type '"pending"' is not assignable to type '"loading" | "success" | "error"'.
+
+
+Literal types work with numbers too:
+
+// HTTP status codes we expect from our AI API
+type AIStatusCode = 200 | 400 | 429 | 500;
+
+function handleStatus(code: AIStatusCode) {
+  if (code === 200) {
+    console.log("Success");
+  } else if (code === 429) {
+    console.log("Rate limited - slow down");
+  }
+}
+
+handleStatus(200);    // Valid
+handleStatus(404);    // Error: 404 not in the union
+
+
+Output:
+
+Argument of type '404' is not assignable to parameter of type 'AIStatusCode'.
+
+
+This catches bugs where you pass unexpected values. The type system enforces your API contract.
+
+Combining Objects with Unions: Discriminated Unions​
+
+The real power emerges when combining object types with literal discriminants. This pattern models the "response states" scenario from the introduction:
+
+// Three distinct response shapes
+type AIResponse =
+  | { status: "loading" }
+  | { status: "success"; data: string }
+  | { status: "error"; message: string };
+
+
+Each variant has a status property with a different literal value. This "discriminant" property tells TypeScript which variant you're working with:
+
+function handleResponse(response: AIResponse): void {
+  if (response.status === "loading") {
+    console.log("Waiting for response...");
+    // TypeScript knows: only { status: "loading" } here
+    // response.data would be an error - loading has no data
+  } else if (response.status === "success") {
+    console.log("Response:", response.data);
+    // TypeScript knows: { status: "success"; data: string } here
+    // response.data is guaranteed to exist
+  } else {
+    console.log("Error:", response.message);
+    // TypeScript knows: { status: "error"; message: string } here
+    // response.message is guaranteed to exist
+  }
+}
+
+
+Output (with different inputs):
+
+// handleResponse({ status: "loading" })
+Waiting for response...
+
+// handleResponse({ status: "success", data: "Hello from AI" })
+Response: Hello from AI
+
+// handleResponse({ status: "error", message: "Rate limit exceeded" })
+Error: Rate limit exceeded
+
+
+This pattern is foundational for AI interfaces. Streaming responses, tool calls, and completion events all have distinct shapes that discriminated unions model perfectly.
+
+Type Narrowing: How TypeScript Tracks Types​
+
+When you check a condition, TypeScript narrows the type within that branch. This happens automatically through control flow analysis:
+
+function processValue(value: string | number): string {
+  // Here, value is string | number
+
+  if (typeof value === "string") {
+    // Here, TypeScript knows value is string
+    return value.toUpperCase();  // String methods available
+  } else {
+    // Here, TypeScript knows value is number
+    return value.toFixed(2);     // Number methods available
+  }
+}
+
+console.log(processValue("hello"));
+console.log(processValue(42.7));
+
+
+Output:
+
+HELLO
+42.70
+
+
+TypeScript understands several narrowing patterns:
+
+// typeof narrowing (for primitives)
+function handlePrimitive(x: string | number | boolean) {
+  if (typeof x === "string") {
+    // x is string
+  } else if (typeof x === "number") {
+    // x is number
+  } else {
+    // x is boolean (only option left)
+  }
+}
+
+// Property check narrowing (for objects)
+type WithData = { data: string };
+type WithError = { error: string };
+
+function handleResult(result: WithData | WithError) {
+  if ("data" in result) {
+    console.log("Got data:", result.data);
+  } else {
+    console.log("Got error:", result.error);
+  }
+}
+
+
+Output:
+
+// handleResult({ data: "AI response" })
+Got data: AI response
+
+// handleResult({ error: "Connection failed" })
+Got error: Connection failed
+
+Type Inference vs Explicit Annotation​
+
+TypeScript infers types when the value makes them obvious:
+
+// TypeScript infers: message is string
+let message = "Hello";
+
+// TypeScript infers: count is number
+let count = 42;
+
+// TypeScript infers: items is string[]
+let items = ["a", "b", "c"];
+
+// TypeScript infers: return type is number
+function add(a: number, b: number) {
+  return a + b;  // Inferred return: number
+}
+
+
+Explicit annotation is needed when inference isn't enough:
+
+// Empty array - TypeScript can't infer element type
+let responses: string[] = [];
+responses.push("first response");
+
+// Function parameters always need types
+function greet(name: string): string {
+  return `Hello, ${name}`;
+}
+
+// Object with optional properties
+type Config = {
+  model: string;
+  temperature?: number;
+};
+
+let config: Config = { model: "gpt-4" };
+
+
+Guideline: Let TypeScript infer when it can. Annotate when declaring empty collections, function parameters, or complex object shapes.
+
+The unknown Type: Safe External Data​
+
+When data comes from an external source (API, user input, JSON parse), you don't know its shape at compile time. TypeScript offers two approaches:
+
+// The DANGEROUS way: any
+function processAny(data: any): void {
+  // No checks required - TypeScript trusts you completely
+  console.log(data.response.content.text);  // Might crash at runtime!
+}
+
+// The SAFE way: unknown
+function processUnknown(data: unknown): void {
+  // TypeScript requires checks before access
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "response" in data
+  ) {
+    console.log("Has response property");
+  }
+}
+
+
+The unknown type forces you to verify the shape before accessing properties. This mirrors what you'd do in Python with careful dictionary checks, but TypeScript enforces it.
+
+For AI APIs, use unknown for parsed JSON responses:
+
+async function fetchAIResponse(): Promise<unknown> {
+  const response = await fetch("https://api.example.com/chat");
+  return response.json();  // Returns unknown, not any
+}
+
+async function getContent(): Promise<string> {
+  const data = await fetchAIResponse();
+
+  // Must narrow before accessing
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "content" in data &&
+    typeof (data as { content: unknown }).content === "string"
+  ) {
+    return (data as { content: string }).content;
+  }
+
+  throw new Error("Unexpected response shape");
+}
+
+
+Output (success case):
+
+// If API returns { content: "Hello from AI" }
+Hello from AI
+
+
+Output (failure case):
+
+// If API returns { message: "Error" }
+Error: Unexpected response shape
+
+
+This is more verbose than Python's "just access it" approach, but it catches type mismatches before production.
+
+Practical Pattern: AI Response Handler​
+
+Combining everything, here's a real-world pattern for handling AI streaming responses:
+
+// Define all possible chunk types
+type StreamChunk =
+  | { type: "start"; conversationId: string }
+  | { type: "content"; delta: string }
+  | { type: "tool_call"; name: string; arguments: string }
+  | { type: "done"; tokenCount: number };
+
+// Type-safe handler that must handle all cases
+function handleChunk(chunk: StreamChunk): void {
+  switch (chunk.type) {
+    case "start":
+      console.log(`Starting conversation: ${chunk.conversationId}`);
+      break;
+    case "content":
+      process.stdout.write(chunk.delta);
+      break;
+    case "tool_call":
+      console.log(`\nCalling tool: ${chunk.name}`);
+      break;
+    case "done":
+      console.log(`\nComplete. Tokens: ${chunk.tokenCount}`);
+      break;
+  }
+}
+
+// Usage examples
+handleChunk({ type: "start", conversationId: "abc123" });
+handleChunk({ type: "content", delta: "Hello" });
+handleChunk({ type: "content", delta: " world" });
+handleChunk({ type: "done", tokenCount: 42 });
+
+
+Output:
+
+Starting conversation: abc123
+Hello world
+Complete. Tokens: 42
+
+
+The switch statement is exhaustive—TypeScript verifies you handle every variant. Add a new chunk type later? The compiler shows everywhere you need to update.
+
+Common Patterns Summary​
+Pattern	Use Case	Example
+Union types	Value can be multiple types	string | number
+Literal types	Constrain to specific values	"success" | "error"
+Discriminated unions	Object variants with shared discriminant	{ type: "a" } | { type: "b" }
+typeof narrowing	Check primitive types	typeof x === "string"
+Property narrowing	Check object shape	"data" in result
+unknown over any	External data safety	API responses, JSON.parse
+
+These patterns compose together for complex AI application types. The streaming chunk handler above uses all of them.
+
+Try With AI​
+Prompt 1: Define a Response State Type​
+Create a TypeScript type called ChatState that represents three possible states:
+1. idle - no conversation active
+2. streaming - conversation in progress, with partial content (string)
+3. complete - conversation done, with full content (string) and token count (number)
+
+Then write a function displayState that takes a ChatState and logs appropriate
+output for each state. Make sure TypeScript enforces you handle all three cases.
+
+
+What you're learning: How discriminated unions model application state, and how the type system enforces exhaustive handling.
+
+Prompt 2: Refactor from any to unknown​
+I have this function that processes API responses unsafely:
+
+function getModelName(response: any): string {
+  return response.model;
+}
+
+Refactor it to use unknown instead of any. Add proper type narrowing so it:
+- Returns the model name if the response has a model property that's a string
+- Returns "unknown-model" if the response doesn't match
+
+What type checks do you need to add?
+
+
+What you're learning: The difference between trusting external data (any) and verifying it (unknown), which is essential for robust AI API integrations.
+
+Prompt 3: Build a Tool Response Type​
+AI agents call tools and get responses. Design a TypeScript type for tool responses
+where each tool returns a different shape:
+
+- "search" returns { results: string[] }
+- "calculator" returns { answer: number }
+- "weather" returns { temperature: number; conditions: string }
+
+Then write a function that takes a tool response and formats it as a human-readable
+string. Use a discriminated union with a "tool" field.
+
+
+What you're learning: How to model heterogeneous data from tool calls with precise types that prevent accessing wrong properties.

@@ -1,0 +1,735 @@
+Lab - Create Task API Dataset
+
+You've learned about dataset formats and quality dimensions. Now it's time to build something real: a complete training dataset for the Task API domain. By the end of this lab, you'll have 100+ instruction-response pairs ready for fine-tuning.
+
+This matters because synthetic data generation is how most production fine-tuning projects work. OpenAI, Anthropic, and Google all use synthetic data extensively. The skill you build here transfers to any domain you want to fine-tune.
+
+The Challenge: From Zero to Training Data​
+
+Imagine you're building a Task API assistant for your company. You need training data that teaches the model:
+
+How to create tasks with various parameters
+How to handle incomplete or ambiguous requests
+How to query and filter tasks
+How to update task status and properties
+How to handle errors gracefully
+
+You don't have thousands of real conversations to learn from. You have your domain knowledge and access to GPT-4o-mini. That's enough.
+
+Step 1: Design Your Seed Examples​
+
+Seed examples are the foundation. They define the patterns your synthetic data will follow. Poor seeds produce poor data; excellent seeds produce excellent data.
+
+The Coverage Matrix
+
+Before writing seeds, map what you need to cover:
+
+Action	Happy Path	Edge Case	Error Case
+Create	Basic task	Missing fields	Invalid priority
+Update	Change status	Partial update	Task not found
+Complete	Mark done	Already complete	Permission denied
+Delete	Remove task	Confirm deletion	Cannot delete active
+Query	List all	Filter by status	Empty results
+
+This matrix shows you need at least 15 seed examples (5 actions x 3 scenarios). We'll create 20 to ensure good variety.
+
+Create the Seed File
+
+Create seeds/task_api_seeds.json:
+
+{
+  "seeds": [
+    {
+      "scenario": "create_basic",
+      "conversations": [
+        {"from": "human", "value": "Create a task to review the quarterly budget by Friday"},
+        {"from": "gpt", "value": "I'll create that task for you. What priority level should it have - low, medium, or high?"},
+        {"from": "human", "value": "High priority"},
+        {"from": "gpt", "value": "Done! I've created the task 'Review quarterly budget' with a due date of Friday and high priority. The task ID is #1847."}
+      ]
+    },
+    {
+      "scenario": "create_missing_info",
+      "conversations": [
+        {"from": "human", "value": "I need a new task"},
+        {"from": "gpt", "value": "I can help you create a task. What should the task be about?"},
+        {"from": "human", "value": "Team meeting prep"},
+        {"from": "gpt", "value": "Got it - 'Team meeting prep'. When do you need this completed by?"},
+        {"from": "human", "value": "Next Monday"},
+        {"from": "gpt", "value": "I've created the task 'Team meeting prep' due Monday with medium priority (the default). Task ID is #1848. Would you like to adjust the priority?"}
+      ]
+    },
+    {
+      "scenario": "create_invalid_priority",
+      "conversations": [
+        {"from": "human", "value": "Create a task for code review with urgent priority"},
+        {"from": "gpt", "value": "I can create the code review task, but our priority levels are low, medium, or high. Did you mean high priority?"},
+        {"from": "human", "value": "Yes, high"},
+        {"from": "gpt", "value": "Created! Task 'Code review' with high priority. When should this be due?"}
+      ]
+    },
+    {
+      "scenario": "update_status",
+      "conversations": [
+        {"from": "human", "value": "Mark task #1523 as in progress"},
+        {"from": "gpt", "value": "Updated! Task #1523 'Database migration planning' is now marked as in progress."}
+      ]
+    },
+    {
+      "scenario": "update_partial",
+      "conversations": [
+        {"from": "human", "value": "Change the due date on task 1847 to next Wednesday"},
+        {"from": "gpt", "value": "I've updated task #1847 'Review quarterly budget'. The new due date is Wednesday, January 8th. The priority remains high."}
+      ]
+    },
+    {
+      "scenario": "update_not_found",
+      "conversations": [
+        {"from": "human", "value": "Update task 9999 to high priority"},
+        {"from": "gpt", "value": "I couldn't find task #9999. Would you like me to search for tasks by name instead? What was the task about?"}
+      ]
+    },
+    {
+      "scenario": "complete_task",
+      "conversations": [
+        {"from": "human", "value": "I finished the budget review"},
+        {"from": "gpt", "value": "Great work! I've marked task #1847 'Review quarterly budget' as completed. Your next high-priority task is 'Prepare board presentation' due tomorrow."}
+      ]
+    },
+    {
+      "scenario": "complete_already_done",
+      "conversations": [
+        {"from": "human", "value": "Complete task 1200"},
+        {"from": "gpt", "value": "Task #1200 'Security audit' was already marked as completed on December 28th. Did you mean a different task?"}
+      ]
+    },
+    {
+      "scenario": "query_filter",
+      "conversations": [
+        {"from": "human", "value": "Show me all my high priority tasks"},
+        {"from": "gpt", "value": "You have 3 high priority tasks:\n\n1. #1847 'Review quarterly budget' - Due Friday\n2. #1852 'Prepare board presentation' - Due tomorrow\n3. #1860 'Client proposal review' - Due Jan 10\n\nWould you like details on any of these?"}
+      ]
+    },
+    {
+      "scenario": "query_empty",
+      "conversations": [
+        {"from": "human", "value": "What tasks are overdue?"},
+        {"from": "gpt", "value": "Good news - you have no overdue tasks! Your earliest upcoming task is 'Prepare board presentation' due tomorrow."}
+      ]
+    },
+    {
+      "scenario": "delete_confirm",
+      "conversations": [
+        {"from": "human", "value": "Delete task 1523"},
+        {"from": "gpt", "value": "Are you sure you want to delete task #1523 'Database migration planning'? This action cannot be undone."},
+        {"from": "human", "value": "Yes, delete it"},
+        {"from": "gpt", "value": "Task #1523 has been deleted."}
+      ]
+    },
+    {
+      "scenario": "delete_active",
+      "conversations": [
+        {"from": "human", "value": "Remove the board presentation task"},
+        {"from": "gpt", "value": "Task #1852 'Prepare board presentation' is currently in progress. Would you like to mark it as cancelled instead, or complete it first?"},
+        {"from": "human", "value": "Cancel it"},
+        {"from": "gpt", "value": "I've marked task #1852 as cancelled. It will be archived but remain visible in your history."}
+      ]
+    }
+  ]
+}
+
+
+Output:
+
+Created seeds/task_api_seeds.json with 12 seed examples covering 5 actions x 3 scenarios
+
+
+Notice what makes these seeds effective:
+
+Natural language variation: "I finished the budget review" vs "Mark task #1523 as complete"
+Context-appropriate responses: The assistant suggests related tasks after completion
+Error handling: Graceful recovery from invalid inputs
+Multi-turn when needed: Some actions require clarification
+Step 2: Build the Generation Pipeline​
+
+Now we use GPT-4o-mini to expand our 12 seeds into 100+ examples. The key insight: we're not asking the model to invent new scenarios. We're asking it to create variations of our seeds.
+
+The Generation Script
+
+Create generate_dataset.py:
+
+"""
+Synthetic dataset generation for Task API fine-tuning.
+Uses GPT-4o-mini to expand seed examples into training data.
+
+Cost estimate: ~$0.10-0.15 for 100 examples
+"""
+import json
+import asyncio
+from pathlib import Path
+from pydantic import BaseModel, field_validator
+from openai import AsyncOpenAI
+
+# Schema for validation
+class Message(BaseModel):
+    from_: str  # 'human' or 'gpt'
+    value: str
+
+    class Config:
+        populate_by_name = True
+
+    @field_validator('from_', mode='before')
+    @classmethod
+    def rename_from(cls, v):
+        return v
+
+class Conversation(BaseModel):
+    conversations: list[dict]
+
+    @field_validator('conversations')
+    @classmethod
+    def validate_messages(cls, v):
+        for msg in v:
+            if msg.get('from') not in ('human', 'gpt'):
+                raise ValueError(f"Invalid 'from' value: {msg.get('from')}")
+            if not msg.get('value', '').strip():
+                raise ValueError("Empty message value")
+        return v
+
+# Generation prompt
+VARIATION_PROMPT = """You are creating training data for a Task API assistant.
+
+Given this seed conversation:
+{seed_conversation}
+
+Generate {num_variations} DIFFERENT conversations that follow the same pattern but with:
+- Different task names and descriptions
+- Different phrasing (formal, casual, brief, detailed)
+- Different specific values (dates, priorities, IDs)
+
+Rules:
+1. Keep the same general flow (same number of turns, same type of interaction)
+2. Make each variation feel like a real user conversation
+3. Use realistic task names from business contexts (meetings, reports, reviews, planning)
+4. Vary the user's communication style
+
+Return ONLY a JSON array of conversation objects. Each object must have a "conversations" key with messages.
+Each message has "from" (either "human" or "gpt") and "value" (the text).
+
+Example format:
+[
+  {{"conversations": [{{"from": "human", "value": "..."}}, {{"from": "gpt", "value": "..."}}]}},
+  {{"conversations": [{{"from": "human", "value": "..."}}, {{"from": "gpt", "value": "..."}}]}}
+]"""
+
+async def generate_variations(
+    client: AsyncOpenAI,
+    seed: dict,
+    num_variations: int = 8
+) -> list[dict]:
+    """Generate variations of a seed conversation."""
+    seed_text = json.dumps(seed["conversations"], indent=2)
+
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You generate high-quality training data."},
+            {"role": "user", "content": VARIATION_PROMPT.format(
+                seed_conversation=seed_text,
+                num_variations=num_variations
+            )}
+        ],
+        temperature=0.9,  # Higher for more variety
+        max_tokens=4000
+    )
+
+    # Parse response
+    content = response.choices[0].message.content
+    # Extract JSON from potential markdown code blocks
+    if "```" in content:
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+
+    try:
+        variations = json.loads(content)
+        # Validate each variation
+        valid = []
+        for v in variations:
+            try:
+                Conversation(**v)
+                valid.append(v)
+            except Exception as e:
+                print(f"  Skipping invalid variation: {e}")
+        return valid
+    except json.JSONDecodeError as e:
+        print(f"  Failed to parse JSON: {e}")
+        return []
+
+async def main():
+    # Load seeds
+    with open("seeds/task_api_seeds.json") as f:
+        seeds_data = json.load(f)
+
+    seeds = seeds_data["seeds"]
+    print(f"Loaded {len(seeds)} seed examples")
+
+    # Initialize client
+    client = AsyncOpenAI()
+
+    # Generate variations for each seed
+    all_conversations = []
+
+    # Add original seeds
+    for seed in seeds:
+        all_conversations.append({"conversations": seed["conversations"]})
+
+    print(f"Starting generation...")
+
+    # Generate 8 variations per seed (12 seeds x 8 = 96 + 12 originals = 108)
+    for i, seed in enumerate(seeds):
+        print(f"Processing seed {i+1}/{len(seeds)}: {seed['scenario']}")
+        variations = await generate_variations(client, seed, num_variations=8)
+        all_conversations.extend(variations)
+        print(f"  Generated {len(variations)} valid variations")
+        # Small delay to avoid rate limits
+        await asyncio.sleep(0.5)
+
+    print(f"\nTotal conversations: {len(all_conversations)}")
+
+    # Save dataset
+    output_path = Path("data/task_api_dataset.jsonl")
+    output_path.parent.mkdir(exist_ok=True)
+
+    with open(output_path, "w") as f:
+        for conv in all_conversations:
+            f.write(json.dumps(conv) + "\n")
+
+    print(f"Saved to {output_path}")
+
+    # Cost estimation
+    # GPT-4o-mini: $0.15/1M input tokens, $0.60/1M output tokens
+    # Rough estimate: ~500 input tokens + ~500 output tokens per call
+    # 12 calls x 1000 tokens = 12,000 tokens
+    estimated_cost = (12 * 500 * 0.15 / 1_000_000) + (12 * 500 * 0.60 / 1_000_000)
+    print(f"Estimated cost: ${estimated_cost:.4f}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+Output:
+
+Loaded 12 seed examples
+Starting generation...
+Processing seed 1/12: create_basic
+  Generated 8 valid variations
+Processing seed 2/12: create_missing_info
+  Generated 8 valid variations
+...
+Processing seed 12/12: delete_active
+  Generated 7 valid variations
+
+Total conversations: 106
+Saved to data/task_api_dataset.jsonl
+Estimated cost: $0.0036
+
+Step 3: Validate and Sample​
+
+Never trust generated data without inspection. Let's validate the dataset and manually review samples.
+
+Validation Script
+
+Create validate_dataset.py:
+
+"""Validate the generated dataset for quality issues."""
+import json
+from pathlib import Path
+from collections import Counter
+
+def load_dataset(path: str) -> list[dict]:
+    """Load JSONL dataset."""
+    conversations = []
+    with open(path) as f:
+        for line in f:
+            conversations.append(json.loads(line))
+    return conversations
+
+def analyze_dataset(conversations: list[dict]) -> dict:
+    """Analyze dataset statistics and quality."""
+    stats = {
+        "total_examples": len(conversations),
+        "turn_distribution": Counter(),
+        "avg_human_length": 0,
+        "avg_gpt_length": 0,
+        "issues": []
+    }
+
+    human_lengths = []
+    gpt_lengths = []
+
+    for i, conv in enumerate(conversations):
+        messages = conv.get("conversations", [])
+        num_turns = len(messages)
+        stats["turn_distribution"][num_turns] += 1
+
+        for msg in messages:
+            length = len(msg.get("value", ""))
+            if msg.get("from") == "human":
+                human_lengths.append(length)
+                # Check for suspiciously short messages
+                if length < 5:
+                    stats["issues"].append(f"Example {i}: Very short human message")
+            else:
+                gpt_lengths.append(length)
+                # Check for generic responses
+                if "I'll help" in msg.get("value", "") and length < 50:
+                    stats["issues"].append(f"Example {i}: Potentially generic response")
+
+    stats["avg_human_length"] = sum(human_lengths) / len(human_lengths) if human_lengths else 0
+    stats["avg_gpt_length"] = sum(gpt_lengths) / len(gpt_lengths) if gpt_lengths else 0
+
+    return stats
+
+def sample_conversations(conversations: list[dict], n: int = 5) -> list[dict]:
+    """Return evenly spaced samples for manual review."""
+    if len(conversations) <= n:
+        return conversations
+    step = len(conversations) // n
+    return [conversations[i * step] for i in range(n)]
+
+def format_conversation(conv: dict) -> str:
+    """Format a conversation for display."""
+    lines = []
+    for msg in conv.get("conversations", []):
+        role = "USER" if msg.get("from") == "human" else "ASSISTANT"
+        lines.append(f"{role}: {msg.get('value', '')}")
+    return "\n".join(lines)
+
+if __name__ == "__main__":
+    path = "data/task_api_dataset.jsonl"
+    conversations = load_dataset(path)
+
+    print("=" * 60)
+    print("DATASET VALIDATION REPORT")
+    print("=" * 60)
+
+    stats = analyze_dataset(conversations)
+
+    print(f"\nTotal examples: {stats['total_examples']}")
+    print(f"\nTurn distribution:")
+    for turns, count in sorted(stats['turn_distribution'].items()):
+        print(f"  {turns} turns: {count} examples")
+
+    print(f"\nAverage message lengths:")
+    print(f"  Human: {stats['avg_human_length']:.1f} characters")
+    print(f"  Assistant: {stats['avg_gpt_length']:.1f} characters")
+
+    if stats['issues']:
+        print(f"\nPotential issues ({len(stats['issues'])}):")
+        for issue in stats['issues'][:10]:  # Show first 10
+            print(f"  - {issue}")
+    else:
+        print("\nNo issues detected!")
+
+    print("\n" + "=" * 60)
+    print("SAMPLE CONVERSATIONS (for manual review)")
+    print("=" * 60)
+
+    samples = sample_conversations(conversations)
+    for i, conv in enumerate(samples):
+        print(f"\n--- Sample {i+1} ---")
+        print(format_conversation(conv))
+
+
+Output:
+
+============================================================
+DATASET VALIDATION REPORT
+============================================================
+
+Total examples: 106
+
+Turn distribution:
+  2 turns: 23 examples
+  4 turns: 58 examples
+  6 turns: 25 examples
+
+Average message lengths:
+  Human: 42.3 characters
+  Assistant: 127.8 characters
+
+No issues detected!
+
+============================================================
+SAMPLE CONVERSATIONS (for manual review)
+============================================================
+
+--- Sample 1 ---
+USER: Can you create a task for the weekly standup notes by Thursday?
+ASSISTANT: I'll set that up. What priority would you like - low, medium, or high?
+USER: Medium is fine
+ASSISTANT: Created! Task 'Weekly standup notes' is due Thursday with medium priority. Task ID #2341.
+
+--- Sample 2 ---
+USER: I need help with a new task
+ASSISTANT: Sure! What's the task about?
+USER: Quarterly performance reviews
+ASSISTANT: Got it. When do you need the performance reviews completed?
+USER: End of the month
+ASSISTANT: I've created 'Quarterly performance reviews' due January 31st with medium priority. Task ID #2342.
+...
+
+Step 4: Create Train/Validation Split​
+
+Training requires separate datasets for training and validation. The split prevents overfitting.
+
+"""Split dataset into train/validation/test sets."""
+import json
+import random
+from pathlib import Path
+
+def split_dataset(
+    input_path: str,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42
+) -> tuple[list, list, list]:
+    """Split dataset into train/val/test sets."""
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 0.001
+
+    # Load data
+    with open(input_path) as f:
+        data = [json.loads(line) for line in f]
+
+    # Shuffle with seed for reproducibility
+    random.seed(seed)
+    random.shuffle(data)
+
+    # Calculate split points
+    n = len(data)
+    train_end = int(n * train_ratio)
+    val_end = train_end + int(n * val_ratio)
+
+    return (
+        data[:train_end],
+        data[train_end:val_end],
+        data[val_end:]
+    )
+
+def save_split(data: list, path: str):
+    """Save split to JSONL file."""
+    Path(path).parent.mkdir(exist_ok=True, parents=True)
+    with open(path, "w") as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
+
+if __name__ == "__main__":
+    train, val, test = split_dataset("data/task_api_dataset.jsonl")
+
+    save_split(train, "data/splits/train.jsonl")
+    save_split(val, "data/splits/val.jsonl")
+    save_split(test, "data/splits/test.jsonl")
+
+    print(f"Dataset split complete:")
+    print(f"  Train: {len(train)} examples")
+    print(f"  Validation: {len(val)} examples")
+    print(f"  Test: {len(test)} examples")
+
+
+Output:
+
+Dataset split complete:
+  Train: 84 examples
+  Validation: 11 examples
+  Test: 11 examples
+
+Step 5: Export for Fine-Tuning Platforms​
+
+Different platforms expect different formats. Here's how to export for common targets.
+
+For OpenAI Fine-Tuning
+
+OpenAI expects a specific messages format:
+
+def convert_to_openai_format(conversations: list[dict]) -> list[dict]:
+    """Convert ShareGPT format to OpenAI messages format."""
+    openai_data = []
+
+    for conv in conversations:
+        messages = []
+        for msg in conv["conversations"]:
+            role = "user" if msg["from"] == "human" else "assistant"
+            messages.append({"role": role, "content": msg["value"]})
+        openai_data.append({"messages": messages})
+
+    return openai_data
+
+
+Output:
+
+{
+  "messages": [
+    {"role": "user", "content": "Create a task for the budget review"},
+    {"role": "assistant", "content": "I'll create that. What priority?"},
+    {"role": "user", "content": "High"},
+    {"role": "assistant", "content": "Created task #1847 with high priority."}
+  ]
+}
+
+
+For Hugging Face / Unsloth
+
+Keep the ShareGPT format - most open-source tools accept it directly:
+
+{
+  "conversations": [
+    {"from": "human", "value": "Create a task for the budget review"},
+    {"from": "gpt", "value": "I'll create that. What priority?"},
+    {"from": "human", "value": "High"},
+    {"from": "gpt", "value": "Created task #1847 with high priority."}
+  ]
+}
+
+The Complete Dataset​
+
+After running the full pipeline, you should have:
+
+data/
+  task_api_dataset.jsonl      # Full dataset (106 examples)
+  splits/
+    train.jsonl               # Training set (84 examples)
+    val.jsonl                 # Validation set (11 examples)
+    test.jsonl                # Test set (11 examples)
+  openai/
+    train.jsonl               # OpenAI format for fine-tuning
+
+
+Cost Summary:
+
+GPT-4o-mini generation: ~$0.004
+Validation pass: $0.00 (local)
+Total: Under $0.01
+
+Compare this to hiring data annotators or waiting for real user data. Synthetic generation isn't just cheaper; it's faster and more controllable.
+
+Common Mistakes​
+
+Mistake 1: Seeds that are too similar
+
+// Wrong - these are essentially the same
+{"scenario": "create_task", "conversations": [{"from": "human", "value": "Create a task"}...]}
+{"scenario": "make_task", "conversations": [{"from": "human", "value": "Make a task"}...]}
+
+
+Fix: Vary the scenario, not just the phrasing. One seed for basic creation, another for creation with missing info, another for creation with invalid input.
+
+Mistake 2: Inconsistent response style
+
+If your seeds mix formal and casual response styles, the model learns inconsistency. Pick a voice and stick to it:
+
+// Wrong - mixing styles
+"Created! Task ready to go buddy!"
+"Task #1847 has been successfully created and added to your queue."
+
+// Right - consistent professional-friendly tone
+"Done! I've created task #1847 'Budget review' due Friday."
+"Created! Task #1848 'Team meeting' is set for Monday."
+
+
+Mistake 3: Not validating the generated data
+
+Generated data can have subtle issues:
+
+Truncated conversations
+JSON formatting errors
+Off-topic responses
+Hallucinated features
+
+Always validate with Pydantic and sample manually before training.
+
+Try With AI​
+
+Now that you've built a complete dataset generation pipeline, explore these extensions with your AI partner.
+
+Prompt 1: Analyze Coverage Gaps
+
+I generated 106 training examples for a Task API assistant. The examples cover:
+- Task creation (basic, missing info, invalid input)
+- Task updates (status, partial, not found)
+- Task completion (normal, already done)
+- Task deletion (confirm, active task)
+- Task queries (filter, empty results)
+
+Review my coverage. What important scenarios am I missing? Consider:
+- Bulk operations
+- Recurring tasks
+- Shared/assigned tasks
+- Priority conflicts
+- Due date edge cases
+
+For each gap, suggest a seed conversation I could add.
+
+
+What you're learning: This prompt helps you think systematically about domain coverage. Real Task APIs have features beyond basic CRUD. Your AI partner can identify scenarios that would make your fine-tuned model more robust.
+
+Prompt 2: Improve Prompt Templates
+
+Here's my prompt for generating variations:
+
+[paste your VARIATION_PROMPT]
+
+The generated data is okay but some variations feel repetitive. Help me improve the prompt to get:
+1. More diverse phrasing styles (formal, casual, terse, verbose)
+2. More realistic task names from different business domains
+3. Better handling of context (time of day, user's apparent workload)
+
+Show me an improved prompt and explain your changes.
+
+
+What you're learning: Prompt engineering for data generation is a skill. Small changes to temperature, instructions, or examples can dramatically affect output quality. This prompt lets you iterate on your generation strategy.
+
+Prompt 3: Design Quality Metrics
+
+I'm validating my synthetic dataset manually, but this doesn't scale. Help me design automated quality metrics for Task API training data:
+
+1. Coherence: Does the conversation flow logically?
+2. Accuracy: Are task IDs, dates, and statuses consistent?
+3. Diversity: How different are the examples from each other?
+4. Naturalness: Does it sound like real user/assistant interaction?
+
+For each metric, suggest how to measure it programmatically. I can use embeddings, rules, or LLM-as-judge approaches.
+
+
+What you're learning: Dataset quality directly impacts model quality. This prompt helps you build automated quality gates that catch issues before training. The LLM-as-judge pattern you design here will be useful in Chapter 94 for evaluating fine-tuned model outputs.
+
+Reflect on Your Skill​
+
+You built an llmops-data-engineer skill in Lesson 0. This lab tested whether it covers synthetic generation effectively.
+
+Test Your Skill​
+Using my llmops-data-engineer skill, help me generate a synthetic training dataset.
+Does my skill guide me through seed design, variation generation, and validation?
+
+Identify Gaps​
+
+Consider:
+
+Did your skill include guidance on seed example design?
+Did it cover cost estimation for API calls?
+Did it include validation and quality sampling?
+Did it mention train/val/test splitting?
+Improve Your Skill​
+
+If you found gaps:
+
+Update my llmops-data-engineer skill to include:
+1. Seed design best practices (coverage matrix approach)
+2. Cost estimation for GPT-4o-mini generation
+3. Pydantic validation for ShareGPT format
+4. Quality sampling and manual review checklist
+5. Train/val/test splitting guidance
+
+
+Your skill should now guide you through any synthetic data generation project, not just Task API.

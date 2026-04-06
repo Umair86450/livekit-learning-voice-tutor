@@ -1,0 +1,504 @@
+Error Handling for Async Operations
+
+AI APIs are unreliable. Networks timeout. Rate limits trigger. Models occasionally refuse requests. Authentication tokens expire. If your code assumes every API call succeeds, your application will crash the moment reality intervenes.
+
+In Python, you learned try/except for synchronous code and similar patterns with asyncio. TypeScript uses the same fundamental approach: try/catch blocks wrap potentially failing code. But async operations introduce subtleties that Python developers often miss on first encounter.
+
+Consider this scenario: You're building a chat interface that calls three different AI models in parallel to compare their responses. Two succeed, one fails due to rate limiting. What should happen? Crash the whole request? Ignore the failure? Return partial results? The answer depends on your error handling strategy.
+
+This lesson teaches you to handle async errors gracefully in TypeScript, with specific focus on the error patterns you'll encounter when building AI applications.
+
+The try/catch Pattern for Async/Await​
+
+The syntax looks familiar from Python, but the behavior with async functions requires attention.
+
+// Basic try/catch with async/await
+async function callAI(prompt: string): Promise<string> {
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    // fetch doesn't throw on HTTP errors - must check manually
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+
+  } catch (error) {
+    // Handle the error appropriately
+    console.error("AI call failed:", error);
+    throw error; // Re-throw so caller knows it failed
+  }
+}
+
+
+Output (when API key is invalid):
+
+AI call failed: Error: API error: 401 Unauthorized
+
+
+Critical insight: The try block catches errors from await expressions. When fetch fails (network error) or when you throw explicitly (HTTP error), execution jumps to the catch block.
+
+The fetch Gotcha​
+
+Unlike Python's requests library or aiohttp, the Fetch API does NOT throw on HTTP error status codes:
+
+// This does NOT throw for 404, 500, etc.
+const response = await fetch("https://api.example.com/not-found");
+
+// response.ok is false for status >= 400
+console.log(response.ok);      // false
+console.log(response.status);  // 404
+
+
+Output:
+
+false
+404
+
+
+You must check response.ok and throw manually if you want HTTP errors to trigger your catch block. This is a common source of bugs when Python developers start with TypeScript.
+
+TypeScript's 'unknown' Error Type​
+
+Here's where TypeScript differs significantly from Python. In Python, you can write:
+
+except Exception as e:
+    print(e.message)  # Works in Python
+
+
+In TypeScript, caught errors are typed as unknown, not Error:
+
+try {
+  await riskyOperation();
+} catch (error) {
+  // error is type 'unknown' - not 'Error'!
+  console.log(error.message); // TypeScript error: 'error' is of type 'unknown'
+}
+
+
+TypeScript does this because anything can be thrown in JavaScript:
+
+throw "string error";           // Valid
+throw 42;                       // Valid
+throw { custom: "object" };     // Valid
+throw new Error("proper error"); // Also valid
+
+Type Narrowing for Safe Error Access​
+
+Use instanceof to narrow the error type before accessing properties:
+
+async function safeAICall(prompt: string): Promise<string> {
+  try {
+    return await callAI(prompt);
+  } catch (error: unknown) {
+    // Type narrowing with instanceof
+    if (error instanceof Error) {
+      // Now TypeScript knows error has .message, .name, .stack
+      console.error(`Error name: ${error.name}`);
+      console.error(`Error message: ${error.message}`);
+
+      // Check for specific error types
+      if (error.message.includes("401")) {
+        throw new Error("Authentication failed - check your API key");
+      }
+      if (error.message.includes("429")) {
+        throw new Error("Rate limited - try again later");
+      }
+    } else {
+      // Handle non-Error throws (rare but possible)
+      console.error("Unknown error type:", error);
+    }
+
+    throw error;
+  }
+}
+
+
+Output (when rate limited):
+
+Error name: Error
+Error message: API error: 429 Too Many Requests
+Error: Rate limited - try again later
+
+
+This pattern is essential for production code. Always narrow error types before accessing properties.
+
+Promise.catch() as an Alternative​
+
+For Promise chains (without async/await), use .catch():
+
+// Using .catch() with Promise chain
+function fetchAIResponse(prompt: string): Promise<string> {
+  return fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: "gpt-4",
+      messages: [{ role: "user", content: prompt }]
+    })
+  })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      return response.json();
+    })
+    .then(data => data.choices[0].message.content)
+    .catch(error => {
+      console.error("Request failed:", error);
+      throw error; // Re-throw to propagate
+    });
+}
+
+
+Output (on network failure):
+
+Request failed: TypeError: Failed to fetch
+
+
+.catch() is equivalent to wrapping the whole chain in try/catch. Most modern code uses async/await with try/catch, but you'll encounter .catch() in older codebases and library APIs.
+
+Converting Between Styles​
+
+Both styles are interchangeable:
+
+// Async/await style
+async function styleA(): Promise<string> {
+  try {
+    const result = await someAsyncOperation();
+    return result;
+  } catch (error) {
+    return "fallback";
+  }
+}
+
+// Promise chain style - equivalent
+function styleB(): Promise<string> {
+  return someAsyncOperation()
+    .catch(() => "fallback");
+}
+
+
+Choose based on readability. For complex error handling logic, try/catch is usually clearer.
+
+Unhandled Rejection Warnings​
+
+When a Promise rejects and no error handler exists, Node.js emits a warning:
+
+// This Promise rejects but nobody catches it
+async function dangerousCode(): Promise<void> {
+  throw new Error("Oops!");
+}
+
+// Calling without await or .catch()
+dangerousCode(); // No await, no .catch()
+
+// Node.js outputs:
+// UnhandledPromiseRejection: Error: Oops!
+
+
+Output:
+
+UnhandledPromiseRejection: Error: Oops!
+(node:12345) UnhandledPromiseRejectionWarning: Unhandled promise rejection.
+
+
+In Node.js 15+, unhandled rejections crash the process by default. Always handle async errors:
+
+// Good: await with try/catch
+try {
+  await dangerousCode();
+} catch (e) {
+  console.error("Handled:", e);
+}
+
+// Good: .catch() handler
+dangerousCode().catch(e => console.error("Handled:", e));
+
+// Good: Global handler (last resort)
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled rejection at:", promise, "reason:", reason);
+  // Log and exit gracefully
+  process.exit(1);
+});
+
+Partial Failure Handling with Promise.allSettled​
+
+When you call multiple AI models in parallel, some might fail while others succeed. Promise.all fails fast: if any Promise rejects, the entire operation fails immediately:
+
+// Promise.all fails if ANY request fails
+async function compareModels_fragile(prompt: string): Promise<string[]> {
+  const models = ["gpt-4", "gpt-3.5-turbo", "claude-3-opus"];
+
+  // If one fails, all results are lost!
+  const results = await Promise.all(
+    models.map(model => callModel(model, prompt))
+  );
+
+  return results;
+}
+
+
+For AI applications, you often want partial results. Use Promise.allSettled:
+
+interface ModelResult {
+  model: string;
+  response?: string;
+  error?: string;
+}
+
+async function compareModels(prompt: string): Promise<ModelResult[]> {
+  const models = ["gpt-4", "gpt-3.5-turbo", "claude-3-opus"];
+
+  // Promise.allSettled waits for ALL to complete, success or failure
+  const results = await Promise.allSettled(
+    models.map(async (model): Promise<ModelResult> => {
+      const response = await callModel(model, prompt);
+      return { model, response };
+    })
+  );
+
+  // Process results - each has status 'fulfilled' or 'rejected'
+  return results.map((result, index) => {
+    if (result.status === "fulfilled") {
+      return result.value;
+    } else {
+      // result.status === 'rejected'
+      const error = result.reason instanceof Error
+        ? result.reason.message
+        : String(result.reason);
+      return { model: models[index], error };
+    }
+  });
+}
+
+// Usage
+const responses = await compareModels("Explain async/await");
+console.log(responses);
+
+
+Output (when one model is rate-limited):
+
+[
+  { model: "gpt-4", response: "Async/await is a syntax..." },
+  { model: "gpt-3.5-turbo", response: "The async keyword..." },
+  { model: "claude-3-opus", error: "429 Too Many Requests" }
+]
+
+
+This pattern is essential for AI applications where:
+
+You're comparing multiple model outputs
+You're making batch requests to process many items
+Partial results are better than complete failure
+Classifying AI API Errors​
+
+Different errors require different handling strategies:
+
+Error Type	HTTP Status	Strategy
+Network failure	No response	Retry immediately
+Rate limit	429	Wait and retry with backoff
+Authentication	401, 403	Don't retry; fix credentials
+Model overloaded	503	Retry after delay
+Invalid request	400	Don't retry; fix request
+Server error	500	Retry with backoff
+interface AIError {
+  type: "network" | "rate_limit" | "auth" | "invalid" | "server";
+  retryable: boolean;
+  retryAfter?: number; // seconds
+}
+
+function classifyError(error: unknown, response?: Response): AIError {
+  // Network errors (no response)
+  if (!response) {
+    return { type: "network", retryable: true };
+  }
+
+  switch (response.status) {
+    case 429:
+      // Rate limit - check Retry-After header
+      const retryAfter = parseInt(response.headers.get("Retry-After") || "60");
+      return { type: "rate_limit", retryable: true, retryAfter };
+
+    case 401:
+    case 403:
+      return { type: "auth", retryable: false };
+
+    case 400:
+      return { type: "invalid", retryable: false };
+
+    case 500:
+    case 502:
+    case 503:
+      return { type: "server", retryable: true };
+
+    default:
+      return { type: "server", retryable: true };
+  }
+}
+
+
+Output (for a 429 response):
+
+{ type: "rate_limit", retryable: true, retryAfter: 60 }
+
+
+This classification feeds into retry logic, which you'll implement in Lesson 6.
+
+Complete Example: Robust AI API Wrapper​
+
+Combining all patterns into a production-ready wrapper:
+
+interface AIResponse {
+  content: string;
+  model: string;
+}
+
+interface AIErrorResult {
+  error: string;
+  retryable: boolean;
+}
+
+type AIResult = AIResponse | AIErrorResult;
+
+async function robustAICall(
+  prompt: string,
+  model: string = "gpt-4"
+): Promise<AIResult> {
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    if (!response.ok) {
+      const errorInfo = classifyError(null, response);
+      return {
+        error: `${response.status}: ${response.statusText}`,
+        retryable: errorInfo.retryable
+      };
+    }
+
+    const data = await response.json();
+    return {
+      content: data.choices[0].message.content,
+      model
+    };
+
+  } catch (error: unknown) {
+    // Network or parsing error
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return {
+      error: message,
+      retryable: true // Network errors are usually retryable
+    };
+  }
+}
+
+// Usage with type narrowing
+const result = await robustAICall("Hello!");
+
+if ("error" in result) {
+  console.log(`Failed: ${result.error}`);
+  if (result.retryable) {
+    console.log("Will retry...");
+  }
+} else {
+  console.log(`Response from ${result.model}: ${result.content}`);
+}
+
+
+Output (successful call):
+
+Response from gpt-4: Hello! How can I help you today?
+
+
+Output (rate limited):
+
+Failed: 429: Too Many Requests
+Will retry...
+
+
+This pattern returns a discriminated union: either success with content, or failure with error details. The caller decides whether to retry, display an error, or fall back to another model.
+
+Try With AI​
+Prompt 1: Debug an Async Error Scenario​
+I have this TypeScript code that calls an AI API. It's crashing with
+"TypeError: Cannot read property 'message' of undefined". Help me debug:
+
+async function getAIResponse(prompt: string) {
+  try {
+    const response = await fetch(API_URL, { method: "POST", body: JSON.stringify({ prompt }) });
+    const data = await response.json();
+    return data.choices[0].message.content;
+  } catch (e) {
+    console.log(e.message); // Crash happens here sometimes
+    throw e;
+  }
+}
+
+What's wrong and how do I fix it? Show me the corrected code.
+
+
+What you're learning: Applying the unknown type narrowing pattern to real debugging. AI helps identify that e is typed as unknown and needs type guards.
+
+Prompt 2: Design a Partial Failure Handler​
+I'm building a function that calls 5 different AI models in parallel to
+compare responses. Requirements:
+- If 3+ succeed, return those results
+- If 2 or fewer succeed, throw an error with details about what failed
+- Never lose successful results just because one model failed
+
+Help me implement this using Promise.allSettled. Start by asking what
+information I need about each failure (just message? retry info? response time?).
+
+
+What you're learning: Requirements clarification through dialogue. AI asks follow-up questions to understand your needs before proposing a solution.
+
+Prompt 3: Convert Error Handling Patterns​
+I have Python async error handling experience but I'm learning TypeScript.
+Convert this Python pattern to TypeScript:
+
+async def fetch_with_retry(url: str, max_retries: int = 3) -> dict:
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)
+
+Focus on: How does TypeScript's error typing differ from Python's?
+Why can't I just write "catch (e: Error)"?
+
+
+What you're learning: Cross-language pattern translation. AI explains TypeScript's stricter approach to error typing and why Python's duck typing doesn't apply.
+
+Safety Note​
+
+When testing error handling patterns, use mock APIs or test endpoints rather than production AI APIs. Rate limit errors on real APIs can temporarily block your access. Consider using environment variables for API keys and never commit them to version control.

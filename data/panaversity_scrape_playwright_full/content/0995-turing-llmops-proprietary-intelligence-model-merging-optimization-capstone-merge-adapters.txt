@@ -1,0 +1,712 @@
+Capstone - Merge Task API Adapters
+
+You've built two specialized adapters across Chapters 95-96: the TaskMaster persona adapter that gives your model a distinctive, encouraging voice, and the agentic adapter that enables reliable tool-calling. Now you'll merge them into a unified model—a Digital FTE that combines personality with capability.
+
+This capstone is Layer 4: Spec-Driven Integration. You'll work from a specification, compose techniques from previous lessons, and produce a production-ready merged model.
+
+The Specification​
+Task API Unified Model Specification​
+
+Intent: Merge persona and agentic adapters into a single model that maintains TaskMaster's voice while reliably executing tool calls—the complete Task API Digital FTE.
+
+Success Criteria:
+
+Metric	Target	Measurement
+Persona preservation	>85%	Voice consistency, tone, encouragement patterns
+Agentic preservation	>90%	Tool selection, argument extraction, JSON validity
+Combined capability	No regression	Both capabilities function when invoked together
+Latency	<500ms	p95 inference time
+Memory	<8 GB	Inference RAM requirement
+
+Source Adapters:
+
+./adapters/task_api_persona (Chapter 95)
+./adapters/task_api_agentic (Chapter 96)
+Base model: unsloth/Llama-3.2-3B-Instruct
+
+Merge Strategy: TIES (primary), with DARE-TIES backup if conflicts detected
+
+Non-Goals:
+
+General conversational capability beyond Task API context
+Support for models other than the base model used in training
+Real-time streaming (batch inference is sufficient)
+Phase 1: Adapter Analysis (15 minutes)​
+Load and Inspect Adapters​
+
+Before merging, understand what you're combining:
+
+from safetensors import safe_open
+from pathlib import Path
+import numpy as np
+
+def analyze_adapter(adapter_path: str) -> dict:
+    """Analyze adapter structure and weight distribution."""
+
+    adapter_files = list(Path(adapter_path).glob("*.safetensors"))
+    if not adapter_files:
+        raise ValueError(f"No safetensors found in {adapter_path}")
+
+    analysis = {
+        "path": adapter_path,
+        "layers": {},
+        "total_params": 0,
+        "weight_stats": []
+    }
+
+    for shard in adapter_files:
+        with safe_open(str(shard), framework="pt", device="cpu") as f:
+            for key in f.keys():
+                tensor = f.get_tensor(key)
+                params = tensor.numel()
+                analysis["total_params"] += params
+
+                # Track layer info
+                layer_name = key.split(".")[0] if "." in key else key
+                if layer_name not in analysis["layers"]:
+                    analysis["layers"][layer_name] = {"params": 0, "keys": []}
+                analysis["layers"][layer_name]["params"] += params
+                analysis["layers"][layer_name]["keys"].append(key)
+
+                # Weight statistics
+                analysis["weight_stats"].append({
+                    "key": key,
+                    "shape": list(tensor.shape),
+                    "mean": float(tensor.mean()),
+                    "std": float(tensor.std()),
+                    "max": float(tensor.max()),
+                    "min": float(tensor.min())
+                })
+
+    return analysis
+
+# Analyze both adapters
+persona_analysis = analyze_adapter("./adapters/task_api_persona")
+agentic_analysis = analyze_adapter("./adapters/task_api_agentic")
+
+print(f"Persona Adapter:")
+print(f"  Total parameters: {persona_analysis['total_params']:,}")
+print(f"  Layers: {len(persona_analysis['layers'])}")
+
+print(f"\nAgentic Adapter:")
+print(f"  Total parameters: {agentic_analysis['total_params']:,}")
+print(f"  Layers: {len(agentic_analysis['layers'])}")
+
+
+Output:
+
+Persona Adapter:
+  Total parameters: 4,194,304
+  Layers: 28
+
+Agentic Adapter:
+  Total parameters: 4,194,304
+  Layers: 28
+
+Check Compatibility​
+def check_merge_compatibility(adapter_a: dict, adapter_b: dict) -> dict:
+    """Verify adapters are compatible for merging."""
+
+    compatibility = {
+        "compatible": True,
+        "issues": [],
+        "warnings": []
+    }
+
+    # Check parameter count
+    if adapter_a["total_params"] != adapter_b["total_params"]:
+        compatibility["issues"].append(
+            f"Parameter count mismatch: {adapter_a['total_params']} vs {adapter_b['total_params']}"
+        )
+        compatibility["compatible"] = False
+
+    # Check layer structure
+    if set(adapter_a["layers"].keys()) != set(adapter_b["layers"].keys()):
+        compatibility["issues"].append("Layer structure mismatch")
+        compatibility["compatible"] = False
+
+    # Check for overlapping weight distributions (potential conflict)
+    for stat_a in adapter_a["weight_stats"][:5]:  # Sample check
+        for stat_b in adapter_b["weight_stats"][:5]:
+            if stat_a["key"] == stat_b["key"]:
+                # Check sign agreement
+                if np.sign(stat_a["mean"]) != np.sign(stat_b["mean"]):
+                    compatibility["warnings"].append(
+                        f"Potential sign conflict: {stat_a['key']}"
+                    )
+
+    return compatibility
+
+compat = check_merge_compatibility(persona_analysis, agentic_analysis)
+print(f"Compatible: {compat['compatible']}")
+if compat["issues"]:
+    print(f"Issues: {compat['issues']}")
+if compat["warnings"]:
+    print(f"Warnings: {compat['warnings']}")
+
+
+Output:
+
+Compatible: True
+Warnings: ['Potential sign conflict: model.layers.0.self_attn.q_proj.lora_A']
+
+
+Sign conflicts are expected—that's why we use TIES.
+
+Phase 2: Baseline Merge (15 minutes)​
+Create TIES Configuration​
+# merge_config.yaml
+merge_method: ties
+slices:
+  - sources:
+      - model: ./adapters/task_api_persona
+        layer_range: [0, 28]
+      - model: ./adapters/task_api_agentic
+        layer_range: [0, 28]
+parameters:
+  weight: 0.5           # Equal weighting to start
+  density: 0.5          # Default density
+base_model: unsloth/Llama-3.2-3B-Instruct
+dtype: float16
+tokenizer_source: base
+
+Execute Merge​
+# Run merge with memory optimization
+mergekit-yaml merge_config.yaml ./merged_v1 --lazy --low-cpu-mem
+
+# Verify output
+ls -la ./merged_v1/
+
+
+Output:
+
+Loading base model: unsloth/Llama-3.2-3B-Instruct
+Loading adapter: ./adapters/task_api_persona
+Loading adapter: ./adapters/task_api_agentic
+Applying TIES merging...
+  Trimming with density=0.5
+  Resolving 1,245 sign conflicts
+  Merging remaining parameters
+Saving to ./merged_v1
+Merge complete in 3m 42s
+
+total 6.1G
+-rw-r--r-- 1 user user 2.0G model-00001-of-00003.safetensors
+-rw-r--r-- 1 user user 2.0G model-00002-of-00003.safetensors
+-rw-r--r-- 1 user user 2.1G model-00003-of-00003.safetensors
+-rw-r--r-- 1 user user  654 config.json
+-rw-r--r-- 1 user user  500K tokenizer.json
+
+Phase 3: Capability Evaluation (25 minutes)​
+Design Evaluation Suite​
+EVALUATION_SUITE = {
+    "persona": {
+        "description": "Evaluate TaskMaster voice preservation",
+        "tests": [
+            {
+                "id": "persona_001",
+                "input": "Hello!",
+                "expected_traits": ["greeting", "encouraging", "task-focused"],
+                "not_expected": ["generic", "formal", "robotic"]
+            },
+            {
+                "id": "persona_002",
+                "input": "I just finished a big project!",
+                "expected_traits": ["celebration", "positive reinforcement", "motivation"],
+                "not_expected": ["dismissive", "neutral"]
+            },
+            {
+                "id": "persona_003",
+                "input": "I'm feeling overwhelmed with my tasks",
+                "expected_traits": ["empathy", "supportive", "actionable advice"],
+                "not_expected": ["critical", "dismissive"]
+            },
+            # ... 50 persona trait tests
+        ],
+        "scoring": {
+            "method": "trait_presence",
+            "threshold": 0.85  # 85% trait match
+        }
+    },
+
+    "agentic": {
+        "description": "Evaluate tool-calling preservation",
+        "tests": [
+            {
+                "id": "agentic_001",
+                "input": "Create a task to review the budget",
+                "expected_tool": "create_task",
+                "expected_args": {"title": "review the budget"}
+            },
+            {
+                "id": "agentic_002",
+                "input": "What tasks do I have due this week?",
+                "expected_tool": "list_tasks",
+                "expected_args": {"due_before": ".*"}  # Regex match
+            },
+            {
+                "id": "agentic_003",
+                "input": "Mark the budget review complete",
+                "expected_tool": "complete_task",
+                "expected_args": {"task_id": ".*"}
+            },
+            # ... 50 tool-calling tests
+        ],
+        "scoring": {
+            "method": "exact_match",
+            "threshold": 0.90  # 90% tool accuracy
+        }
+    },
+
+    "combined": {
+        "description": "Evaluate persona + agentic working together",
+        "tests": [
+            {
+                "id": "combined_001",
+                "input": "I need help creating a task for my big presentation next week",
+                "expected_tool": "create_task",
+                "expected_traits": ["encouraging", "supportive"],
+                "notes": "Should call tool AND respond with TaskMaster voice"
+            },
+            {
+                "id": "combined_002",
+                "input": "What should I focus on today?",
+                "expected_tool": "list_tasks",
+                "expected_traits": ["prioritization guidance", "motivating"],
+                "notes": "Should query tasks AND provide persona-styled response"
+            },
+        ],
+        "scoring": {
+            "method": "combined",
+            "tool_weight": 0.6,
+            "persona_weight": 0.4,
+            "threshold": 0.85
+        }
+    }
+}
+
+Run Evaluation​
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def evaluate_merged_model(model_path: str, suite: dict) -> dict:
+    """Comprehensive evaluation of merged model."""
+
+    # Load model
+    model = AutoModelForCausalLM.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    results = {}
+
+    # Evaluate persona
+    print("Evaluating persona preservation...")
+    persona_results = evaluate_persona_suite(model, tokenizer, suite["persona"])
+    results["persona"] = persona_results
+    print(f"  Score: {persona_results['score']:.2%}")
+
+    # Evaluate agentic
+    print("Evaluating agentic preservation...")
+    agentic_results = evaluate_agentic_suite(model, tokenizer, suite["agentic"])
+    results["agentic"] = agentic_results
+    print(f"  Score: {agentic_results['score']:.2%}")
+
+    # Evaluate combined
+    print("Evaluating combined capability...")
+    combined_results = evaluate_combined_suite(model, tokenizer, suite["combined"])
+    results["combined"] = combined_results
+    print(f"  Score: {combined_results['score']:.2%}")
+
+    # Overall assessment
+    results["overall"] = {
+        "persona_pass": persona_results["score"] >= suite["persona"]["scoring"]["threshold"],
+        "agentic_pass": agentic_results["score"] >= suite["agentic"]["scoring"]["threshold"],
+        "combined_pass": combined_results["score"] >= suite["combined"]["scoring"]["threshold"],
+    }
+    results["overall"]["all_pass"] = all(results["overall"].values())
+
+    return results
+
+# Evaluate baseline merge
+results_v1 = evaluate_merged_model("./merged_v1", EVALUATION_SUITE)
+
+
+Output:
+
+Evaluating persona preservation...
+  Score: 82.00%
+Evaluating agentic preservation...
+  Score: 94.50%
+Evaluating combined capability...
+  Score: 83.20%
+
+Analyze Results​
+def print_evaluation_report(results: dict, version: str):
+    """Print formatted evaluation report."""
+
+    print("=" * 60)
+    print(f"MERGED MODEL EVALUATION - {version}")
+    print("=" * 60)
+
+    for category in ["persona", "agentic", "combined"]:
+        cat_results = results[category]
+        status = "PASS" if results["overall"][f"{category}_pass"] else "FAIL"
+        print(f"{category.upper():15} {cat_results['score']:.1%}  [{status}]")
+
+        # Show failures
+        if cat_results.get("failures"):
+            print(f"  Failed cases ({len(cat_results['failures'])}):")
+            for fail in cat_results["failures"][:3]:
+                print(f"    - {fail['id']}: {fail['reason'][:50]}")
+
+    print("=" * 60)
+    overall_status = "PASS" if results["overall"]["all_pass"] else "NEEDS IMPROVEMENT"
+    print(f"OVERALL: {overall_status}")
+
+print_evaluation_report(results_v1, "v1 (TIES default)")
+
+
+Output:
+
+============================================================
+MERGED MODEL EVALUATION - v1 (TIES default)
+============================================================
+PERSONA         82.0%  [FAIL]
+  Failed cases (9):
+    - persona_003: Missing empathy trait
+    - persona_007: Response too brief
+    - persona_012: Generic phrasing instead of TaskMaster
+AGENTIC         94.5%  [PASS]
+COMBINED        83.2%  [FAIL]
+  Failed cases (8):
+    - combined_001: Tool called but response lacked persona
+    - combined_005: Persona present but no tool call
+============================================================
+OVERALL: NEEDS IMPROVEMENT
+
+
+Persona preservation is below threshold. Let's tune.
+
+Phase 4: Parameter Optimization (15 minutes)​
+Hypothesis: Persona Needs Higher Weight​
+
+The agentic adapter might be dominating. Try adjusting weights:
+
+# merge_config_v2.yaml
+merge_method: ties
+slices:
+  - sources:
+      - model: ./adapters/task_api_persona
+        layer_range: [0, 28]
+        parameters:
+          weight: 0.6    # Increase persona weight
+      - model: ./adapters/task_api_agentic
+        layer_range: [0, 28]
+        parameters:
+          weight: 0.4    # Decrease agentic weight
+parameters:
+  density: 0.5
+base_model: unsloth/Llama-3.2-3B-Instruct
+dtype: float16
+
+Execute and Evaluate​
+mergekit-yaml merge_config_v2.yaml ./merged_v2 --lazy --low-cpu-mem
+
+results_v2 = evaluate_merged_model("./merged_v2", EVALUATION_SUITE)
+print_evaluation_report(results_v2, "v2 (persona=0.6, agentic=0.4)")
+
+
+Output:
+
+============================================================
+MERGED MODEL EVALUATION - v2 (persona=0.6, agentic=0.4)
+============================================================
+PERSONA         87.5%  [PASS]
+AGENTIC         91.2%  [PASS]
+COMBINED        86.8%  [PASS]
+============================================================
+OVERALL: PASS
+
+
+Weight adjustment fixed persona preservation while maintaining agentic quality.
+
+Try DARE-TIES for Compression​
+
+Can we achieve similar quality with fewer parameters?
+
+# merge_config_v3.yaml
+merge_method: dare_ties
+slices:
+  - sources:
+      - model: ./adapters/task_api_persona
+        layer_range: [0, 28]
+        parameters:
+          weight: 0.6
+      - model: ./adapters/task_api_agentic
+        layer_range: [0, 28]
+        parameters:
+          weight: 0.4
+parameters:
+  density: 0.3    # Keep only 30% of parameters
+  rescale: true
+base_model: unsloth/Llama-3.2-3B-Instruct
+dtype: float16
+
+results_v3 = evaluate_merged_model("./merged_v3", EVALUATION_SUITE)
+print_evaluation_report(results_v3, "v3 (DARE-TIES density=0.3)")
+
+
+Output:
+
+============================================================
+MERGED MODEL EVALUATION - v3 (DARE-TIES density=0.3)
+============================================================
+PERSONA         84.2%  [FAIL]
+AGENTIC         88.5%  [FAIL]
+COMBINED        82.1%  [FAIL]
+============================================================
+OVERALL: NEEDS IMPROVEMENT
+
+
+DARE-TIES with 70% drop is too aggressive. Try density=0.4:
+
+# Quick test with density=0.4
+results_v4 = evaluate_merged_model("./merged_v4", EVALUATION_SUITE)
+print_evaluation_report(results_v4, "v4 (DARE-TIES density=0.4)")
+
+
+Output:
+
+============================================================
+MERGED MODEL EVALUATION - v4 (DARE-TIES density=0.4)
+============================================================
+PERSONA         86.1%  [PASS]
+AGENTIC         90.8%  [PASS]
+COMBINED        85.2%  [PASS]
+============================================================
+OVERALL: PASS
+
+
+DARE-TIES with density=0.4 achieves compression while passing quality gates.
+
+Phase 5: Final Selection and Packaging (10 minutes)​
+Compare All Versions​
+def compare_versions(results_dict: dict):
+    """Compare all merge versions."""
+
+    print("=" * 70)
+    print(f"{'Version':<25} {'Persona':<12} {'Agentic':<12} {'Combined':<12} {'Status'}")
+    print("=" * 70)
+
+    for version, results in results_dict.items():
+        persona = f"{results['persona']['score']:.1%}"
+        agentic = f"{results['agentic']['score']:.1%}"
+        combined = f"{results['combined']['score']:.1%}"
+        status = "PASS" if results['overall']['all_pass'] else "FAIL"
+        print(f"{version:<25} {persona:<12} {agentic:<12} {combined:<12} {status}")
+
+    print("=" * 70)
+
+compare_versions({
+    "v1 (TIES default)": results_v1,
+    "v2 (TIES weighted)": results_v2,
+    "v3 (DARE density=0.3)": results_v3,
+    "v4 (DARE density=0.4)": results_v4,
+})
+
+
+Output:
+
+======================================================================
+Version                   Persona      Agentic      Combined     Status
+======================================================================
+v1 (TIES default)         82.0%        94.5%        83.2%        FAIL
+v2 (TIES weighted)        87.5%        91.2%        86.8%        PASS
+v3 (DARE density=0.3)     84.2%        88.5%        82.1%        FAIL
+v4 (DARE density=0.4)     86.1%        90.8%        85.2%        PASS
+======================================================================
+
+Select Production Model​
+
+Decision matrix:
+
+Version	Quality	Compression	Recommendation
+v2 (TIES)	Highest	None	Best quality
+v4 (DARE)	Acceptable	60% params	Best efficiency
+
+For production: Use v2 for maximum quality For edge deployment: Use v4 for reduced memory
+
+Package for Deployment​
+import shutil
+import json
+
+def package_merged_model(
+    source_dir: str,
+    output_name: str,
+    metadata: dict
+) -> str:
+    """Package merged model with metadata for deployment."""
+
+    output_dir = f"./releases/{output_name}"
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Copy model files
+    for f in Path(source_dir).glob("*"):
+        if f.is_file():
+            shutil.copy(f, output_dir)
+
+    # Add metadata
+    metadata_path = Path(output_dir) / "merge_metadata.json"
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    # Create README
+    readme = f"""# {metadata['name']}
+
+{metadata['description']}
+
+## Capabilities
+- TaskMaster persona (voice, encouragement, productivity focus)
+- Agentic tool-calling (Task API integration)
+
+## Metrics
+- Persona preservation: {metadata['metrics']['persona']:.1%}
+- Agentic preservation: {metadata['metrics']['agentic']:.1%}
+- Combined capability: {metadata['metrics']['combined']:.1%}
+
+## Usage
+Load with transformers:
+from transformers import AutoModelForCausalLM, AutoTokenizer
+model = AutoModelForCausalLM.from_pretrained("{output_dir}")
+tokenizer = AutoTokenizer.from_pretrained("{output_dir}")
+
+## Source Adapters
+- Persona: {metadata['sources']['persona']}
+- Agentic: {metadata['sources']['agentic']}
+
+## Merge Configuration
+- Method: {metadata['merge_config']['method']}
+- Weights: {metadata['merge_config']['weights']}
+- Density: {metadata['merge_config']['density']}
+"""
+
+    with open(Path(output_dir) / "README.md", "w") as f:
+        f.write(readme)
+
+    print(f"Packaged model to {output_dir}")
+    return output_dir
+
+
+# Package production model
+package_merged_model(
+    source_dir="./merged_v2",
+    output_name="task-api-unified-v1.0",
+    metadata={
+        "name": "Task API Unified Model",
+        "version": "1.0.0",
+        "description": "TaskMaster persona + Agentic tool-calling for Task API",
+        "base_model": "unsloth/Llama-3.2-3B-Instruct",
+        "sources": {
+            "persona": "./adapters/task_api_persona",
+            "agentic": "./adapters/task_api_agentic"
+        },
+        "merge_config": {
+            "method": "ties",
+            "weights": {"persona": 0.6, "agentic": 0.4},
+            "density": 0.5
+        },
+        "metrics": {
+            "persona": 0.875,
+            "agentic": 0.912,
+            "combined": 0.868
+        }
+    }
+)
+
+
+Output:
+
+Packaged model to ./releases/task-api-unified-v1.0
+
+Checkpoint: Production Readiness​
+Criterion	Status	Evidence
+Adapters analyzed	Done	Compatible structure, sign conflicts identified
+Baseline merge complete	Done	TIES default
+Evaluation suite designed	Done	Persona, agentic, combined tests
+Parameter tuning	Done	Weight adjustment (0.6/0.4)
+Quality gates passed	Done	All metrics above threshold
+Compression explored	Done	DARE-TIES viable at density=0.4
+Model packaged	Done	Release with metadata and README
+
+Your Task API Digital FTE is production-ready.
+
+Reflect on Your Skill​
+
+Your model-merging skill is now complete. Review your capability:
+
+Adapter analysis: Compatibility checking, conflict detection
+Strategy selection: TIES vs DARE-TIES decision framework
+Parameter tuning: Weight and density optimization
+Evaluation design: Multi-capability preservation testing
+Production packaging: Metadata, documentation, versioning
+
+This skill is reusable for any model merging project.
+
+Try With AI​
+Prompt 1: Debug Quality Regression​
+My merged model passed all tests in isolation but fails in production:
+- Users report the persona "feels off" sometimes
+- Tool calls occasionally miss when embedded in conversation
+
+My evaluation suite tests each capability separately. What am I missing?
+
+Help me design tests that catch:
+1. Context-dependent capability switching
+2. Long conversation degradation
+3. Edge cases where capabilities interact poorly
+
+
+What you're learning: Evaluation completeness—understanding gaps between synthetic tests and real usage.
+
+Prompt 2: Optimize for Different Deployment​
+I have my Task API unified model (3B params, 6GB VRAM).
+I need to deploy it in three scenarios:
+
+1. Cloud API: Maximize quality, cost is secondary
+2. Edge device: Must fit in 4GB RAM
+3. Batch processing: Optimize for throughput, not latency
+
+For each scenario, what would you change about my merge configuration
+or post-merge optimization? Walk through the tradeoffs.
+
+
+What you're learning: Deployment-aware optimization—tailoring models to operational requirements.
+
+Prompt 3: Plan Next Iteration​
+My v1.0 merged model works but I want v2.0 with improvements:
+
+Current metrics:
+- Persona: 87.5%
+- Agentic: 91.2%
+- Combined: 86.8%
+
+I have ideas for improvement:
+1. Add distilled reasoning from GPT-4
+2. Retrain persona adapter with more data
+3. Add a third "safety" adapter
+
+Help me prioritize and plan:
+1. Which improvement has highest ROI?
+2. How would merging change with 3 adapters?
+3. What risks should I watch for?
+
+
+What you're learning: Roadmap planning—prioritizing improvements for production systems.
+
+Safety Note​
+
+Merged models combine capabilities—including any biases or failure modes from source adapters. Your unified model may exhibit unexpected behaviors when persona and agentic capabilities interact. For production deployment, implement monitoring for:
+
+Unusual response patterns
+Tool calls with persona-style arguments (contamination)
+Persona responses that should have been tool calls
+
+Never assume merged model behavior is the simple sum of its parts. Continuous monitoring is essential.

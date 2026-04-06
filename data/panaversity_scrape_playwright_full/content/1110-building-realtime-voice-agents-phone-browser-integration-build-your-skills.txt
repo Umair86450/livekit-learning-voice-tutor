@@ -1,0 +1,434 @@
+Build Your Integration Skills
+
+Your voice agents are powerful, but they're trapped. Users can't reach them by phone. Browsers can't connect microphones to them. This chapter breaks those barriers.
+
+You've built voice agents with LiveKit, Pipecat, and direct APIs. Now you'll connect them to the real world: phone networks where callers dial actual numbers, and browsers where users click a microphone button. By chapter's end, your Digital FTEs will be reachable from anywhere.
+
+This lesson creates two skills that power that capability. One handles telephony—connecting voice agents to phone networks through SIP trunks and providers like Twilio. The other handles browser audio—capturing microphone input and detecting speech client-side before it ever reaches your server.
+
+Why Two Skills?​
+
+Phone integration and browser audio seem related—both connect users to voice agents. But they're fundamentally different domains:
+
+Phone Integration (voice-telephony)
+
+Protocol: SIP (Session Initiation Protocol) and HTTP webhooks
+Audio quality: 8kHz PSTN standard (reduced compared to web)
+Providers: Twilio ($0.0085/min), Telnyx ($0.002/min), LiveKit native SIP
+Challenges: Carrier compliance, call routing, failover between providers
+
+Browser Audio (web-audio-capture)
+
+Protocol: Web Audio API, AudioWorklet, WebRTC/WebSocket transport
+Audio quality: 16kHz-48kHz (high fidelity)
+Detection: Client-side Silero VAD via WebAssembly
+Challenges: Browser permissions, cross-browser compatibility, low-latency processing
+
+Creating two separate skills means:
+
+Each skill stays focused on its domain
+You can use telephony without browser concerns (and vice versa)
+Skills compose in Chapter 115's capstone when you need both
+Step 1: Clone Skills-Lab Fresh​
+
+Every chapter starts fresh. No state assumptions from previous chapters.
+
+Go to github.com/panaversity/claude-code-skills-lab
+Click the green Code button
+Select Download ZIP
+Extract the ZIP file
+Open the extracted folder in your terminal
+cd claude-code-skills-lab
+claude
+
+
+Why fresh? Skills accumulate across chapters. Your LiveKit and Pipecat skills from Chapters 80-81 are valuable, but this chapter adds telephony and browser audio. A fresh start ensures these integration skills build on clean foundations without inherited state that might conflict.
+
+Step 2: Write Your LEARNING-SPEC.md for Both Skills​
+
+Before asking Claude to build anything, define what you want to learn. This specification covers two related but distinct domains.
+
+Create a new file:
+
+touch LEARNING-SPEC.md
+
+
+Write your specification:
+
+# Learning Specification: Voice Integration Skills
+
+## Overview
+I'm building integration skills to connect my voice agents to phone networks
+and web browsers. These skills will ground my understanding in official
+documentation and enable production deployments.
+
+---
+
+## Skill 1: voice-telephony
+
+### What I Want to Learn
+- How SIP protocol works for establishing voice calls
+- How to integrate Twilio Voice for inbound and outbound calls
+- How Telnyx provides cost-effective alternative (~$0.002/min vs Twilio's $0.0085/min)
+- Call flow patterns: queuing, transfer, hold, IVR
+- LiveKit's native SIP support vs HTTP webhook approach
+- PSTN audio quality constraints (8kHz) and model implications
+
+### Why This Matters
+- Phone integration makes my Digital FTEs accessible via traditional phone numbers
+- Understanding provider tradeoffs helps optimize costs at scale
+- SIP knowledge enables direct trunk connections for lower latency
+
+### Success Criteria
+- [ ] Skill guides Twilio Voice setup (inbound + outbound calls)
+- [ ] Skill explains SIP vs HTTP webhook tradeoffs with decision framework
+- [ ] Skill includes cost comparison table (Twilio, Telnyx, LiveKit SIP)
+- [ ] Skill covers compliance considerations (recording consent, GDPR)
+- [ ] Generated guidance matches official Twilio/Telnyx documentation
+
+### Key Questions I Have
+1. When should I use LiveKit's native SIP vs Twilio webhooks?
+2. How do I handle failover between telephony providers?
+3. What's the latency difference between SIP and webhook approaches?
+4. How does 8kHz PSTN audio affect native speech-to-speech models?
+
+---
+
+## Skill 2: web-audio-capture
+
+### What I Want to Learn
+- How Web Audio API captures microphone input in browsers
+- How AudioWorklet provides low-latency processing (~2.67ms at 48kHz)
+- How to run Silero VAD in browser via WebAssembly (<1ms per 30ms chunk)
+- WebRTC vs WebSocket for browser-server audio transport
+- Cross-browser compatibility (Chrome, Firefox, Safari)
+
+### Why This Matters
+- Browser-based voice enables web apps without phone network costs
+- Client-side VAD reduces server round-trips and latency
+- Understanding transport options helps match architecture to requirements
+
+### Success Criteria
+- [ ] Skill scaffolds getUserMedia + AudioWorklet setup
+- [ ] Skill explains Silero VAD WASM integration with performance expectations
+- [ ] Skill guides WebRTC vs WebSocket decision with tradeoff matrix
+- [ ] Skill covers browser security requirements (HTTPS mandatory)
+- [ ] Generated guidance matches MDN Web Audio API documentation
+
+### Key Questions I Have
+1. Why did AudioWorklet replace ScriptProcessorNode?
+2. How do I handle Safari's AudioWorklet limitations?
+3. What's the right audio format for streaming to voice agents?
+4. How does client-side VAD reduce end-to-end latency?
+
+---
+
+## What I Already Know
+- Part 7: Kubernetes deployment and containerization
+- Part 10: Chat interfaces and streaming
+- Chapter 109: Voice AI fundamentals (STT/TTS/VAD concepts)
+- Chapter 110: LiveKit Agents (room-based voice agents)
+- Chapter 111: Pipecat (pipeline-based voice agents)
+- Chapters 112-113: Direct APIs (OpenAI Realtime, Gemini Live)
+
+## What I'm Not Trying to Learn Yet
+- Production IVR implementation (that's Lesson 3)
+- Failover architecture (that's Lesson 3)
+- Call recording compliance (that's Lesson 3)
+- Full browser-to-agent integration (that's Chapter 115 capstone)
+
+
+This specification is your learning contract. It defines exactly what each skill should know—and what it shouldn't try to cover. Clear boundaries prevent scope creep and ensure focused skills.
+
+Step 3: Fetch Official Documentation​
+
+Your skills should be built from authoritative sources, not AI memory. Telephony APIs and browser standards evolve; AI training data becomes stale.
+
+Ask Claude to fetch documentation for the telephony skill:
+
+Use the fetching-library-docs skill with Context7 to fetch documentation for
+voice telephony integration. I need:
+
+1. Twilio Voice API documentation
+   - Inbound call handling (webhooks, TwiML)
+   - Outbound call initiation (REST API)
+   - Phone number provisioning
+
+2. Telnyx Voice documentation
+   - API structure (for cost comparison)
+   - SIP trunking options
+
+3. LiveKit SIP documentation
+   - Native SIP trunk integration
+   - Configuration patterns
+
+Save the key patterns, code examples, and pricing information for building
+my voice-telephony skill.
+
+
+Then fetch documentation for the browser audio skill:
+
+Use the fetching-library-docs skill with Context7 to fetch documentation for
+browser audio capture. I need:
+
+1. MDN Web Audio API
+   - AudioContext and AudioWorklet
+   - getUserMedia constraints
+   - Security requirements (HTTPS)
+
+2. Silero VAD
+   - ONNX model integration
+   - WebAssembly usage
+   - Performance characteristics
+
+3. WebRTC documentation
+   - RTCPeerConnection for audio
+   - NAT traversal (ICE, STUN, TURN)
+
+Save the architecture patterns, code examples, and browser compatibility
+notes for building my web-audio-capture skill.
+
+
+Claude will connect to Context7, fetch current documentation, and extract the patterns and examples you need. This documentation becomes the foundation for your skills.
+
+Step 4: Create Your Skills with /skill-creator​
+
+Now create both skills using the documentation Claude just fetched.
+
+Create the voice-telephony Skill​
+Using your skill creator skill, create a new skill called "voice-telephony".
+
+Use the Twilio, Telnyx, and LiveKit SIP documentation you just fetched—no
+self-assumed knowledge.
+
+This skill will help me:
+1. Connect voice agents to phone networks via SIP and webhooks
+2. Choose between Twilio, Telnyx, and LiveKit native SIP
+3. Implement inbound and outbound call flows
+4. Understand PSTN audio quality constraints
+
+The skill should follow the Persona + Questions + Principles pattern:
+
+Persona: Telephony integration specialist who thinks about voice connectivity
+the way a network engineer thinks about routing—understanding protocol layers,
+latency tradeoffs, and failover patterns.
+
+Questions the skill should answer:
+- SIP trunk vs webhook: which approach for this use case?
+- Provider selection: Twilio vs Telnyx vs LiveKit native SIP?
+- Call flow design: how to handle queuing, transfer, hold?
+- Compliance: what recording consent is required?
+
+Principles for decision-making:
+- Cost optimization: route high-volume calls through cheaper providers
+- Latency awareness: SIP reduces round-trips vs webhooks
+- Reliability: failover between providers for high availability
+- Compliance: always announce recording, respect consent requirements
+
+Reference my LEARNING-SPEC.md for context on what I want to learn.
+
+
+Your skill will be created at .claude/skills/voice-telephony/SKILL.md.
+
+Create the web-audio-capture Skill​
+Using your skill creator skill, create a new skill called "web-audio-capture".
+
+Use the Web Audio API, AudioWorklet, and Silero VAD documentation you just
+fetched—no self-assumed knowledge.
+
+This skill will help me:
+1. Capture microphone audio in browsers with low latency
+2. Run Silero VAD client-side via WebAssembly
+3. Choose between WebRTC and WebSocket transport
+4. Handle cross-browser compatibility
+
+The skill should follow the Persona + Questions + Principles pattern:
+
+Persona: Browser audio engineering specialist who thinks about audio capture
+the way a DSP engineer thinks about signal processing—understanding latency
+budgets, sample rates, and processing pipelines.
+
+Questions the skill should answer:
+- AudioWorklet vs ScriptProcessorNode: why the migration?
+- Transport selection: WebRTC vs WebSocket for this use case?
+- VAD strategy: server-side vs client-side via WASM?
+- Browser compatibility: what works across Chrome, Firefox, Safari?
+
+Principles for decision-making:
+- Latency first: AudioWorklet for sub-5ms processing
+- Bandwidth efficiency: client-side VAD reduces unnecessary transmission
+- Progressive enhancement: fallbacks for browsers without AudioWorklet
+- Security compliance: HTTPS required for getUserMedia
+
+Reference my LEARNING-SPEC.md for context on what I want to learn.
+
+
+Your skill will be created at .claude/skills/web-audio-capture/SKILL.md.
+
+Step 5: Verify Both Skills Work​
+
+Test each skill with a realistic prompt to ensure they provide accurate guidance.
+
+Test voice-telephony​
+Using the voice-telephony skill, help me understand:
+
+I want to receive inbound calls to my voice agent running on LiveKit.
+I have a budget constraint—volume will be 5,000 minutes/month.
+Latency matters for natural conversation.
+
+Walk me through:
+1. Should I use LiveKit's native SIP or Twilio webhooks?
+2. What's the cost difference for my volume?
+3. What code do I need for the webhook handler?
+
+
+If your skill works, Claude generates guidance grounded in the documentation you fetched. Verify the cost numbers match current Twilio/Telnyx pricing. If costs seem wrong, that's feedback—your skill needs updating.
+
+Expected output pattern:
+
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+
+app = FastAPI()
+
+@app.post("/voice/incoming")
+async def handle_incoming_call(request: Request):
+    """Handle incoming Twilio voice call."""
+    # TwiML response connects caller to LiveKit room
+    twiml = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+        <Say>Connecting you to your assistant.</Say>
+        <Dial>
+            <Sip>sip:room-id@your-livekit-sip-trunk.com</Sip>
+        </Dial>
+    </Response>
+    """
+    return Response(content=twiml, media_type="application/xml")
+
+Test web-audio-capture​
+Using the web-audio-capture skill, help me understand:
+
+I want to capture microphone audio in a web app and stream it to my voice
+agent. I need low latency (<50ms processing) and want to only send audio
+when the user is speaking.
+
+Walk me through:
+1. How do I set up getUserMedia with AudioWorklet?
+2. How do I integrate Silero VAD in the browser?
+3. Should I use WebRTC or WebSocket for transport?
+
+
+Verify the AudioWorklet patterns match MDN documentation. Check that Silero VAD performance claims (~1ms per 30ms chunk) are accurate.
+
+Expected output pattern:
+
+// AudioWorklet processor for low-latency audio capture
+class AudioCaptureProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.vadModel = null;
+    this.port.onmessage = (event) => {
+      if (event.data.type === 'init-vad') {
+        // Initialize Silero VAD WASM model
+        this.initVAD(event.data.modelBuffer);
+      }
+    };
+  }
+
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (input.length > 0) {
+      const audioData = input[0];
+
+      // Run VAD on audio chunk
+      const isSpeech = this.detectSpeech(audioData);
+
+      if (isSpeech) {
+        // Only send audio when speech detected
+        this.port.postMessage({
+          type: 'audio',
+          data: audioData
+        });
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor('audio-capture-processor', AudioCaptureProcessor);
+
+What You Now Own​
+
+You have two skills built from official documentation:
+
+voice-telephony (.claude/skills/voice-telephony/SKILL.md)
+
+SIP protocol fundamentals and LiveKit native SIP integration
+Twilio Voice patterns for inbound and outbound calls
+Telnyx as cost-effective alternative with pricing comparison
+Decision frameworks for provider selection
+PSTN audio quality considerations (8kHz limitations)
+
+web-audio-capture (.claude/skills/web-audio-capture/SKILL.md)
+
+Web Audio API and AudioWorklet for low-latency capture
+Silero VAD via WebAssembly for client-side speech detection
+WebRTC vs WebSocket transport decision framework
+Browser compatibility guidance (Chrome, Firefox, Safari)
+Security requirements (HTTPS mandatory for getUserMedia)
+
+The rest of this chapter teaches you what these skills know—and how to make them better. Each lesson tests and improves one or both skills:
+
+Lesson 1: Phone integration improves voice-telephony
+Lesson 2: Browser audio improves web-audio-capture
+Lesson 3: Production patterns finalize both skills
+
+By chapter's end, you'll have production-ready skills that can guide any telephony or browser audio integration.
+
+Try With AI​
+Prompt 1: Refine Your LEARNING-SPEC.md​
+Review my LEARNING-SPEC.md for the voice-telephony and web-audio-capture
+skills. Based on the official documentation you fetched:
+
+1. What questions am I missing that are critical for production use?
+2. What success criteria should I add?
+3. Are there any scope boundaries I should clarify?
+
+Help me make this specification sharper before I start the lessons.
+
+
+What you're learning: Specifications improve through iteration. The documentation reveals patterns and requirements you hadn't considered. Your spec gets more precise, which means your skills become more focused.
+
+Prompt 2: Compare Provider Costs​
+I'm planning a voice agent deployment with these constraints:
+- Expected volume: 5,000 minutes/month initially
+- Growth to 50,000 minutes/month within 6 months
+- Need both inbound and outbound calling
+- Users in US and EU
+
+Using my voice-telephony skill, help me:
+1. Calculate monthly costs for Twilio vs Telnyx at both volumes
+2. Identify which provider makes sense at each scale
+3. Design a hybrid approach if that's optimal
+
+I'll validate your cost estimates against current pricing pages.
+
+
+What you're learning: Skills become practical when you test them against real decisions. Cost comparison forces you to verify the documentation your skill is built on.
+
+Prompt 3: Validate Technical Claims​
+My web-audio-capture skill claims AudioWorklet provides ~2.67ms latency
+at 48kHz sample rate, and Silero VAD processes audio in <1ms per 30ms chunk.
+
+Help me understand:
+1. Where do these numbers come from?
+2. How do I measure them in my own implementation?
+3. What factors could increase latency beyond these baselines?
+
+I want to verify these claims aren't hallucinated before relying on them.
+
+
+What you're learning: Documentation-grounded skills still need validation. Numbers should be traceable to sources. If they're not, you've found a gap in your skill that needs fixing.
+
+Safety Note: When testing browser audio, always request explicit user permission and explain why microphone access is needed. Never capture audio without clear consent indicators visible to the user.

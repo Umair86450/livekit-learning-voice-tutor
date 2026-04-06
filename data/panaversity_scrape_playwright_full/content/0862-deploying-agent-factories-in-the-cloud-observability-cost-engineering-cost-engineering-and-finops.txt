@@ -1,0 +1,653 @@
+Cost Engineering and FinOps
+
+Your observability stack is running. Prometheus collects metrics, Grafana renders dashboards, and your SLO alerts fire when error budgets burn too fast. But there is one question your current stack cannot answer: How much does this cost?
+
+You receive the monthly cloud bill. $47,000. Your finance team asks: "Which team is responsible for this spend? Why did costs jump 35% from last month? Are we paying for resources nobody uses?" Without cost visibility, you are debugging finances the same way you once debugged production---in the dark, hoping patterns emerge from spreadsheets.
+
+This lesson teaches you to answer those questions with the same precision you now apply to latency percentiles. You will install OpenCost to monitor Kubernetes spending in real time, apply cost allocation labels so every dollar traces to an owner, identify idle resources wasting budget, use VPA recommendations to right-size workloads, and schedule non-production environments to run only when needed.
+
+FinOps: The Discipline of Cloud Cost Management​
+
+FinOps is not about cutting costs. FinOps is about building discipline and transparency so engineering speed and financial control work together instead of against each other.
+
+The FinOps Foundation defines three lifecycle phases:
+
+Phase	Focus	Questions Answered
+Inform	Visibility	Where is money being spent? Who owns each cost?
+Optimize	Efficiency	Are resources right-sized? Can we use discounts?
+Operate	Governance	Are budgets respected? Do processes prevent waste?
+
+Organizations that implement FinOps practices discover significant untapped savings. The goal is not spending less---it is spending intentionally.
+
+The Six FinOps Principles​
+
+FinOps practices are built on six governing principles:
+
+Collaboration -- Finance, engineering, and product teams work together in near real-time. Silos destroy cost visibility.
+
+Ownership -- Each team owns its cloud usage and manages that usage against budget. No ownership means no accountability.
+
+Business Value Drives Decisions -- Decisions optimize for value, not just raw spending. A $10,000 service generating $100,000 revenue differs from a $10,000 service generating $5,000.
+
+Centralized FinOps Team -- A dedicated team handles rate optimization and negotiations, freeing engineers to focus on their work.
+
+Embrace Variable Costs -- Cloud flexibility is an opportunity for innovation, not just a liability to manage.
+
+Real-Time Reporting -- Accurate, real-time visibility drives all other practices. Monthly bills arrive too late to change behavior.
+
+These principles guide every practice in this lesson.
+
+Installing OpenCost for Kubernetes Cost Monitoring​
+
+OpenCost is a vendor-neutral open source project for measuring and allocating cloud infrastructure costs in real time. It is a CNCF Incubating project supported by AWS, Microsoft, Google, and the broader cloud-native community.
+
+Prerequisites​
+
+OpenCost requires Prometheus for metrics storage. If you followed Lesson 2, you already have the kube-prometheus-stack installed:
+
+# Verify Prometheus is running
+kubectl get pods -n monitoring | grep prometheus
+
+
+Output:
+
+prometheus-kube-prometheus-prometheus-0   2/2     Running   0   12d
+
+Install OpenCost with Helm​
+# Add the OpenCost Helm repository
+helm repo add opencost https://opencost.github.io/opencost-helm-chart
+helm repo update
+
+# Install OpenCost
+helm install opencost opencost/opencost \
+  --namespace monitoring \
+  --set prometheus.internal.serviceName=prometheus-kube-prometheus-prometheus \
+  --set prometheus.internal.port=9090
+
+
+Output:
+
+NAME: opencost
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+
+Verify Installation​
+kubectl get pods -n monitoring | grep opencost
+
+
+Output:
+
+opencost-5f7d8b6c4d-x2k9p    1/1     Running   0   45s
+
+Access the OpenCost UI​
+
+Forward the port to access the OpenCost dashboard:
+
+kubectl port-forward -n monitoring svc/opencost 9090:9090
+
+
+Open http://localhost:9090 in your browser. You will see real-time cost breakdowns by namespace, deployment, and pod.
+
+Cost Allocation: Tracing Every Dollar to an Owner​
+
+Without labels, your cost data shows spending by namespace---but namespaces do not pay bills. Teams do. Products do. Business units do.
+
+Cost allocation labels map Kubernetes resources to organizational structures.
+
+Required Labels for Cost Allocation​
+
+Add these labels to every Deployment, StatefulSet, and DaemonSet:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  labels:
+    app: task-api
+    # Cost allocation labels
+    cost-center: "platform"
+    team: "agents"
+    product: "task-manager"
+    environment: "production"
+    business-unit: "engineering"
+spec:
+  template:
+    metadata:
+      labels:
+        app: task-api
+        # Labels must also be on pods for OpenCost to aggregate
+        cost-center: "platform"
+        team: "agents"
+        product: "task-manager"
+        environment: "production"
+
+Namespace-Level Labels​
+
+For simpler allocation, label namespaces. All pods inherit the namespace's cost center:
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents-prod
+  labels:
+    cost-center: "platform"
+    team: "agents"
+    environment: "production"
+
+Querying Cost by Namespace​
+
+OpenCost exposes cost data as Prometheus metrics. Query daily cost by namespace:
+
+sum(
+  (
+    sum(container_cpu_allocation{namespace!=""}) by (namespace)
+    * on(node) group_left() node_cpu_hourly_cost
+  ) +
+  (
+    sum(container_memory_allocation_bytes{namespace!=""}) by (namespace) / 1024 / 1024 / 1024
+    * on(node) group_left() node_ram_hourly_cost
+  )
+) by (namespace) * 24
+
+
+Output:
+
+{namespace="agents-prod"}    8.45
+{namespace="monitoring"}     12.30
+{namespace="default"}        2.15
+{namespace="kube-system"}    6.80
+
+
+This shows daily cost in dollars for each namespace.
+
+Querying Cost by Team​
+
+If pods have team labels, query cost by team:
+
+sum(
+  container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost * 24
+) by (label_team)
+
+
+Output:
+
+{label_team="agents"}     15.60
+{label_team="platform"}   22.40
+{label_team="data"}       18.90
+
+
+Now you can answer: "The agents team spent $15.60 yesterday on Kubernetes resources."
+
+Identifying Waste: Idle and Over-Provisioned Resources​
+
+Cost visibility reveals where money goes. Waste identification reveals where it should not go.
+
+Common Sources of Kubernetes Waste​
+Waste Type	Description	Impact
+Over-provisioned requests	Pods request more CPU/memory than they use	Blocks capacity for other workloads
+Idle namespaces	Dev environments running 24/7 but used 40 hours/week	75% wasted spend
+Zombie deployments	Forgotten test deployments never cleaned up	Continuous drain
+Oversized node pools	Cluster capacity far exceeds actual demand	Pay for unused nodes
+CPU Waste Query​
+
+Find CPU requested but not used:
+
+# CPU waste (requested minus used)
+sum(
+  container_cpu_allocation - rate(container_cpu_usage_seconds_total[5m])
+) by (namespace)
+
+
+Output:
+
+{namespace="dev"}           2.8
+{namespace="staging"}       1.2
+{namespace="production"}    0.3
+
+
+The dev namespace requests 2.8 cores more than it uses. That is wasted capacity.
+
+Waste as a Percentage​
+
+Calculate efficiency to identify the worst offenders:
+
+(1 - (
+  sum(rate(container_cpu_usage_seconds_total[1h])) by (namespace) /
+  sum(container_cpu_allocation) by (namespace)
+)) * 100
+
+
+Output:
+
+{namespace="dev"}           85.2
+{namespace="staging"}       62.4
+{namespace="production"}    15.8
+
+
+The dev namespace has 85% waste---only 15% of requested CPU is used.
+
+Pods Ready for Right-Sizing​
+
+Find pods where actual usage is less than 50% of requests:
+
+(
+  sum(rate(container_cpu_usage_seconds_total[7d])) by (namespace, pod) /
+  sum(container_cpu_allocation) by (namespace, pod)
+) < 0.5
+
+
+This returns pods that are good candidates for right-sizing.
+
+Right-Sizing with Vertical Pod Autoscaler (VPA)​
+
+Guessing resource requests leads to either waste (over-provisioning) or instability (under-provisioning). The Vertical Pod Autoscaler removes guesswork by analyzing actual usage and recommending optimal values.
+
+VPA Components​
+
+VPA consists of three parts:
+
+Recommender -- Watches usage metrics and computes recommended resources
+Updater -- Evicts pods needing resource updates (when enabled)
+Admission Controller -- Sets resources on new pods based on recommendations
+Install VPA​
+# Clone the autoscaler repository
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler
+
+# Deploy VPA components
+./hack/vpa-up.sh
+
+
+Output:
+
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalers.autoscaling.k8s.io created
+deployment.apps/vpa-admission-controller created
+deployment.apps/vpa-recommender created
+deployment.apps/vpa-updater created
+
+Create VPA in Recommendation Mode​
+
+Start with recommendation mode to see suggestions without automatic changes:
+
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: task-api-vpa
+  namespace: default
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  updatePolicy:
+    updateMode: "Off"  # Only recommend, don't auto-update
+  resourcePolicy:
+    containerPolicies:
+    - containerName: "*"
+      minAllowed:
+        cpu: 50m
+        memory: 64Mi
+      maxAllowed:
+        cpu: 2
+        memory: 4Gi
+
+
+Apply the VPA:
+
+kubectl apply -f task-api-vpa.yaml
+
+
+Output:
+
+verticalpodautoscaler.autoscaling.k8s.io/task-api-vpa created
+
+Read VPA Recommendations​
+
+After VPA collects usage data (typically 24-48 hours), check recommendations:
+
+kubectl describe vpa task-api-vpa
+
+
+Output:
+
+Recommendation:
+  Container Recommendations:
+    Container Name: task-api
+    Lower Bound:
+      Cpu:     50m
+      Memory:  128Mi
+    Target:
+      Cpu:     125m
+      Memory:  256Mi
+    Uncapped Target:
+      Cpu:     125m
+      Memory:  256Mi
+    Upper Bound:
+      Cpu:     500m
+      Memory:  512Mi
+
+
+VPA recommends:
+
+Target: 125m CPU, 256Mi memory (optimal based on usage)
+Lower Bound: Minimum safe values
+Upper Bound: Maximum the workload has needed
+
+If your current requests are 500m CPU and 512Mi memory, VPA just identified 75% CPU over-provisioning and 50% memory over-provisioning.
+
+Apply Right-Sizing Changes​
+
+Update your Deployment to match VPA recommendations:
+
+resources:
+  requests:
+    cpu: "125m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"      # Keep limit higher for bursts
+    memory: "512Mi"
+
+Cost Dashboards and Budget Alerts​
+
+Visibility is not useful if nobody looks at it. Dashboards and alerts make cost data actionable.
+
+Grafana Cost Dashboard​
+
+Create a dashboard showing total cost, cost by namespace, and efficiency score:
+
+{
+  "title": "Kubernetes Cost Dashboard",
+  "panels": [
+    {
+      "title": "Total Monthly Cost Estimate",
+      "type": "stat",
+      "targets": [{
+        "expr": "sum(container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes / 1024 / 1024 / 1024 * on(node) group_left() node_ram_hourly_cost) * 24 * 30"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      }
+    },
+    {
+      "title": "Cost by Namespace",
+      "type": "piechart",
+      "targets": [{
+        "expr": "sum((container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost + container_memory_allocation_bytes / 1024 / 1024 / 1024 * on(node) group_left() node_ram_hourly_cost) * 24) by (namespace)"
+      }]
+    },
+    {
+      "title": "Efficiency Score",
+      "type": "gauge",
+      "description": "CPU utilization vs allocation",
+      "targets": [{
+        "expr": "sum(rate(container_cpu_usage_seconds_total[1h])) / sum(container_cpu_allocation) * 100"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {"color": "red", "value": 0},
+              {"color": "yellow", "value": 40},
+              {"color": "green", "value": 70}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+
+
+The efficiency gauge shows red below 40%, yellow 40-70%, and green above 70%.
+
+Budget Alerts with Prometheus​
+
+Create alerts when spending exceeds thresholds:
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cost-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: cost.alerts
+    rules:
+    # Daily cost threshold
+    - alert: HighDailyCost
+      expr: |
+        sum(
+          container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost +
+          container_memory_allocation_bytes / 1024 / 1024 / 1024 * on(node) group_left() node_ram_hourly_cost
+        ) * 24 > 100
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "Daily cost exceeds $100"
+        description: "Current daily cost estimate: ${{ $value | printf \"%.2f\" }}"
+
+    # Cost spike detection
+    - alert: CostSpike
+      expr: |
+        (
+          sum(container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost)
+          /
+          sum(container_cpu_allocation * on(node) group_left() node_cpu_hourly_cost offset 1d)
+        ) > 1.5
+      for: 30m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Cost increased 50% vs yesterday"
+
+    # Low efficiency alert
+    - alert: LowResourceEfficiency
+      expr: |
+        sum(rate(container_cpu_usage_seconds_total[1h])) / sum(container_cpu_allocation) < 0.3
+      for: 6h
+      labels:
+        severity: info
+      annotations:
+        summary: "Cluster CPU efficiency below 30%"
+        description: "Consider right-sizing workloads"
+
+
+Apply the rules:
+
+kubectl apply -f cost-alerts.yaml
+
+
+Output:
+
+prometheusrule.monitoring.coreos.com/cost-alerts created
+
+Scheduling Non-Production for Significant Savings​
+
+Development and staging environments often run 24/7 but are used only during business hours. Running workloads for 40 hours instead of 168 hours per week reduces their cost by approximately 75%.
+
+Scale Down Dev at Night​
+
+Create CronJobs to scale down dev namespaces outside business hours:
+
+# Scale down at 7 PM on weekdays
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-down-dev
+  namespace: dev
+spec:
+  schedule: "0 19 * * 1-5"  # 7 PM Monday-Friday
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: scaler
+          containers:
+          - name: kubectl
+            image: bitnami/kubectl:latest
+            command:
+            - kubectl
+            - scale
+            - deployment
+            - --all
+            - --replicas=0
+            - -n
+            - dev
+          restartPolicy: OnFailure
+---
+# Scale up at 7 AM on weekdays
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-up-dev
+  namespace: dev
+spec:
+  schedule: "0 7 * * 1-5"  # 7 AM Monday-Friday
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: scaler
+          containers:
+          - name: kubectl
+            image: bitnami/kubectl:latest
+            command:
+            - kubectl
+            - scale
+            - deployment
+            - --all
+            - --replicas=1
+            - -n
+            - dev
+          restartPolicy: OnFailure
+
+Create RBAC for the Scaler​
+
+The CronJob needs permission to scale deployments:
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scaler
+  namespace: dev
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-scaler
+  namespace: dev
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale"]
+  verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scaler-binding
+  namespace: dev
+subjects:
+- kind: ServiceAccount
+  name: scaler
+  namespace: dev
+roleRef:
+  kind: Role
+  name: deployment-scaler
+  apiGroup: rbac.authorization.k8s.io
+
+
+Apply both files:
+
+kubectl apply -f scaler-rbac.yaml
+kubectl apply -f scale-cronjobs.yaml
+
+
+Output:
+
+serviceaccount/scaler created
+role.rbac.authorization.k8s.io/deployment-scaler created
+rolebinding.rbac.authorization.k8s.io/scaler-binding created
+cronjob.batch/scale-down-dev created
+cronjob.batch/scale-up-dev created
+
+Calculate Savings​
+
+If dev namespace costs $30/day running 24/7:
+
+Current: $30/day x 30 days = $900/month
+With scheduling: $30/day x (40h/168h) = $7.14/day x 30 = ~$215/month
+Savings: ~$685/month (76%)
+Reflect on Your Skill​
+
+Your observability skill now needs cost engineering patterns. Review what you have learned:
+
+Test Your Skill​
+
+Ask your observability skill:
+
+Write a PromQL query that shows the top 5 namespaces by daily cost,
+including both CPU and memory costs.
+
+
+If the skill returns a correct aggregation query with topk(5, ...), it handles cost queries. If not, it needs the OpenCost patterns.
+
+Identify Gaps​
+
+Review your skill for these capabilities:
+
+ OpenCost installation and configuration
+ Cost allocation label conventions
+ PromQL queries for cost by namespace/team/product
+ Waste detection queries (CPU/memory utilization vs allocation)
+ VPA configuration for right-sizing recommendations
+ CronJob patterns for scheduled scaling
+ Budget alert PrometheusRule templates
+Improve Your Skill​
+
+Add missing patterns. For example, if VPA patterns are missing:
+
+Add VPA right-sizing patterns to my observability skill. Include:
+1. VPA resource definition with recommendation mode
+2. How to read VPA recommendations from kubectl
+3. Resource policy configuration with min/max bounds
+4. Best practice: start with updateMode "Off" in production
+
+
+Your skill should now cover the full FinOps lifecycle: Inform (cost visibility), Optimize (right-sizing), and Operate (budget alerts and scheduling).
+
+Try With AI​
+Prompt 1: Analyze Your Cost Structure​
+I have installed OpenCost on my Kubernetes cluster. Help me understand my
+cost structure. Ask me about my namespace organization, team structure, and
+current labeling strategy. Then suggest specific queries I should run to
+understand where my money is going.
+
+
+What you're learning: Cost analysis starts with understanding organizational structure. The queries that matter depend on how your organization allocates responsibility. This dialogue helps you map your organization to cost queries.
+
+Prompt 2: Design a Right-Sizing Strategy​
+My cluster shows 65% CPU waste according to OpenCost. Help me design a
+right-sizing strategy. Ask about my workload types (stateless web apps,
+stateful databases, batch jobs) and risk tolerance. Then recommend which
+workloads to right-size first and which to leave alone.
+
+
+What you're learning: Not all waste should be eliminated. Production databases might intentionally over-provision for safety margins. Stateless web services are safer to right-size. This conversation teaches you to prioritize based on risk.
+
+Prompt 3: Build Your Cost Governance Model​
+My finance team wants monthly cost reports broken down by team and product.
+Help me design a cost governance model. I'll describe our team structure and
+you suggest a labeling standard, required dashboards, and alert thresholds.
+Challenge me on assumptions I'm making about cost ownership.
+
+
+What you're learning: Cost governance is organizational, not just technical. Labels must reflect actual accountability structures. This exercise forces you to think about who pays for shared infrastructure, how to handle platform costs, and what thresholds trigger action.
+
+Safety Note​
+
+Cost data reveals business information: which products receive investment, which teams are growing, and organizational priorities. Treat OpenCost dashboards with the same access controls as financial reports. Ensure cost metrics endpoints are secured behind authentication and that dashboards are only accessible to appropriate personnel.

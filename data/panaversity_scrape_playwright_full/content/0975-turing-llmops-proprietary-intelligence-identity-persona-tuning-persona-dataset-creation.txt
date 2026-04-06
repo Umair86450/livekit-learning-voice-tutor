@@ -1,0 +1,615 @@
+Persona Dataset Creation
+
+You have a persona specification. You understand the five components: traits, vocabulary, patterns, boundaries, examples. Now you need training data.
+
+This lesson teaches you to create persona-consistent datasets at scale—not by writing hundreds of examples manually, but by using AI to generate examples that embody your persona specification.
+
+The goal: 200+ high-quality training examples where every response is unmistakably TaskMaster.
+
+The Data Generation Pipeline​
+
+Creating persona data follows a systematic pipeline:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                  PERSONA DATA PIPELINE                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐     │
+│   │   SCENARIO   │───▶│   GENERATE   │───▶│   VERIFY     │     │
+│   │   MATRIX     │    │   EXAMPLES   │    │   QUALITY    │     │
+│   └──────────────┘    └──────────────┘    └──────────────┘     │
+│         │                    │                    │             │
+│         ▼                    ▼                    ▼             │
+│   Define coverage      Use LLM with         Check trait        │
+│   requirements        persona spec         adherence           │
+│                                                                 │
+│                              │                                  │
+│                              ▼                                  │
+│   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐     │
+│   │   EXPORT     │◀───│   BALANCE    │◀───│   FILTER     │     │
+│   │   CHATTML    │    │   DATASET    │    │   REJECTED   │     │
+│   └──────────────┘    └──────────────┘    └──────────────┘     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Each step ensures the final dataset is consistent, diverse, and balanced.
+
+Step 1: Define the Scenario Matrix​
+
+Before generating data, define what scenarios your persona must handle. This prevents dataset gaps.
+
+TaskMaster Scenario Categories​
+Category	Scenarios	Priority
+Task Creation	Simple task, with priority, with due date, with category, recurring	High
+Task Updates	Change priority, change due date, edit description, reassign	Medium
+Task Completion	Single task, bulk complete, partial completion	High
+Task Queries	List all, filter by status, search by keyword, overdue tasks	Medium
+Productivity Help	Prioritization advice, time management, focus tips	Low
+Error Handling	Invalid input, task not found, permission denied	Medium
+Coverage Requirements​
+
+For 200 examples, aim for:
+
+High priority scenarios: 40% (80 examples)
+Medium priority: 35% (70 examples)
+Low priority: 15% (30 examples)
+Edge cases: 10% (20 examples)
+
+
+Create a scenario matrix in a file:
+
+# scenario_matrix.py
+SCENARIOS = {
+    "task_creation": {
+        "priority": "high",
+        "scenarios": [
+            "Create a simple task",
+            "Create task with high priority",
+            "Create task with due date",
+            "Create task with category",
+            "Create recurring task",
+            "Create task with description",
+            "Create multiple tasks at once",
+        ],
+        "target_count": 25
+    },
+    "task_completion": {
+        "priority": "high",
+        "scenarios": [
+            "Complete a single task",
+            "Complete multiple tasks",
+            "Complete overdue task",
+            "Complete task with notes",
+            "Complete task ahead of schedule",
+        ],
+        "target_count": 20
+    },
+    # ... additional categories
+}
+
+Step 2: Design the Generation Prompt​
+
+The generation prompt is critical. It must encode your persona specification clearly enough that an LLM can embody it.
+
+The TaskMaster Generation Prompt​
+PERSONA_GENERATION_PROMPT = """You are generating training data for TaskMaster,
+a productivity coach AI persona.
+
+# TaskMaster Persona Specification
+
+## Core Traits
+1. ENCOURAGING: Celebrate progress, acknowledge effort, frame positively
+2. PRODUCTIVITY-FOCUSED: Always thinking about efficiency and next steps
+3. PROFESSIONAL BUT FRIENDLY: Business casual tone, warm but not casual
+4. ACTION-ORIENTED: Focus on doing, not just discussing
+5. OPTIMISTIC: Believe users can accomplish their goals
+
+## Vocabulary Patterns
+Use frequently:
+- "Great choice!", "Nice work!", "You're on track"
+- "Let's...", "Ready to...", "What's next?"
+- "Smart move", "Good thinking", "Well done"
+
+Never use:
+- "You should...", "You need to...", "You failed to..."
+- Excessive punctuation (!!!, ???)
+- Generic AI phrases ("I'm here to help", "I'd be happy to...")
+
+## Response Structure
+1. ACKNOWLEDGE: Recognize what user did or asked
+2. DELIVER: Provide the information or confirmation
+3. PROPEL: Suggest next action or encourage continuation
+
+## Boundaries
+- Never condescending or patronizing
+- Never passive-aggressive about incomplete tasks
+- Never generic when specific acknowledgment is possible
+
+# Task
+
+Generate a training example for this scenario:
+{scenario}
+
+Provide your response in this exact format:
+
+USER: [What the user says]
+TASKMASTER: [TaskMaster's response following all persona guidelines]
+
+The response MUST demonstrate at least 2 traits and follow the response structure.
+Keep responses natural—not every response needs every trait, but all should
+feel unmistakably like TaskMaster.
+"""
+
+Generation Script​
+import openai
+import json
+from typing import List, Dict
+
+def generate_persona_example(
+    scenario: str,
+    persona_prompt: str,
+    model: str = "gpt-4o-mini"
+) -> Dict:
+    """Generate a single persona training example."""
+
+    response = openai.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": persona_prompt.format(scenario=scenario)},
+            {"role": "user", "content": f"Generate example for: {scenario}"}
+        ],
+        temperature=0.7,  # Some variation
+        max_tokens=500
+    )
+
+    content = response.choices[0].message.content
+
+    # Parse the response
+    lines = content.strip().split("\n")
+    user_msg = ""
+    assistant_msg = ""
+
+    for line in lines:
+        if line.startswith("USER:"):
+            user_msg = line.replace("USER:", "").strip()
+        elif line.startswith("TASKMASTER:"):
+            assistant_msg = line.replace("TASKMASTER:", "").strip()
+
+    return {
+        "scenario": scenario,
+        "user": user_msg,
+        "assistant": assistant_msg
+    }
+
+
+def generate_batch(
+    scenarios: List[str],
+    persona_prompt: str,
+    examples_per_scenario: int = 3
+) -> List[Dict]:
+    """Generate multiple examples for a list of scenarios."""
+
+    examples = []
+    for scenario in scenarios:
+        for _ in range(examples_per_scenario):
+            try:
+                example = generate_persona_example(scenario, persona_prompt)
+                examples.append(example)
+                print(f"Generated: {scenario[:50]}...")
+            except Exception as e:
+                print(f"Failed: {scenario[:50]}... - {e}")
+
+    return examples
+
+
+Output:
+
+Generated: Create a simple task...
+Generated: Create a simple task...
+Generated: Create a simple task...
+Generated: Create task with high priority...
+...
+
+Step 3: Verify Quality​
+
+Not every generated example will be good. Implement quality checks.
+
+Trait Adherence Scoring​
+
+Use an LLM to evaluate whether examples follow the persona:
+
+QUALITY_CHECK_PROMPT = """Evaluate if this response follows the TaskMaster persona.
+
+TaskMaster traits:
+1. ENCOURAGING - Celebrates progress, positive framing
+2. PRODUCTIVITY-FOCUSED - Mentions efficiency, next steps
+3. PROFESSIONAL BUT FRIENDLY - Warm but not casual
+4. ACTION-ORIENTED - Focuses on doing
+5. OPTIMISTIC - Positive outlook
+
+Response to evaluate:
+{response}
+
+Score each trait (0-2):
+- 0: Violates or absent
+- 1: Present but weak
+- 2: Clearly demonstrated
+
+Also check:
+- Uses TaskMaster vocabulary? (yes/no)
+- Follows response structure (acknowledge-deliver-propel)? (yes/no)
+- Violates any boundaries? (yes/no - if yes, reject)
+
+Output as JSON:
+{{
+  "encouraging": 0-2,
+  "productivity_focused": 0-2,
+  "professional_friendly": 0-2,
+  "action_oriented": 0-2,
+  "optimistic": 0-2,
+  "vocabulary_match": true/false,
+  "structure_match": true/false,
+  "boundary_violation": true/false,
+  "total_score": 0-10,
+  "pass": true/false
+}}
+
+Pass threshold: total_score >= 6 AND no boundary violations
+"""
+
+
+def check_example_quality(example: Dict) -> Dict:
+    """Evaluate example quality against persona spec."""
+
+    response = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a persona consistency evaluator."},
+            {"role": "user", "content": QUALITY_CHECK_PROMPT.format(
+                response=example["assistant"]
+            )}
+        ],
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+
+    scores = json.loads(response.choices[0].message.content)
+    return {**example, "quality": scores}
+
+
+def filter_quality_examples(
+    examples: List[Dict],
+    min_score: int = 6
+) -> List[Dict]:
+    """Filter examples by quality score."""
+
+    scored = [check_example_quality(ex) for ex in examples]
+    passed = [ex for ex in scored if ex["quality"]["pass"]]
+
+    print(f"Quality filter: {len(passed)}/{len(examples)} passed")
+
+    return passed
+
+
+Output:
+
+Quality filter: 187/220 passed
+
+Common Quality Issues​
+Issue	Detection	Resolution
+Too generic	Low vocabulary_match	Regenerate with stronger prompt
+Overly enthusiastic	Boundary violation (excessive)	Adjust temperature, add examples
+Missing structure	structure_match = false	Add explicit structure examples
+Wrong tone	Low professional_friendly	Add tone calibration examples
+Step 4: Balance the Dataset​
+
+After filtering, check coverage across scenarios.
+
+def analyze_balance(examples: List[Dict]) -> Dict:
+    """Analyze dataset balance across scenarios."""
+
+    from collections import Counter
+
+    scenario_counts = Counter(ex["scenario"] for ex in examples)
+
+    # Check for gaps
+    all_scenarios = set(SCENARIOS.keys())
+    covered = set(scenario_counts.keys())
+    missing = all_scenarios - covered
+
+    # Check for imbalance
+    counts = list(scenario_counts.values())
+    if counts:
+        avg = sum(counts) / len(counts)
+        over = [s for s, c in scenario_counts.items() if c > avg * 1.5]
+        under = [s for s, c in scenario_counts.items() if c < avg * 0.5]
+    else:
+        over, under = [], []
+
+    return {
+        "total_examples": len(examples),
+        "scenario_coverage": len(covered) / len(all_scenarios),
+        "missing_scenarios": list(missing),
+        "overrepresented": over,
+        "underrepresented": under,
+        "counts": dict(scenario_counts)
+    }
+
+
+# Check balance
+balance = analyze_balance(filtered_examples)
+print(f"Coverage: {balance['scenario_coverage']:.0%}")
+print(f"Missing: {balance['missing_scenarios']}")
+print(f"Under: {balance['underrepresented']}")
+
+
+Output:
+
+Coverage: 85%
+Missing: ['error_permission_denied', 'recurring_task']
+Under: ['productivity_help']
+
+Fill Gaps​
+
+Generate additional examples for underrepresented scenarios:
+
+def fill_gaps(
+    current_examples: List[Dict],
+    target_per_scenario: int = 10
+) -> List[Dict]:
+    """Generate examples to fill dataset gaps."""
+
+    balance = analyze_balance(current_examples)
+
+    additional = []
+    for scenario in balance["missing_scenarios"]:
+        batch = generate_batch([scenario], PERSONA_GENERATION_PROMPT,
+                               examples_per_scenario=target_per_scenario)
+        additional.extend(batch)
+
+    for scenario in balance["underrepresented"]:
+        current = balance["counts"].get(scenario, 0)
+        needed = target_per_scenario - current
+        if needed > 0:
+            batch = generate_batch([scenario], PERSONA_GENERATION_PROMPT,
+                                   examples_per_scenario=needed)
+            additional.extend(batch)
+
+    return current_examples + filter_quality_examples(additional)
+
+Step 5: Export to ChatML Format​
+
+Unsloth and most fine-tuning frameworks expect ChatML format:
+
+def to_chatml(examples: List[Dict]) -> List[Dict]:
+    """Convert to ChatML format for training."""
+
+    chatml_examples = []
+
+    for ex in examples:
+        chatml = {
+            "messages": [
+                {"role": "user", "content": ex["user"]},
+                {"role": "assistant", "content": ex["assistant"]}
+            ]
+        }
+        chatml_examples.append(chatml)
+
+    return chatml_examples
+
+
+def export_dataset(examples: List[Dict], output_path: str):
+    """Export dataset to JSONL file."""
+
+    chatml = to_chatml(examples)
+
+    with open(output_path, "w") as f:
+        for ex in chatml:
+            f.write(json.dumps(ex) + "\n")
+
+    print(f"Exported {len(chatml)} examples to {output_path}")
+
+
+# Export
+export_dataset(balanced_examples, "taskmaster_persona.jsonl")
+
+
+Output:
+
+Exported 215 examples to taskmaster_persona.jsonl
+
+Sample Output​
+{"messages": [{"role": "user", "content": "Create a task called Review Q4 budget with high priority"}, {"role": "assistant", "content": "Great choice! I've created 'Review Q4 budget' as a high-priority item. Financial reviews are exactly the kind of proactive work that keeps projects on track. When would you like to tackle this?"}]}
+{"messages": [{"role": "user", "content": "I just finished the presentation"}, {"role": "assistant", "content": "Nice work! Presentation complete—that's a big one checked off. You're making solid progress today. Ready for your next focus item?"}]}
+
+The Complete Pipeline Script​
+
+Here's the full pipeline in one script:
+
+#!/usr/bin/env python3
+"""
+TaskMaster Persona Dataset Generation Pipeline
+Generates high-quality training data with quality control
+"""
+
+import openai
+import json
+from typing import List, Dict
+from collections import Counter
+
+# Configuration
+OPENAI_MODEL = "gpt-4o-mini"
+TARGET_EXAMPLES = 200
+MIN_QUALITY_SCORE = 6
+OUTPUT_FILE = "taskmaster_persona.jsonl"
+
+# ... (include all functions from above)
+
+def main():
+    print("TaskMaster Persona Data Generation")
+    print("=" * 40)
+
+    # Step 1: Generate initial batch
+    print("\n1. Generating initial examples...")
+    all_scenarios = []
+    for category in SCENARIOS.values():
+        all_scenarios.extend(category["scenarios"])
+
+    raw_examples = generate_batch(
+        all_scenarios,
+        PERSONA_GENERATION_PROMPT,
+        examples_per_scenario=3
+    )
+    print(f"   Generated {len(raw_examples)} raw examples")
+
+    # Step 2: Quality filter
+    print("\n2. Quality filtering...")
+    filtered = filter_quality_examples(raw_examples, MIN_QUALITY_SCORE)
+    print(f"   Passed: {len(filtered)}/{len(raw_examples)}")
+
+    # Step 3: Balance check and fill
+    print("\n3. Balancing dataset...")
+    balanced = fill_gaps(filtered, target_per_scenario=10)
+    print(f"   Final count: {len(balanced)}")
+
+    # Step 4: Export
+    print("\n4. Exporting...")
+    export_dataset(balanced, OUTPUT_FILE)
+
+    # Summary
+    balance = analyze_balance(balanced)
+    print("\nDataset Summary:")
+    print(f"  Total examples: {balance['total_examples']}")
+    print(f"  Scenario coverage: {balance['scenario_coverage']:.0%}")
+    print(f"  Missing scenarios: {len(balance['missing_scenarios'])}")
+
+    print("\nDone! Ready for fine-tuning.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+Run the pipeline:
+
+python generate_persona_data.py
+
+
+Output:
+
+TaskMaster Persona Data Generation
+========================================
+
+1. Generating initial examples...
+   Generated 220 raw examples
+
+2. Quality filtering...
+   Passed: 187/220
+
+3. Balancing dataset...
+   Final count: 215
+
+4. Exporting...
+   Exported 215 examples to taskmaster_persona.jsonl
+
+Dataset Summary:
+  Total examples: 215
+  Scenario coverage: 100%
+  Missing scenarios: 0
+
+Done! Ready for fine-tuning.
+
+Update Your Skill​
+
+Add the dataset creation patterns to your skill:
+
+## Dataset Creation Patterns
+
+### Pipeline Steps
+1. Define scenario matrix (coverage requirements)
+2. Design generation prompt (encode full persona spec)
+3. Generate batch with LLM
+4. Quality filter with trait adherence scoring
+5. Balance across scenarios
+6. Export to ChatML format
+
+### Quality Thresholds
+- Trait adherence score: >= 6/10
+- No boundary violations
+- Vocabulary match present
+- Response structure followed
+
+### Typical Volumes
+- Persona fine-tuning: 100-500 examples
+- Style transfer: 200-300 examples is sweet spot
+- Multi-persona: 100+ per persona
+
+### Quality Check Prompt Template
+[Include QUALITY_CHECK_PROMPT from lesson]
+
+
+Commit your progress:
+
+git add .claude/skills/persona-tuner/SKILL.md
+git commit -m "feat: add dataset creation pipeline patterns"
+
+Try With AI​
+Prompt 1: Generate Your First Examples​
+I'm creating persona training data. Here's my persona specification:
+
+[Paste your persona spec from L01]
+
+Generate 5 training examples for this scenario:
+"User creates a new task with a due date"
+
+For each example:
+1. Write a realistic user message
+2. Write a persona-consistent response
+3. Identify which traits you demonstrated
+4. Rate your own response 1-10 for persona adherence
+
+Be critical—mark any responses that feel "off-persona".
+
+
+What you're learning: Hands-on example creation. Before automating, you need to understand what good examples look like.
+
+Prompt 2: Quality Check Practice​
+Here are 3 TaskMaster responses. Evaluate each:
+
+Response 1: "Task created."
+
+Response 2: "Great choice! I've created your task with the due date set.
+You're staying on top of things. What's next?"
+
+Response 3: "WOW!!! Amazing task created!!! You are SO productive!!!"
+
+For each:
+1. Score traits 0-2 (encouraging, productivity-focused, professional,
+   action-oriented, optimistic)
+2. Check vocabulary (yes/no)
+3. Check structure (yes/no)
+4. Check boundaries (pass/fail)
+5. Would you include in training data? Why?
+
+
+What you're learning: Quality assessment calibration. You need to recognize good and bad examples before building automated checks.
+
+Prompt 3: Design Your Scenario Matrix​
+I'm building a persona for [your domain/product].
+
+Help me create a scenario matrix:
+1. What are the main categories of user interactions?
+2. Within each category, what specific scenarios occur?
+3. How would you prioritize these (high/medium/low)?
+4. What edge cases should we include?
+5. How many examples per scenario for 200 total?
+
+Make it concrete—give me specific scenarios, not categories.
+
+
+What you're learning: Systematic coverage planning. A well-designed matrix prevents dataset gaps that cause inconsistent persona behavior.
+
+Safety Note​
+
+When using LLMs to generate training data, you're amplifying patterns from the base model. If the base model has biases (and they do), your synthetic data will contain those biases. Review generated examples manually before training. Look for: gendered language assumptions, cultural biases, accessibility issues, and inadvertent toxicity. Quality checks catch obvious problems; human review catches subtle ones.

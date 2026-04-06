@@ -1,0 +1,412 @@
+State Persistence and Display Modes
+
+Your TaskManager now has working Complete and Delete buttons. But there's a problem: if you select multiple tasks to bulk-delete, then click Delete on the first one, the widget refreshes and your other selections vanish. Every callTool reloads the widget, losing any UI state not stored on the server.
+
+In this lesson, you'll add state persistence so selections survive reloads. You'll also learn display modes—controlling whether your widget appears inline, as a floating pip, or in fullscreen.
+
+The State Problem​
+
+Here's what happens without state persistence:
+
+User checks 3 tasks to select them
+User clicks "Delete" on one task
+callTool executes, widget reloads
+All selections are lost—widget starts fresh
+
+The server stores task data, but UI state (selections, scroll position, filter choices) lives only in the widget. When the widget reloads, that state disappears.
+
+widgetState: The Solution​
+
+The window.openai API provides state persistence:
+
+Property	Purpose
+widgetState	Read the previously saved state (on load)
+setWidgetState(state)	Save state (before operations)
+
+State persists across widget reloads within the same conversation.
+
+Adding State to TaskManager​
+
+Update your widget JavaScript to save and restore selections. Modify the <script> section:
+
+<script>
+  // Initialize state from saved or default
+  let state = {
+    selectedIds: []
+  };
+
+  // Restore saved state on load
+  function initState() {
+    const saved = window.openai?.widgetState;
+    if (saved) {
+      state = { ...state, ...saved };
+    }
+  }
+
+  // Save state immediately
+  function saveState() {
+    window.openai?.setWidgetState?.(state);
+  }
+
+  // Toggle task selection
+  function toggleSelection(taskId) {
+    const idx = state.selectedIds.indexOf(taskId);
+    if (idx === -1) {
+      state.selectedIds.push(taskId);
+    } else {
+      state.selectedIds.splice(idx, 1);
+    }
+    saveState();
+    renderTasks();
+  }
+
+  // Check if task is selected
+  function isSelected(taskId) {
+    return state.selectedIds.includes(taskId);
+  }
+
+  // Rest of your existing code...
+  const summary = window.openai?.toolOutput;
+  const meta = window.openai?.toolResponseMetadata;
+  const tasks = meta?.tasks || [];
+
+  function renderTasks() {
+    const list = document.getElementById('task-list');
+    list.innerHTML = '';
+
+    tasks.forEach(task => {
+      const li = document.createElement('li');
+      const selected = isSelected(task.id);
+      li.className = selected ? 'selected' : '';
+      li.innerHTML = `
+        <div class="select-box ${selected ? 'checked' : ''}"
+             onclick="toggleSelection(${task.id})">
+          ${selected ? '●' : ''}
+        </div>
+        <div class="checkbox ${task.done ? 'checked' : ''}"
+             onclick="toggleTask(${task.id})">
+          ${task.done ? '✓' : ''}
+        </div>
+        <span class="task-title ${task.done ? 'done' : ''}">${task.title}</span>
+        <button class="delete-btn" onclick="deleteTask(${task.id})">×</button>
+      `;
+      list.appendChild(li);
+    });
+
+    updateSelectionCount();
+  }
+
+  function updateSelectionCount() {
+    const count = state.selectedIds.length;
+    const btn = document.getElementById('bulk-delete');
+    if (btn) {
+      btn.textContent = count > 0 ? `Delete ${count} Selected` : 'Delete Selected';
+      btn.disabled = count === 0;
+    }
+  }
+
+  async function bulkDelete() {
+    for (const id of state.selectedIds) {
+      await window.openai?.callTool?.('delete_task', { task_id: id });
+    }
+    state.selectedIds = [];
+    saveState();
+    refresh();
+  }
+
+  async function toggleTask(taskId) {
+    await window.openai?.callTool?.('complete_task', { task_id: taskId });
+    refresh();
+  }
+
+  async function deleteTask(taskId) {
+    // Remove from selections if deleted
+    state.selectedIds = state.selectedIds.filter(id => id !== taskId);
+    saveState();
+    await window.openai?.callTool?.('delete_task', { task_id: taskId });
+    refresh();
+  }
+
+  function refresh() {
+    window.openai?.sendFollowUpMessage?.({ prompt: "Show my tasks" });
+  }
+
+  // Initialize
+  initState();
+  renderTasks();
+</script>
+
+Key Patterns​
+
+1. Restore on Load:
+
+function initState() {
+  const saved = window.openai?.widgetState;
+  if (saved) {
+    state = { ...state, ...saved };
+  }
+}
+
+
+Call this before rendering. Merge saved state with defaults so new properties work even if saved state is from an older version.
+
+2. Save Before Operations:
+
+function toggleSelection(taskId) {
+  // Modify state
+  state.selectedIds.push(taskId);
+  // Save immediately
+  saveState();
+  // Then re-render
+  renderTasks();
+}
+
+
+Save state before any operation that might trigger a reload.
+
+3. Clean Up State:
+
+async function deleteTask(taskId) {
+  // Remove from selections if deleted
+  state.selectedIds = state.selectedIds.filter(id => id !== taskId);
+  saveState();
+  // Then delete
+  await window.openai?.callTool?.('delete_task', { task_id: taskId });
+}
+
+
+When a task is deleted, remove it from selections. Otherwise you'll have dangling IDs.
+
+Complete Widget with State​
+
+Here's the full updated widget HTML:
+
+WIDGET_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; margin: 0; padding: 16px; }
+    .container { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; }
+    h2 { margin: 0 0 16px 0; color: #333; }
+    .stats { color: #666; font-size: 14px; margin-bottom: 16px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
+    .toolbar button { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; }
+    .toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .bulk-delete { background: #e53e3e; color: white; }
+    .bulk-delete:hover:not(:disabled) { background: #c53030; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { padding: 12px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 12px; }
+    li:last-child { border-bottom: none; }
+    li.selected { background: #f0f0ff; }
+    .select-box {
+      width: 20px; height: 20px;
+      border: 2px solid #999; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; font-size: 10px; color: #667eea;
+    }
+    .select-box.checked { border-color: #667eea; background: #f0f0ff; }
+    .done { text-decoration: line-through; color: #999; }
+    .task-title { flex: 1; }
+    .checkbox { width: 24px; height: 24px; border: 2px solid #667eea; border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .checkbox:hover { background: #f0f0ff; }
+    .checkbox.checked { background: #667eea; color: white; }
+    .delete-btn { background: none; border: none; color: #999; cursor: pointer; font-size: 18px; padding: 4px 8px; }
+    .delete-btn:hover { color: #e53e3e; }
+    .refresh-btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>TaskManager</h2>
+    <p class="stats" id="stats">Loading...</p>
+    <div class="toolbar">
+      <button id="bulk-delete" class="bulk-delete" onclick="bulkDelete()" disabled>Delete Selected</button>
+    </div>
+    <ul id="task-list"></ul>
+    <button class="refresh-btn" onclick="refresh()">Refresh</button>
+  </div>
+  <script>
+    let state = { selectedIds: [] };
+
+    function initState() {
+      const saved = window.openai?.widgetState;
+      if (saved) state = { ...state, ...saved };
+    }
+
+    function saveState() {
+      window.openai?.setWidgetState?.(state);
+    }
+
+    function toggleSelection(taskId) {
+      const idx = state.selectedIds.indexOf(taskId);
+      if (idx === -1) state.selectedIds.push(taskId);
+      else state.selectedIds.splice(idx, 1);
+      saveState();
+      renderTasks();
+    }
+
+    function isSelected(taskId) {
+      return state.selectedIds.includes(taskId);
+    }
+
+    const summary = window.openai?.toolOutput;
+    const meta = window.openai?.toolResponseMetadata;
+    const tasks = meta?.tasks || [];
+
+    if (summary) {
+      document.getElementById('stats').textContent =
+        summary.total + ' tasks (' + summary.pending + ' pending, ' + summary.completed + ' done)';
+    }
+
+    function renderTasks() {
+      const list = document.getElementById('task-list');
+      list.innerHTML = '';
+      tasks.forEach(task => {
+        const li = document.createElement('li');
+        const selected = isSelected(task.id);
+        li.className = selected ? 'selected' : '';
+        li.innerHTML = `
+          <div class="select-box ${selected ? 'checked' : ''}" onclick="toggleSelection(${task.id})">${selected ? '●' : ''}</div>
+          <div class="checkbox ${task.done ? 'checked' : ''}" onclick="toggleTask(${task.id})">${task.done ? '✓' : ''}</div>
+          <span class="task-title ${task.done ? 'done' : ''}">${task.title}</span>
+          <button class="delete-btn" onclick="deleteTask(${task.id})">×</button>
+        `;
+        list.appendChild(li);
+      });
+      updateSelectionCount();
+    }
+
+    function updateSelectionCount() {
+      const count = state.selectedIds.length;
+      const btn = document.getElementById('bulk-delete');
+      btn.textContent = count > 0 ? 'Delete ' + count + ' Selected' : 'Delete Selected';
+      btn.disabled = count === 0;
+    }
+
+    async function bulkDelete() {
+      for (const id of state.selectedIds) {
+        await window.openai?.callTool?.('delete_task', { task_id: id });
+      }
+      state.selectedIds = [];
+      saveState();
+      refresh();
+    }
+
+    async function toggleTask(taskId) {
+      await window.openai?.callTool?.('complete_task', { task_id: taskId });
+      refresh();
+    }
+
+    async function deleteTask(taskId) {
+      state.selectedIds = state.selectedIds.filter(id => id !== taskId);
+      saveState();
+      await window.openai?.callTool?.('delete_task', { task_id: taskId });
+      refresh();
+    }
+
+    function refresh() {
+      window.openai?.sendFollowUpMessage?.({ prompt: "Show my tasks" });
+    }
+
+    initState();
+    renderTasks();
+  </script>
+</body>
+</html>'''
+
+Display Modes​
+
+Widgets can render in three modes:
+
+Mode	Appearance	Best For
+inline	Embedded in conversation (default)	Task lists, quick info
+pip	Floating picture-in-picture	Persistent tools, media players
+fullscreen	Full conversation width	Complex UIs, data tables
+Setting Display Mode​
+
+Add the mode to your widget metadata in _meta:
+
+@mcp.tool()
+def show_tasks_fullscreen() -> types.CallToolResult:
+    """Display tasks in fullscreen mode."""
+    pending = len([t for t in TASKS if not t["done"]])
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=f"Showing {len(TASKS)} tasks")],
+        structuredContent={"total": len(TASKS), "pending": pending, "completed": len(TASKS) - pending},
+        _meta={
+            "tasks": TASKS,
+            "openai.com/widget": types.EmbeddedResource(
+                type="resource",
+                resource=types.TextResourceContents(
+                    uri="ui://tasks",
+                    mimeType=MIME_TYPE,
+                    text=WIDGET_HTML,
+                )
+            ),
+            "openai.com/widgetDisplayMode": "fullscreen"  # Display mode
+        }
+    )
+
+Adding a Fullscreen Toggle​
+
+Add a button to switch between modes:
+
+function openFullscreen() {
+  window.openai?.sendFollowUpMessage?.({
+    prompt: "Show my tasks in fullscreen"
+  });
+}
+
+
+And a corresponding tool:
+
+@mcp.tool(annotations={"openai/widgetAccessible": True})
+def show_tasks_fullscreen() -> types.CallToolResult:
+    """Show tasks in fullscreen mode."""
+    # Same as show_tasks but with display mode
+    return types.CallToolResult(
+        # ... same content
+        _meta={
+            "tasks": TASKS,
+            "openai.com/widget": ...,
+            "openai.com/widgetDisplayMode": "fullscreen"
+        }
+    )
+
+Testing State and Modes​
+Restart your server with the updated code
+In ChatGPT: "Show my tasks"
+Select 2-3 tasks using the circular selectors
+Click the checkbox on one task (to complete it)
+After reload, check that selections persist
+Click "Delete Selected" to bulk-delete
+Try "Show my tasks in fullscreen" if you added that tool
+What You Built​
+
+Building on Lesson 5's TaskManager with actions:
+
+Added widgetState for selection persistence
+Implemented bulk selection and delete
+Learned display mode control
+Pattern: save state → do operation → refresh
+
+Your TaskManager now has working state persistence. In the next lesson, you'll polish and deploy the complete application.
+
+Try With AI​
+Prompt 1: Add Scroll Position Persistence​
+I want the task list to remember where I scrolled to. When the widget reloads after an action, it should scroll back to the same position. Add scrollTop to the saved state.
+
+
+What you're learning: State can include any serializable value. Scroll position is just another number to save and restore.
+
+Prompt 2: Add Filter State​
+Add a filter dropdown (All, Pending, Completed) above the task list. Save the selected filter in widgetState so it persists across reloads. Tasks should filter based on the selection.
+
+
+What you're learning: Complex UI state (not just selections) can be persisted. This pattern scales to any widget preferences.
+
+Prompt 3: Pip Mode for Quick Access​
+Create a "show_tasks_pip" tool that displays a minimal task count widget as a floating pip. The pip should show "X pending" and have a button to open the full task list.
+
+
+What you're learning: Different display modes serve different use cases. Pip is useful for persistent, minimal information displays.

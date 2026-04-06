@@ -1,0 +1,386 @@
+LiteLLM Proxy for SDK Compatibility
+
+Your Task API model speaks Ollama's API format. Agent frameworks like OpenAI Agents SDK speak OpenAI's format. LiteLLM bridges this gap.
+
+In this lesson, you deploy a LiteLLM proxy that makes your Ollama model appear as an OpenAI-compatible endpoint. Any code written for GPT-4 works with your model by changing one line.
+
+Why a Proxy?​
+
+Without LiteLLM:
+
+# Ollama-specific code
+import requests
+
+response = requests.post(
+    "http://localhost:11434/api/generate",
+    json={"model": "task-api-model", "prompt": prompt}
+)
+result = response.json()["response"]
+
+
+With LiteLLM:
+
+# Standard OpenAI SDK
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-local")
+response = client.chat.completions.create(
+    model="task-api-model",
+    messages=[{"role": "user", "content": prompt}]
+)
+result = response.choices[0].message.content
+
+
+The benefit: Your code uses the industry-standard OpenAI SDK. When you want to switch models (test with GPT-4, deploy with custom), you change the base_url and model parameters. Nothing else changes.
+
+Architecture​
+┌────────────────────────────────────────────────────────────────┐
+│                       YOUR APPLICATION                          │
+│                                                                  │
+│   from openai import OpenAI                                     │
+│   client = OpenAI(base_url="http://localhost:4000/v1")         │
+│                                                                  │
+└─────────────────────────────┬────────────────────────────────────┘
+                              │
+                              │ OpenAI API format
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      LITELLM PROXY                               │
+│                    localhost:4000                                │
+│                                                                  │
+│   - Receives OpenAI-format requests                             │
+│   - Routes to appropriate backend                                │
+│   - Translates request format                                    │
+│   - Returns OpenAI-format response                               │
+│                                                                  │
+└─────────────────────────────┬────────────────────────────────────┘
+                              │
+                              │ Ollama API format
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      OLLAMA SERVER                               │
+│                    localhost:11434                               │
+│                                                                  │
+│   - Runs your Task API model                                     │
+│   - Returns completions                                          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+Step 1: Install LiteLLM​
+
+Create a new directory for your proxy configuration:
+
+mkdir -p litellm-proxy
+cd litellm-proxy
+
+
+Install LiteLLM with proxy support:
+
+pip install 'litellm[proxy]'
+
+
+Output:
+
+Collecting litellm[proxy]
+  Downloading litellm-1.52.0-py3-none-any.whl (6.2 MB)
+...
+Successfully installed litellm-1.52.0 ...
+
+
+Verify installation:
+
+litellm --version
+
+
+Output:
+
+LiteLLM Proxy: 1.52.0
+
+Step 2: Create Configuration File​
+
+Create config.yaml:
+
+# config.yaml - LiteLLM Proxy Configuration
+
+model_list:
+  # Your custom Task API model via Ollama
+  - model_name: task-api-model
+    litellm_params:
+      model: ollama/task-api-model
+      api_base: http://localhost:11434
+
+  # Fallback to GPT-4o-mini (optional)
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+# General settings
+general_settings:
+  master_key: sk-local-dev-key  # For local development
+
+Configuration Breakdown​
+Field	Purpose	Example
+model_name	Name clients use to request this model	task-api-model
+model	LiteLLM model identifier	ollama/task-api-model
+api_base	Backend server URL	http://localhost:11434
+master_key	Authentication key for proxy	sk-local-dev-key
+
+The ollama/ prefix tells LiteLLM to use the Ollama provider and translate requests accordingly.
+
+Step 3: Start the Proxy​
+
+Ensure Ollama is running with your model:
+
+# In a separate terminal
+ollama run task-api-model
+
+
+Start LiteLLM proxy:
+
+litellm --config config.yaml --port 4000
+
+
+Output:
+
+INFO:     Started server process [12345]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)
+
+Step 4: Verify the Proxy​
+Health Check​
+curl http://localhost:4000/health
+
+
+Output:
+
+{
+  "status": "healthy",
+  "version": "1.52.0"
+}
+
+List Available Models​
+curl http://localhost:4000/v1/models
+
+
+Output:
+
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "task-api-model",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "ollama"
+    }
+  ]
+}
+
+Test Completion​
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-local-dev-key" \
+  -d '{
+    "model": "task-api-model",
+    "messages": [
+      {"role": "user", "content": "Create a task for reviewing the budget"}
+    ]
+  }'
+
+
+Output:
+
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "task-api-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I'll create a task for reviewing the budget..."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 25,
+    "total_tokens": 40
+  }
+}
+
+Step 5: Connect with OpenAI SDK​
+
+Now use the standard OpenAI Python SDK:
+
+from openai import OpenAI
+
+# Point to LiteLLM proxy instead of OpenAI
+client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-key"
+)
+
+# Standard OpenAI SDK usage
+response = client.chat.completions.create(
+    model="task-api-model",
+    messages=[
+        {"role": "system", "content": "You are TaskMaster, a helpful task management assistant."},
+        {"role": "user", "content": "Create a high-priority task for quarterly review"}
+    ]
+)
+
+print(response.choices[0].message.content)
+
+
+Output:
+
+I'll create that high-priority task for you:
+
+**Task Created:**
+- Title: Quarterly Review
+- Priority: High
+- Status: Pending
+
+Would you like to add a due date or any additional details?
+
+
+This is the key insight: Your application code looks identical to code using GPT-4. The only difference is base_url and model.
+
+Multi-Model Configuration​
+
+LiteLLM can route to multiple backends. Update config.yaml:
+
+model_list:
+  # Primary: Your custom model
+  - model_name: task-api-model
+    litellm_params:
+      model: ollama/task-api-model
+      api_base: http://localhost:11434
+
+  # Fallback: OpenAI GPT-4o-mini
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Alternative: Claude for comparison
+  - model_name: claude-sonnet
+    litellm_params:
+      model: claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+
+Now your application can switch models by changing one parameter:
+
+# Use your custom model
+response = client.chat.completions.create(
+    model="task-api-model",  # ← Your model
+    messages=[...]
+)
+
+# Switch to GPT-4 for comparison
+response = client.chat.completions.create(
+    model="gpt-4o-mini",  # ← OpenAI
+    messages=[...]
+)
+
+Running as Background Service​
+
+For development, run the proxy in the background:
+
+# Using nohup
+nohup litellm --config config.yaml --port 4000 > litellm.log 2>&1 &
+
+# Check it's running
+curl http://localhost:4000/health
+
+
+For production, consider:
+
+Docker deployment
+Systemd service
+Kubernetes deployment
+Troubleshooting​
+Proxy Won't Start​
+
+Error: Address already in use
+
+# Find what's using port 4000
+lsof -i :4000
+
+# Kill it or use different port
+litellm --config config.yaml --port 4001
+
+Ollama Connection Failed​
+
+Error: Connection refused to localhost:11434
+
+# Ensure Ollama is running
+ollama serve
+
+# Verify your model exists
+ollama list
+
+Model Not Found​
+
+Error: Model 'task-api-model' not found
+
+# Check model name matches exactly
+ollama list
+
+# Update config.yaml with correct name
+
+Update Your Skill​
+
+After completing this lesson, add to your agent-integration skill:
+
+Add a section on "LiteLLM Proxy Setup" with:
+- Installation command
+- Basic config.yaml template
+- Health check commands
+- Common troubleshooting steps
+
+Try With AI​
+Prompt 1: Extend Configuration​
+I have my LiteLLM proxy working with my Task API model. Now I want to add:
+1. Request logging to a file
+2. Rate limiting (100 requests/minute)
+3. A timeout of 30 seconds for slow responses
+
+Show me how to update my config.yaml for these features. Reference
+the LiteLLM documentation for the correct syntax.
+
+
+What you're learning: Extending basic configuration with production features.
+
+Prompt 2: Debug Connection Issues​
+My LiteLLM proxy starts but returns errors when I try to call it:
+
+curl response:
+{"error": {"message": "Connection refused", "type": "invalid_request_error"}}
+
+Help me debug this step by step:
+1. What should I check first?
+2. How do I verify Ollama is accessible?
+3. What logs should I look at?
+
+
+What you're learning: Systematic debugging of proxy connectivity issues.
+
+Prompt 3: Compare Architectures​
+I'm deciding between:
+A) LiteLLM proxy in front of Ollama (current setup)
+B) Direct Ollama integration without proxy
+C) vLLM with built-in OpenAI compatibility
+
+For my task management agent (50K requests/month, sub-500ms latency needed),
+which architecture makes most sense? What are the trade-offs I should consider?
+
+
+What you're learning: Evaluating architectural options for your specific requirements.

@@ -1,0 +1,164 @@
+Creating & Reading Data
+
+In Lesson 2, you described your data model in plain English and the agent built the schema. Tables exist, columns have types, constraints are in place. But a schema without data is like a filing cabinet with labeled drawers and nothing inside. Now you will put data in and get it back out -- reliably.
+
+You might be thinking: "Why can't the agent just store the data and move on?" Because storing without saving is like writing a check without signing it -- the bank will not process it. And if something goes wrong mid-write, you need a way to tear up that check cleanly. That is what this lesson is about: the session lifecycle that makes database writes trustworthy.
+
+KEY TERMS FOR THIS LESSON
+CRUD: Create, Read, Update, Delete -- the four basic operations every database application needs
+Session: A workspace for database operations -- think of it as a shopping cart where you add items before checking out
+Stage vs Save: The "stage" step puts data in a holding area (like adding items to a shopping cart). The "save" step makes them permanent (like clicking "Place Order"). If anything fails, you can undo and empty the cart.
+Rollback: Undo all unsaved changes in the current session -- your safety net when writes go wrong
+The Session Lifecycle​
+
+Before a single row gets stored, understand the machine the agent's code works with. A session moves through a predictable sequence, and knowing where you are in that sequence helps you diagnose problems when output does not match expectations.
+
+This is what is happening inside the database engine when your agent's code runs. You do not need to understand each step -- but this diagram explains WHY your agent needs to both write AND verify, in two separate operations.
+
+Session Lifecycle:
+
+  open          stage          preview        save
+   |               |               |              |
+   v               v               v              v
++------+    +-----------+    +----------+    +----------+
+| New  |--->|  Staged    |--->| Previewed|--->|  Saved   |
+|Session|    |  Changes   |    | (in DB   |    | (durable)|
++------+    +-----------+    | but not  |    +----------+
+                              | permanent)|
+                              +-----+----+
+                                    | error?
+                                    v
+                              +----------+
+                              | Rollback |
+                              | (undo    |
+                              |  all)    |
+                              +----------+
+
+
+Here is what each stage means in plain language:
+
+Open: The agent creates a session. Nothing has happened yet.
+Staged: The agent tells the session to track new data. The data is held in memory, but the database has not seen it.
+Previewed: The agent asks the database to preview the data. The database assigns IDs -- but this is temporary. If the session ends without a save, the changes vanish.
+Saved: The agent saves. The transaction finalizes. The data is durable -- it survives restarts, crashes, power outages.
+Rollback: Something went wrong. The agent undoes everything, and every staged or previewed change in that session is erased. Clean slate.
+
+Why does the preview step exist separately from save? Because sometimes the database needs to assign an ID (like an auto-incrementing primary key) before related rows can reference it -- but you do not want to save until everything succeeds.
+
+The Happy Path: Store and Verify​
+
+Here is the pattern you will use hundreds of times. Tell the agent what to store, then verify the result by reading the output.
+
+What you tell the agent
+
+Store one expense for Alice in the Food category for $52.50 on January 15, 2024. Then show me all expenses over $50.
+
+What you verify
+
+The agent stores the expense and gives you a verify command.
+
+python verify_crud.py
+
+Output:
+  ✓ Stored: Groceries | Alice | Food | $52.50 | 2024-01-15
+
+  Expenses over $50:
+    - Groceries: $52.50
+
+  1 expense found.
+
+
+What matters here is the output, not the code the agent wrote. You are reading the receipt, not the cash register's wiring diagram. The output tells you:
+
+The data was stored (the row appears with the values you described)
+The data survived a separate query (it was not just held in temporary memory)
+The filter worked (only expenses over $50 appear)
+
+If any of those three things are wrong, you tell the agent what to fix. You do not edit the code yourself.
+
+Read-Path Verification Checklist​
+
+Do not trust that writes worked just because no error appeared. Trust the read:
+
+Store one known row with specific values you can check
+Read that row back in a separate query
+Check that field values match what you described, not just that a row exists
+Tell the agent to run one failing insert (for a user that does not exist) and show you the error output
+Repeat the read to prove the failed write left no leftover data
+
+This simple loop prevents most beginner data illusions -- the cases where you think data was saved but it was only in temporary memory, or where a failed write silently left partial data behind.
+
+The Failure Path: Rollback in Action​
+
+You might be thinking: "When would a save actually fail?" More often than you would hope -- duplicate emails, invalid references, network hiccups. The question is not IF it fails, it is WHEN.
+
+What you tell the agent
+
+Try to store an expense for a user that does not exist (user ID 9999). Show me what error the database returns. Then verify zero new rows were created.
+
+What you verify
+
+The agent runs the test. You see:
+
+python test_failure.py
+
+Output:
+  Attempting to store expense for user_id=9999...
+  ✗ Database rejected: foreign key constraint violation (user 9999 does not exist)
+  Expense count before: 1
+  Expense count after:  1
+  ✓ Rollback confirmed — zero partial rows created
+
+
+What the output means: the database rejected the row because user 9999 does not exist in the users table. That is your foreign key constraint doing its job -- the same rule you described in Lesson 2 as "must reference an existing user." The rollback undid everything in this session, leaving the database exactly as it was before. The expense count stayed at 1, proving no partial data leaked through.
+
+Running one controlled failure now saves hours of confusing problems later. Storing data without saving is the database equivalent of "I will save my file later." We all know how that story ends.
+
+PAUSE AND REFLECT
+
+You have seen both a successful store and a failed one. Why is the failure case just as important to practice? In production, which scenario do you think happens more often -- and what happens if your agent's code does not handle it?
+
+What to Ask For​
+
+When you need specific data from the database, describe what you want in English:
+
+"Show me all expenses" -- the agent fetches all rows
+"Show me the first Food expense" -- the agent fetches one matching row
+"Show me all expenses in March" -- the agent filters by date range
+"Show me total spending by category" -- the agent groups and sums
+
+The agent handles the query syntax. You describe what you need and verify the output matches your expectations. If the output looks wrong, describe what you expected and ask the agent to fix the query.
+
+Debugging by Directing​
+
+When things do not work as expected, tell the agent what you observe:
+
+If the verification shows empty results: tell the agent "the result was empty -- check if the save step actually ran after staging the data"
+If a bad reference insert does not get rejected: tell the agent "the database accepted an invalid reference -- check if foreign key enforcement is enabled"
+If a query returns unexpected results: tell the agent "the filter might not be specific enough -- return all matching rows so I can see what is in the database"
+
+You diagnose by reading output. The agent fixes by editing code. That division of labor is the director pattern.
+
+Try With AI​
+Prompt 1: Review Agent Code for Safety​
+I want to verify my database code is correct. Review this code and find:
+missing save step, missing rollback on failure, foreign key misuse, and
+wrong assumptions about one-result vs all-results queries. Provide fixes
+with explanations.
+
+
+What you're learning: You are building the skill of directing an AI code review. You describe what to look for, the agent inspects the code, and you read the findings. This is how directors catch bugs without reading source code -- by knowing what questions to ask.
+
+Prompt 2: Build and Verify a Query​
+Add a function that lists all expenses over a given amount. Show me what
+running it would output for expenses of $30, $52.50, and $120.
+
+
+What you're learning: You are practicing the store-then-verify loop. By asking the agent to show output for specific inputs, you can check whether the query logic matches your expectations without reading the query code itself.
+
+Checkpoint​
+ I can explain why data that is only in temporary memory is not persistent (it disappears when the process exits)
+ I directed the agent to store one expense and verified the output showed it was saved
+ I directed the agent to test a failure case and read the rollback confirmation
+ I know what to tell the agent if the verification comes back empty
+Flashcards Study Aid​

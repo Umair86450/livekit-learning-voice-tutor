@@ -1,0 +1,527 @@
+Concurrent Requests and Rate Limiting
+
+You're building a document analysis tool. A user uploads 50 PDFs and wants AI to summarize each one. Do you send 50 requests simultaneously? That's a recipe for disaster: rate limit errors, overwhelmed servers, and a crashed application. Send them one by one? Users will abandon your tool before it finishes.
+
+The solution is controlled concurrency: process multiple requests in parallel, but within limits that respect both your API quotas and your users' patience. This lesson teaches the patterns that make batch AI operations reliable and efficient.
+
+Every production AI application eventually needs these patterns. Whether you're processing customer feedback, analyzing documents, or running evaluations across test cases, you'll face the same challenge: many operations, limited capacity, real users waiting for results.
+
+The Problem: Uncontrolled Concurrency​
+
+Here's what happens when you fire off 100 AI requests at once:
+
+// DON'T DO THIS - will trigger rate limits
+const prompts = Array.from({ length: 100 }, (_, i) => `Analyze document ${i + 1}`);
+
+const promises = prompts.map(prompt => callAI(prompt));
+const results = await Promise.all(promises);  // 100 concurrent requests!
+
+
+What goes wrong:
+
+Symptom	Cause
+HTTP 429 errors	API rate limit exceeded
+Requests timing out	Server overwhelmed
+Incomplete results	Some requests fail silently
+Memory exhaustion	Too many pending responses
+
+Most AI APIs have rate limits: OpenAI allows 3,500 requests per minute on standard tiers, Anthropic has similar limits. Exceeding them means rejected requests, wasted tokens, and frustrated users.
+
+Promise.all: Parallel Execution​
+
+Promise.all runs multiple Promises concurrently and waits for all to complete:
+
+async function callAI(prompt: string): Promise<string> {
+  // Simulate API call with variable latency
+  const delay = Math.random() * 1000 + 500;
+  await new Promise(resolve => setTimeout(resolve, delay));
+  return `Response to: ${prompt}`;
+}
+
+async function parallelDemo(): Promise<void> {
+  console.log("Starting 3 parallel requests...");
+  const start = Date.now();
+
+  // All three run simultaneously
+  const results = await Promise.all([
+    callAI("Summarize document A"),
+    callAI("Summarize document B"),
+    callAI("Summarize document C"),
+  ]);
+
+  const elapsed = Date.now() - start;
+  console.log(`Completed in ${elapsed}ms`);
+  console.log("Results:", results);
+}
+
+parallelDemo();
+
+
+Output:
+
+Starting 3 parallel requests...
+Completed in 1247ms
+Results: [
+  'Response to: Summarize document A',
+  'Response to: Summarize document B',
+  'Response to: Summarize document C'
+]
+
+
+Key insight: If each request takes ~1 second, three parallel requests complete in ~1 second total. Three sequential requests would take ~3 seconds.
+
+The catch: Promise.all rejects immediately if ANY Promise rejects:
+
+async function riskyBatch(): Promise<void> {
+  try {
+    const results = await Promise.all([
+      Promise.resolve("success 1"),
+      Promise.reject(new Error("boom")),  // This fails
+      Promise.resolve("success 3"),        // Never even checked
+    ]);
+  } catch (error) {
+    if (error instanceof Error) {
+      console.log("Batch failed:", error.message);
+    }
+  }
+}
+
+riskyBatch();
+
+
+Output:
+
+Batch failed: boom
+
+
+You lose the successful results when one fails. For batch operations where partial success is acceptable, you need a different approach.
+
+Promise.allSettled: Partial Success Handling​
+
+Promise.allSettled waits for all Promises to settle (fulfill OR reject) and returns the status of each:
+
+async function unreliableAPI(id: number): Promise<string> {
+  // Simulate 30% failure rate
+  if (Math.random() < 0.3) {
+    throw new Error(`Request ${id} failed`);
+  }
+  await new Promise(resolve => setTimeout(resolve, 500));
+  return `Result ${id}`;
+}
+
+async function batchWithPartialSuccess(): Promise<void> {
+  const ids = [1, 2, 3, 4, 5];
+
+  const results = await Promise.allSettled(
+    ids.map(id => unreliableAPI(id))
+  );
+
+  // Process results based on status
+  const successes: string[] = [];
+  const failures: string[] = [];
+
+  for (const [index, result] of results.entries()) {
+    if (result.status === "fulfilled") {
+      successes.push(result.value);
+    } else {
+      failures.push(`ID ${ids[index]}: ${result.reason.message}`);
+    }
+  }
+
+  console.log("Successes:", successes);
+  console.log("Failures:", failures);
+  console.log(`Success rate: ${successes.length}/${ids.length}`);
+}
+
+batchWithPartialSuccess();
+
+
+Output:
+
+Successes: [ 'Result 1', 'Result 3', 'Result 4' ]
+Failures: [ 'ID 2: Request 2 failed', 'ID 5: Request 5 failed' ]
+Success rate: 3/5
+
+
+When to use each:
+
+Scenario	Use
+All requests must succeed (transactions)	Promise.all
+Partial success is acceptable (batch analysis)	Promise.allSettled
+Need first successful result	Promise.any
+Need fastest result (timeout race)	Promise.race
+Promise.race: Implementing Timeouts​
+
+Promise.race resolves or rejects as soon as ANY Promise settles. This is perfect for timeouts:
+
+function timeout<T>(ms: number): Promise<T> {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms);
+  });
+}
+
+async function fetchWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  return Promise.race([
+    promise,
+    timeout<T>(timeoutMs),
+  ]);
+}
+
+// Usage
+async function timeoutDemo(): Promise<void> {
+  // Simulate slow API (2 seconds)
+  const slowRequest = new Promise<string>(resolve => {
+    setTimeout(() => resolve("Finally done!"), 2000);
+  });
+
+  try {
+    // Timeout after 1 second
+    const result = await fetchWithTimeout(slowRequest, 1000);
+    console.log("Result:", result);
+  } catch (error) {
+    if (error instanceof Error) {
+      console.log("Error:", error.message);
+    }
+  }
+}
+
+timeoutDemo();
+
+
+Output:
+
+Error: Timeout after 1000ms
+
+
+Production consideration: The original request continues running even after the timeout. For true cancellation, combine with AbortController (covered in Lesson 3).
+
+Concurrency Pool: Processing N at a Time​
+
+The core pattern for controlled concurrency: maintain a "pool" of N concurrent operations, starting a new one whenever one completes.
+
+async function batchProcess<T, R>(
+  items: T[],
+  processor: (item: T) => Promise<R>,
+  concurrency = 5
+): Promise<R[]> {
+  const results: R[] = [];
+  const executing = new Set<Promise<void>>();
+
+  for (const item of items) {
+    // Create a Promise that processes the item and stores the result
+    const promise = processor(item).then(result => {
+      results.push(result);
+      executing.delete(promise);
+    });
+
+    executing.add(promise);
+
+    // When we hit the concurrency limit, wait for one to complete
+    if (executing.size >= concurrency) {
+      await Promise.race(executing);
+    }
+  }
+
+  // Wait for remaining items to complete
+  await Promise.all(executing);
+  return results;
+}
+
+
+Let's see it in action:
+
+async function concurrencyDemo(): Promise<void> {
+  // Simulate 20 prompts to process
+  const prompts = Array.from({ length: 20 }, (_, i) => `Prompt ${i + 1}`);
+
+  let activeCount = 0;
+  let maxActive = 0;
+
+  async function processPrompt(prompt: string): Promise<string> {
+    activeCount++;
+    maxActive = Math.max(maxActive, activeCount);
+    console.log(`Starting ${prompt} (active: ${activeCount})`);
+
+    // Simulate variable processing time
+    await new Promise(resolve =>
+      setTimeout(resolve, Math.random() * 500 + 200)
+    );
+
+    activeCount--;
+    return `Done: ${prompt}`;
+  }
+
+  const start = Date.now();
+  const results = await batchProcess(prompts, processPrompt, 5);
+  const elapsed = Date.now() - start;
+
+  console.log(`\nCompleted ${results.length} items in ${elapsed}ms`);
+  console.log(`Max concurrent: ${maxActive}`);
+}
+
+concurrencyDemo();
+
+
+Output:
+
+Starting Prompt 1 (active: 1)
+Starting Prompt 2 (active: 2)
+Starting Prompt 3 (active: 3)
+Starting Prompt 4 (active: 4)
+Starting Prompt 5 (active: 5)
+Starting Prompt 6 (active: 5)
+Starting Prompt 7 (active: 5)
+...
+Completed 20 items in 1847ms
+Max concurrent: 5
+
+
+Notice how the active count never exceeds 5. As soon as one completes, another starts.
+
+Rate Limiting: Respecting API Quotas​
+
+Concurrency limits aren't enough. APIs also limit requests per time window. A simple rate limiter adds minimum delay between requests:
+
+class RateLimiter {
+  private lastRequest = 0;
+
+  constructor(private minIntervalMs: number) {}
+
+  async acquire(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastRequest;
+    const waitTime = Math.max(0, this.minIntervalMs - elapsed);
+
+    if (waitTime > 0) {
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
+    this.lastRequest = Date.now();
+  }
+}
+
+// Usage: Max 10 requests per second = 100ms between requests
+const limiter = new RateLimiter(100);
+
+async function rateLimitedCall(prompt: string): Promise<string> {
+  await limiter.acquire();  // Wait if needed
+  console.log(`${new Date().toISOString()} - Calling: ${prompt}`);
+  return `Response to: ${prompt}`;
+}
+
+async function rateLimitDemo(): Promise<void> {
+  const prompts = ["A", "B", "C", "D", "E"];
+
+  for (const prompt of prompts) {
+    await rateLimitedCall(prompt);
+  }
+}
+
+rateLimitDemo();
+
+
+Output:
+
+2025-01-01T10:00:00.000Z - Calling: A
+2025-01-01T10:00:00.100Z - Calling: B
+2025-01-01T10:00:00.200Z - Calling: C
+2025-01-01T10:00:00.300Z - Calling: D
+2025-01-01T10:00:00.400Z - Calling: E
+
+
+Each call is spaced at least 100ms apart, ensuring you stay within 10 requests/second.
+
+Combining Concurrency and Rate Limiting​
+
+Production systems need both: limit concurrent requests AND respect rate limits:
+
+async function batchProcessWithRateLimit<T, R>(
+  items: T[],
+  processor: (item: T) => Promise<R>,
+  options: {
+    concurrency?: number;
+    minIntervalMs?: number;
+  } = {}
+): Promise<R[]> {
+  const { concurrency = 5, minIntervalMs = 100 } = options;
+
+  const results: R[] = [];
+  const executing = new Set<Promise<void>>();
+  let lastRequest = 0;
+
+  for (const item of items) {
+    // Rate limiting: ensure minimum interval
+    const now = Date.now();
+    const elapsed = now - lastRequest;
+    if (elapsed < minIntervalMs) {
+      await new Promise(r => setTimeout(r, minIntervalMs - elapsed));
+    }
+    lastRequest = Date.now();
+
+    // Concurrency limiting: wait if at capacity
+    const promise = processor(item).then(result => {
+      results.push(result);
+      executing.delete(promise);
+    });
+
+    executing.add(promise);
+
+    if (executing.size >= concurrency) {
+      await Promise.race(executing);
+    }
+  }
+
+  await Promise.all(executing);
+  return results;
+}
+
+
+Usage for a typical AI API:
+
+// OpenAI standard tier: 3,500 requests/minute = ~58/second
+// Be conservative: 50 requests/second = 20ms interval
+// Limit concurrent to prevent memory issues: 10 at a time
+
+async function processDocuments(documents: string[]): Promise<string[]> {
+  return batchProcessWithRateLimit(
+    documents,
+    doc => callAI(`Summarize: ${doc}`),
+    { concurrency: 10, minIntervalMs: 20 }
+  );
+}
+
+Real-World Example: Document Batch Processing​
+
+Here's a complete example that handles a realistic batch processing scenario:
+
+interface ProcessingResult {
+  id: string;
+  status: "success" | "error";
+  result?: string;
+  error?: string;
+  durationMs: number;
+}
+
+async function processDocumentBatch(
+  documents: { id: string; content: string }[]
+): Promise<ProcessingResult[]> {
+  console.log(`Processing ${documents.length} documents...`);
+  const startTime = Date.now();
+
+  const results = await batchProcessWithRateLimit(
+    documents,
+    async (doc): Promise<ProcessingResult> => {
+      const itemStart = Date.now();
+
+      try {
+        // Simulate AI processing with occasional failures
+        if (Math.random() < 0.1) {
+          throw new Error("Temporary API error");
+        }
+
+        await new Promise(r =>
+          setTimeout(r, Math.random() * 500 + 200)
+        );
+
+        return {
+          id: doc.id,
+          status: "success",
+          result: `Summary of ${doc.id}: ${doc.content.slice(0, 50)}...`,
+          durationMs: Date.now() - itemStart,
+        };
+      } catch (error) {
+        return {
+          id: doc.id,
+          status: "error",
+          error: error instanceof Error ? error.message : "Unknown error",
+          durationMs: Date.now() - itemStart,
+        };
+      }
+    },
+    { concurrency: 5, minIntervalMs: 50 }
+  );
+
+  const totalTime = Date.now() - startTime;
+  const successes = results.filter(r => r.status === "success").length;
+
+  console.log(`\nBatch complete:`);
+  console.log(`  Total time: ${totalTime}ms`);
+  console.log(`  Success rate: ${successes}/${documents.length}`);
+  console.log(`  Avg per doc: ${Math.round(totalTime / documents.length)}ms`);
+
+  return results;
+}
+
+// Demo with 15 documents
+const docs = Array.from({ length: 15 }, (_, i) => ({
+  id: `DOC-${String(i + 1).padStart(3, "0")}`,
+  content: `This is the content of document ${i + 1} with important information...`,
+}));
+
+processDocumentBatch(docs);
+
+
+Output:
+
+Processing 15 documents...
+
+Batch complete:
+  Total time: 2847ms
+  Success rate: 13/15
+  Avg per doc: 190ms
+
+Pattern Summary​
+Pattern	Use Case	Code
+Promise.all	All must succeed	await Promise.all([...])
+Promise.allSettled	Partial success OK	await Promise.allSettled([...])
+Promise.race	Timeout / first wins	await Promise.race([request, timeout])
+Concurrency pool	Limit parallel ops	Track executing Set, race when full
+Rate limiter	Requests per second	Track lastRequest, add delay
+Try With AI​
+Prompt 1: Design a Rate Limit Strategy​
+I'm building an AI document processor. My API has these limits:
+- 100 requests per minute
+- 10 concurrent requests max
+- Each request takes 2-5 seconds
+
+I need to process 500 documents. Help me:
+1. Calculate the theoretical minimum time
+2. Design a strategy that respects both limits
+3. Handle the case where some requests fail
+
+What's the optimal concurrency and rate limit settings?
+
+
+What you're learning: Analyzing constraints and designing a strategy that satisfies multiple requirements simultaneously. This is exactly the thinking needed for production AI systems.
+
+Prompt 2: Implement Retry with Backoff in Batches​
+Extend the batchProcessWithRateLimit function to include automatic retry
+for failed items. Requirements:
+- Retry failed items up to 3 times
+- Use exponential backoff (1s, 2s, 4s delays)
+- Don't count retries against the rate limit
+- Return which items ultimately failed after all retries
+
+Show me the implementation and explain the tradeoffs.
+
+
+What you're learning: Combining multiple async patterns (retry, backoff, rate limiting) into a cohesive solution. Real AI applications need exactly this complexity.
+
+Prompt 3: Compare with Python asyncio​
+I know Python's asyncio has asyncio.Semaphore for concurrency limiting
+and asyncio.gather() for parallel execution. Compare these to the
+TypeScript patterns from this lesson:
+
+1. Show equivalent Python code for the batchProcess function
+2. What's easier in Python? What's easier in TypeScript?
+3. Which patterns transfer directly between languages?
+
+Help me build intuition that works in both ecosystems.
+
+
+What you're learning: Cross-language pattern recognition. Understanding that concurrency concepts are universal even when syntax differs makes you effective in any language.
+
+Safety note: When implementing rate limiting for production AI applications, always start conservative and monitor for 429 errors. API rate limits can change, and different endpoints may have different limits. Build in observability (logging request rates, tracking failures) so you can tune your limits based on actual behavior rather than guessing.

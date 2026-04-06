@@ -1,0 +1,367 @@
+Exercises: Basel and AML Deep Practice
+ACS (BANK OF ENGLAND ANNUAL CYCLICAL SCENARIO)
+
+The Bank of England's yearly stress test that forces UK banks to prove they can survive a severe economic downturn -- with specific GDP, unemployment, and property price shocks prescribed by the regulator.
+
+In the 2023 ACS, banks had to model surviving GDP falling 5%, unemployment reaching 8.5%, and house prices dropping 31% -- then show their CET1 ratio stayed above the 4.5% hard minimum throughout.
+
+The ACS is the UK's primary tool for calibrating bank-specific capital buffers -- a bank that barely survives the scenario may be told to hold more CET1 than the Basel minimum.
+
+DFAST (DODD-FRANK ACT STRESS TESTING)
+
+The US equivalent of the UK's ACS -- a Federal Reserve-mandated stress test requiring US banks with $250 billion or more in total consolidated assets (threshold raised from $10 billion by EGRRCPA, 2018) to project capital ratios over 9 quarters under severely adverse, adverse, and baseline scenarios.
+
+A US bank with $500 billion in assets and a starting CET1 ratio of 12.5% must show it stays above 4.5% after modelling $80 billion in projected losses over the 9-quarter stress horizon.
+
+DFAST results are publicly disclosed (unlike the UK's confidential ICAAP), creating market discipline -- investors and counterparties can see which banks are most vulnerable to stress.
+
+In Lesson 11, you saw how IFRS 9, Basel, and AML interact in a cross-pillar cascade. Now you build fluency in Basel capital calculation and AML investigation through four extended exercises. Exercise 10 builds a complete capital ratio from raw balance sheet data. Exercise 11 stress-tests that capital under a Bank of England severe scenario. Exercises 12 and 13 take you through AML alert investigation and sanctions screening: the operational side of financial crime compliance.
+
+These exercises use the banking plugin's basel-capital, basel-rwa, aml-typologies, and aml-sar-drafting skills. The AI assists with computation and pattern matching, but you make the professional judgments: Is this alert suspicious or a false positive? Does the bank survive the stress scenario? What management actions restore capital adequacy?
+
+Exercise 10: Basel III Capital Ratio: Standardised Approach​
+
+Jurisdiction: United Kingdom (PRA regulated) Duration: 45 minutes Skills used: basel-capital, basel-rwa
+
+Capital Structure​
+Capital Component	Amount
+CET1: Share capital	GBP 120M
+CET1: Share premium	GBP 35M
+CET1: Retained earnings	GBP 130M
+CET1 Deduction: Goodwill	-GBP 0M
+CET1 Deduction: Intangible assets	-GBP 0M
+CET1 Capital	GBP 285M
+AT1: Perpetual bonds	GBP 45M
+Tier 1 Capital	GBP 330M
+Tier 2: Subordinated debt	GBP 60M
+Total Capital	GBP 390M
+Asset Portfolio​
+Asset Class	Exposure	SA Risk Weight	Notes
+UK Gilts	GBP 850M	0%	Sovereign, AA-rated
+Bank of England reserves	GBP 420M	0%	Central bank deposits
+Claims on Barclays (A+ rated)	GBP 180M	20%	Bank exposure, short-term
+Corporate bonds (BBB rated)	GBP 240M	100%	Unrated corporates default to 100%
+SME loans	GBP 320M	85%	SME supporting factor applied
+Residential mortgages (LTV 50-80%)	GBP 1,450M	35%	Standard residential
+High-LTV mortgages (LTV > 80%)	GBP 185M	50%	Higher risk weight for high LTV
+Commercial real estate (LTV 65%)	GBP 380M	100%	CRE default weight
+Consumer unsecured	GBP 210M	75%	Retail exposure
+Stage 3 NPLs	GBP 45M	150%	Non-performing, specific provision < 20%
+Undrawn revolving credit	GBP 190M	Apply 40% CCF then 75%	Off-balance-sheet, retail
+Operational Risk​
+Component	Value
+Business Indicator (BI)	GBP 480M
+Approach	Business Indicator Approach (BIA)
+Internal Loss Multiplier (ILM)	1.0 (default for banks without loss data)
+
+The Business Indicator Approach calculates operational risk capital as:
+
+BI Component: For BI between GBP 1B and GBP 30B, marginal coefficient is 15%. For BI up to GBP 1B, coefficient is 12%.
+Since BI = GBP 480M (below GBP 1B): BI Component = GBP 480M x 12% = GBP 57.6M
+Op Risk Capital = BI Component x ILM = GBP 57.6M x 1.0 = GBP 57.6M
+Op Risk RWA = Op Risk Capital / 8% = GBP 57.6M / 0.08 = GBP 720M
+
+Market Risk RWA: GBP 35M (provided: calculated separately by the trading desk)
+
+Your Tasks​
+
+Step 1: Calculate credit RWA. For each asset class, multiply the exposure by its risk weight. For off-balance-sheet items (undrawn revolving credit), first apply the CCF to convert to a credit equivalent, then apply the risk weight.
+
+Step 2: Calculate total RWA. Sum credit RWA + operational risk RWA + market risk RWA.
+
+Step 3: Calculate all three capital ratios.
+
+CET1 Ratio = CET1 Capital / Total RWA
+Tier 1 Ratio = Tier 1 Capital / Total RWA
+Total Capital Ratio = Total Capital / Total RWA
+
+Step 4: Compare to regulatory minimums.
+
+Ratio	Minimum	+ CCB (2.5%)	Combined	Your Bank
+CET1	4.5%	7.0%	7.0%	?
+Tier 1	6.0%	8.5%	8.5%	?
+Total Capital	8.0%	10.5%	10.5%	?
+
+Step 5: Buffer analysis. How much CET1 (in GBP) sits above the combined buffer requirement? If the bank wanted to absorb a GBP 50M loss, what would the revised CET1 ratio be?
+
+Exercise 11: ICAAP Stress Test​
+
+Jurisdiction: United Kingdom (Bank of England Annual Cyclical Scenario) Duration: 50 minutes Skills used: basel-capital, ifrs9-ecl, ifrs9-staging
+
+Starting Position​
+Metric	Value
+CET1 Ratio	12.8%
+CET1 Capital	GBP 384M
+Total RWA	GBP 3,000M
+Loan book	GBP 2,800M
+Stage 1 %	90%
+Stage 2 %	8%
+Stage 3 %	2%
+Bank of England Severe Scenario Parameters​
+Variable	Year 1	Year 2	Year 3
+GDP growth	-4.2%	-1.5%	+1.8%
+Unemployment	8.5%	9.2%	7.8%
+House prices	-31% (cumulative)	-35% (cumulative)	-30% (cumulative)
+Commercial property	-40% (cumulative)	-45% (cumulative)	-38% (cumulative)
+Stress Translation Parameters​
+
+Stage migration under stress:
+
+Migration	Pre-stress	Stressed
+Stage 1 proportion	90%	78% (8% to Stage 2 migrates to 22%)
+Stage 2 proportion	8%	22%
+Stage 3 from Stage 1	0%	2% migrates to Stage 3 (net: Stage 1 goes to 68%)
+Stage 3 from Stage 2	2% of total	12% of Stage 2 migrates to Stage 3 (additional)
+Stage 3 proportion	2%	Increases from prior migrations
+
+Clarification: Under stress, Stage 2 rises from 8% to 22% of the book. Additionally, 2% of Stage 1 migrates directly to Stage 3, and 12% of the new Stage 2 balance migrates to Stage 3. Calculate the final stage distribution.
+
+LGD stress:
+
+Collateral	Pre-stress LGD	Stressed LGD
+Residential mortgages	25%	40%
+Commercial real estate	35%	58%
+
+NII (Net Interest Income) impact:
+
+Period	SONIA Movement	NII Impact
+Year 1	+250bp	+GBP 28M (assets reprice faster than deposits)
+Year 2	-150bp	-GBP 15M (rates fall, margins compress)
+Your Tasks​
+
+Step 1: Calculate stressed stage distribution. Starting from the GBP 2,800M loan book, compute the GBP amount in each stage after all migrations.
+
+Step 2: Calculate stressed ECL. Using the stressed LGDs and stage-specific PDs (use the same PD parameters from Exercise 8 as a baseline, or estimate reasonable stressed PDs), calculate the total ECL under the severe scenario.
+
+Step 3: Calculate the CET1 impact. The additional ECL charge (stressed ECL minus pre-stress ECL) flows through to retained earnings:
+
+Post-tax impact = Additional ECL x (1 - 25% tax rate)
+Year 1 NII offset: +GBP 28M x (1 - 25% tax) = +GBP 21M
+Year 2 NII offset: -GBP 15M x (1 - 25% tax) = -GBP 11.25M
+
+Step 4: Determine stressed CET1 ratio trajectory. Calculate the CET1 ratio at:
+
+End of Year 1 (ECL charge + NII benefit)
+End of Year 2 (cumulative ECL + NII)
+End of Year 3 (some recovery begins)
+
+Step 5: Management actions. If the stressed CET1 falls below the combined buffer (7.0%), identify three management actions the bank could take to restore capital adequacy. Quantify the CET1 impact of each.
+
+Exercise 12: AML Alert Review and SAR Decision​
+
+Jurisdiction: United Kingdom (NCA / POCA 2002) Duration: 45 minutes Skills used: aml-typologies, aml-sar-drafting
+
+You are the Level 2 AML analyst reviewing three alerts escalated from the transaction monitoring system. For each alert, determine: Is this suspicious? Should a SAR be filed? What is the typology?
+
+Alert 1: Green Valley Properties Ltd​
+
+Customer profile: UK-registered property development company, incorporated 8 months ago. Director: Viktor Petrov, Lithuanian national resident in London. Declared business: residential property development.
+
+Transaction pattern: Over 90 days, the company purchased 4 residential properties in cash:
+
+Date	Property	Amount	Funding Source
+Day 5	Flat, Tower Hamlets	GBP 385,000	Wire from Baltica Holdings (Latvia)
+Day 22	House, Lewisham	GBP 520,000	Wire from Baltica Holdings (Latvia)
+Day 48	Flat, Greenwich	GBP 410,000	Wire from VKP Consulting (Lithuania)
+Day 71	House, Bromley	GBP 615,000	Wire from Vilnius Capital Partners (Lithuania)
+
+Total: GBP 1,930,000 in property acquisitions. No mortgage financing on any property. All purchases funded by incoming wires from Baltic entities.
+
+Red flags to evaluate:
+
+Cash property purchases by a newly incorporated company
+All funding from Baltic entities (EU but high-risk for Russian-linked money flows)
+Director's beneficial ownership of the Baltic sending entities is unclear
+No rental income or development activity visible on the account since purchases
+
+Your analysis:
+
+What money laundering typology does this pattern match? (Consider property-based laundering, integration stage)
+What beneficial ownership checks would you perform on the three Baltic sending entities?
+What is the significance of cash property purchases (no mortgage) from an AML perspective?
+Draft your recommendation: file SAR, close as false positive, or request further investigation.
+Alert 2: Pinnacle Logistics Group​
+
+Customer profile: UK-registered freight forwarding company, trading for 6 years. Director: Thomas Wright. Declared annual turnover GBP 3.2M. Previously CDD-rated as standard risk.
+
+Transaction pattern: Over the past 120 days, a significant change in transaction pattern:
+
+Period	Incoming (GBP)	Outgoing (GBP)	Key Change
+Prior 12 mths	3.1M (EU sources)	2.9M (UK payroll, fuel, lease)	Consistent with declared turnover
+Last 120 days	5.8M (new sources from Turkey, Pakistan, Bangladesh)	5.4M (new payees: 8 UK cash-intensive businesses)	Volume nearly doubled, geography shifted
+
+New counterparties identified:
+
+3 incoming sources: Istanbul Shipping Co, Karachi Trade House, Dhaka Garment Exports
+8 outgoing UK payees: mix of restaurants, car washes, launderettes, and convenience stores
+
+Red flags to evaluate:
+
+Sharp increase in turnover inconsistent with business growth trajectory
+Geographic shift from EU to higher-risk jurisdictions
+Outgoing payments to cash-intensive businesses (classic layering recipients)
+Incoming amounts from trade counterparties do not match any visible goods shipments
+
+Your analysis:
+
+What typologies might this represent? (Consider trade-based money laundering, professional enabler)
+How does the geographic shift and volume increase change the risk profile?
+What investigation steps would distinguish legitimate business growth from laundering?
+SAR recommendation with rationale.
+Alert 3: Dr. Helen Okonkwo​
+
+Customer profile: UK citizen, consultant surgeon at an NHS hospital, annual salary GBP 145,000. Private banking customer with GBP 1.8M in deposits. Not a PEP.
+
+Transaction: Three outgoing wires over 6 weeks totalling GBP 890,000 to a bank account in the Cayman Islands held by "Okonkwo Family Trust." Stated purpose: "Family trust: inheritance planning."
+
+Additional context: Previous transaction history shows no international wire transfers in the past 4 years. The Cayman Islands account was opened 2 months ago. No record of a trust deed in the bank's files.
+
+Your analysis:
+
+What risks does this transaction pattern present, even without PEP status?
+What Enhanced Due Diligence steps are required for outgoing payments to the Cayman Islands?
+What documentation would you request to verify the "family trust" explanation?
+SAR recommendation, considering the sudden change in pattern, offshore jurisdiction, and unverified trust structure.
+Exercise 13: Sanctions Screening​
+
+Jurisdiction: UK/EU/OFAC (multi-regime screening required) Duration: 40 minutes Skills used: aml-cdd-edd
+
+Three payments require sanctions screening. For each, determine: true match, false positive, or requires escalation. Apply all three sanctions regimes (UK, EU, OFAC).
+
+Payment 1: UAE Steel Transaction​
+Field	Value
+Originator	Ali Hassan Al-Farsi
+Originator country	UAE
+Beneficiary	Gulf Steel LLC
+Beneficiary country	Dubai, UAE
+Amount	USD 285,000
+Purpose	Steel rods: construction project
+
+Screening considerations:
+
+"Al-Farsi" is a common Gulf name: check against OFAC SDN list and UK sanctions list
+Steel is a dual-use commodity in some sanctions regimes
+UAE is not a sanctioned jurisdiction but is a known transshipment point
+Verify whether Gulf Steel LLC appears on any sanctions list or is owned by a sanctioned entity
+Payment 2: Swiss-to-UK Aerospace​
+Field	Value
+Originator	Zermatt Holdings AG
+Originator country	Switzerland
+Beneficiary	Rostec Engineering Components Ltd
+Beneficiary country	United Kingdom
+Amount	EUR 1,200,000
+Purpose	Aerospace engineering components
+
+Screening considerations:
+
+"Rostec" is the name of a major Russian state defence conglomerate on EU and UK sanctions lists
+Is "Rostec Engineering Components Ltd" (UK) the same entity or a different company with a similar name?
+Aerospace components may be dual-use goods requiring export licences
+Switzerland has adopted EU sanctions but with some differences in implementation
+What verification steps distinguish a true match from a name coincidence?
+Payment 3: Turkey-to-Egypt with Iranian Connections​
+Field	Value
+Originator	Bosphorus Trade Finance
+Originator country	Istanbul, Turkey
+Beneficiary	Noor Al-Arab
+Beneficiary country	Cairo, Egypt
+Amount	USD 45,000
+Purpose	Textile import financing
+
+Screening considerations:
+
+Intelligence indicates Bosphorus Trade Finance has historical connections to an Iranian entity on the OFAC SDN list
+Turkey is not sanctioned but is a known conduit for sanctions evasion
+The amount is relatively small: does that reduce suspicion or is it consistent with a structuring pattern?
+Egypt is not sanctioned but verify the beneficiary is not a front for a sanctioned entity
+What is the "50% rule" under OFAC and does it apply here?
+
+For each payment, provide:
+
+Screening result against each regime (UK, EU, OFAC)
+True match, false positive, or escalation required
+If escalation: what additional information is needed
+Recommended action: process, block, or hold for review
+Try With AI​
+
+Setup: Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1: Reproduce​
+A UK bank (the one from Exercise 10) is considering acquiring
+a GBP 400M SME loan portfolio from a competitor. The portfolio
+has these characteristics:
+
+- 70% secured by plant/equipment (85% risk weight)
+- 20% secured by property LTV 75% (35% risk weight)
+- 10% unsecured (75% risk weight)
+- Portfolio average PD: 3.2% (higher than existing book)
+- Expected ECL on acquisition: GBP 18M
+
+Questions:
+1. What additional credit RWA does this acquisition create?
+2. What is the impact on the CET1 ratio (assume no new
+   capital raised)?
+3. Does the bank still meet the combined buffer requirement
+   (CET1 minimum 4.5% + CCB 2.5%) after the acquisition?
+4. If the bank needs to maintain a 10% CET1 target, how much
+   additional CET1 capital must it raise?
+5. Should the bank use the acquisition ECL of GBP 18M or
+   re-estimate using its own models? What does IFRS 3
+   require for business combinations?
+
+
+What you are learning: Capital planning is not just about meeting minimums: it is about maintaining buffers through growth. An acquisition that looks profitable on an earnings basis can destroy capital headroom if the RWA impact is not modelled in advance. By calculating the capital impact before the deal closes, you practise the discipline that bank treasury teams apply to every balance sheet decision.
+
+Prompt 2: Adapt​
+Investigate this AML alert involving a suspected funnel account:
+
+Customer: Sarah Jenkins, UK resident, registered childminder,
+  annual declared income GBP 28,000
+Account type: Personal current account, opened 5 years ago
+Pattern over 90 days:
+- 47 incoming faster payments from 31 different UK personal
+  accounts, amounts ranging from GBP 200 to GBP 2,500,
+  total received: GBP 58,400
+- 14 outgoing international transfers to 3 accounts in
+  Nigeria (GBP 42,000) and 2 accounts in Ghana (GBP 11,500)
+- Remaining balance: GBP 4,900
+
+1. What typology does this match? Explain why the pattern of
+   many incoming domestic payments followed by fewer outgoing
+   international transfers is distinctive.
+2. How does this differ from the structuring pattern (deposits
+   just below a threshold)? What makes funnel accounts harder
+   to detect with rules-based TM?
+3. What additional information would you gather about the 31
+   sending accounts? What pattern would confirm the suspicion?
+4. Draft a SAR recommendation paragraph covering the key
+   indicators: multiple unrelated senders, rapid aggregation,
+   international dissipation, inconsistency with profile.
+5. What tipping-off risks exist if the bank freezes the
+   account? What language should the bank use?
+
+
+What you are learning: Funnel accounts are a different typology from the structuring and trade-based patterns in Exercise 12. They use a domestic collection network (often recruited via social media) to aggregate small amounts into a personal account, then transfer the pooled funds internationally. By investigating a new typology, you test whether you can apply the AML investigation framework to unfamiliar patterns rather than relying on recognition of the Exercise 12 scenarios.
+
+Prompt 3: Apply​
+Screen these three payments against UK, EU, and OFAC sanctions:
+
+Payment 1: Ali Hassan Al-Farsi (UAE) sending USD 285K to Gulf
+Steel LLC (Dubai) for steel rods. Common name region.
+
+Payment 2: Zermatt Holdings AG (Switzerland) sending EUR 1.2M
+to Rostec Engineering Components Ltd (UK) for aerospace parts.
+Note: "Rostec" is a sanctioned Russian entity name.
+
+Payment 3: Bosphorus Trade Finance (Turkey) sending USD 45K to
+Noor Al-Arab (Egypt) for textiles. Intelligence shows historical
+Iranian entity connections.
+
+For each: Is this a true match, false positive, or escalation?
+What verification steps distinguish them? Explain the OFAC 50%
+rule and whether it applies to any of these cases.
+
+
+What you are learning: Sanctions screening is not binary. Payment 1 tests your ability to handle common-name false positives in high-volume regions. Payment 2 tests whether you can distinguish a UK company from a sanctioned Russian entity that happens to share a name: a critical skill because blocking a legitimate UK company is a compliance failure in the other direction. Payment 3 tests the OFAC 50% rule (entities 50% or more owned by a sanctioned party are themselves sanctioned) and the concept of sanctions evasion through third countries.
+
+Flashcards Study Aid​

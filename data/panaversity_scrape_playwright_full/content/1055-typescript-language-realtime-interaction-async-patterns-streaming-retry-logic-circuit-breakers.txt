@@ -1,0 +1,392 @@
+Retry Logic and Circuit Breakers
+
+Your AI chat application works perfectly in testing. Users love it. Then Monday morning hits, and the OpenAI API starts returning 503 errors. Not every request fails, just about 10% of them, randomly. Without retry logic, 10% of your users see error messages. With proper retries, those transient failures become invisible, and your application handles the outage gracefully.
+
+AI APIs are inherently unreliable compared to traditional databases. They depend on GPU clusters with variable load, rate limiting that kicks in during peak hours, and occasional maintenance. A production AI interface needs resilience built into its DNA. This lesson teaches two complementary patterns: retries for transient failures, and circuit breakers for persistent ones.
+
+The difference matters. Retrying a rate-limited request after a short delay often succeeds. But retrying against a completely down service wastes resources and delays the inevitable failure message. Circuit breakers detect when retrying is pointless and fail fast instead.
+
+The Retry Pattern: Exponential Backoff​
+
+When an API call fails, the simplest approach is to try again immediately. But that's almost always wrong. If the server is overloaded, hammering it with retries makes things worse. If you're rate-limited, immediate retries hit the same limit.
+
+Exponential backoff spaces out retries: wait 1 second, then 2 seconds, then 4 seconds, then 8 seconds. Each failure doubles the wait time. This gives the server breathing room to recover.
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number; maxDelay?: number } = {}
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 1000, maxDelay = 30000 } = options;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === maxRetries) throw error;
+
+      // Calculate exponential backoff: 1s, 2s, 4s, 8s...
+      const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+      console.log(`Attempt ${attempt + 1} failed. Retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error("Unreachable");
+}
+
+
+Output (when API fails twice then succeeds):
+
+Attempt 1 failed. Retrying in 1000ms...
+Attempt 2 failed. Retrying in 2000ms...
+{ response: "AI-generated content" }
+
+
+The backoff sequence with default settings:
+
+Attempt 1 fails: wait 1 second (1000ms)
+Attempt 2 fails: wait 2 seconds (2000ms)
+Attempt 3 fails: wait 4 seconds (4000ms)
+Attempt 4 fails: throw error (max retries exceeded)
+
+The maxDelay cap prevents absurdly long waits. Without it, the 10th retry would wait over 8 minutes.
+
+Adding Jitter: Preventing the Thundering Herd​
+
+There's a subtle problem with pure exponential backoff. Imagine 1000 clients all hit a rate limit at the same moment. They all wait exactly 1 second, then all retry simultaneously. The server gets slammed again. They all fail, wait exactly 2 seconds, and retry together again. This synchronized retry pattern is called the thundering herd problem.
+
+Jitter adds randomness to break the synchronization:
+
+async function withRetryAndJitter<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number; maxDelay?: number } = {}
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 1000, maxDelay = 30000 } = options;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === maxRetries) throw error;
+
+      // Exponential backoff with jitter
+      const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+      const jitter = exponentialDelay * 0.2 * Math.random();  // 0-20% random addition
+      const delay = exponentialDelay + jitter;
+
+      console.log(`Attempt ${attempt + 1} failed. Retrying in ${Math.round(delay)}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error("Unreachable");
+}
+
+
+Output (delays vary each run):
+
+Attempt 1 failed. Retrying in 1147ms...
+Attempt 2 failed. Retrying in 2089ms...
+{ response: "AI-generated content" }
+
+
+With jitter, those 1000 clients no longer retry in lockstep. Some wait 1.0 seconds, some 1.1, some 1.2. The load spreads across a window instead of hitting all at once.
+
+Backoff Type	Attempt 1 Delay	Attempt 2 Delay	Pattern
+Pure exponential	1000ms exactly	2000ms exactly	Synchronized
+With 20% jitter	1000-1200ms	2000-2400ms	Distributed
+Distinguishing Retryable vs Non-Retryable Errors​
+
+Not every error should trigger a retry. A 400 Bad Request means your request is malformed. Retrying the same bad request produces the same 400 error. A 401 Unauthorized means your API key is invalid. Retrying won't make it valid.
+
+Retryable errors are temporary conditions that might resolve:
+
+429 Too Many Requests: Rate limit. Wait and retry.
+500 Internal Server Error: Server hiccup. Might work next time.
+502 Bad Gateway: Load balancer issue. Likely transient.
+503 Service Unavailable: Temporary overload. Wait and retry.
+504 Gateway Timeout: Slow response. Might succeed faster later.
+
+Non-retryable errors are permanent conditions:
+
+400 Bad Request: Your request is malformed. Fix it.
+401 Unauthorized: Invalid credentials. Won't magically become valid.
+403 Forbidden: Access denied. Retrying doesn't grant access.
+404 Not Found: Resource doesn't exist. Won't appear by retrying.
+function isRetryable(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+
+    // Rate limits are always retryable
+    if (message.includes("429") || message.includes("rate limit")) {
+      return true;
+    }
+
+    // Server errors (5xx) are usually retryable
+    if (message.includes("500") || message.includes("502") ||
+        message.includes("503") || message.includes("504")) {
+      return true;
+    }
+
+    // Network errors are retryable
+    if (message.includes("network") || message.includes("timeout") ||
+        message.includes("econnrefused") || message.includes("econnreset")) {
+      return true;
+    }
+
+    // Client errors (4xx except 429) are NOT retryable
+    if (message.includes("400") || message.includes("401") ||
+        message.includes("403") || message.includes("404")) {
+      return false;
+    }
+  }
+
+  // Unknown errors: don't retry (fail fast, investigate)
+  return false;
+}
+
+
+Output (testing various errors):
+
+isRetryable(new Error("429 Too Many Requests")): true
+isRetryable(new Error("500 Internal Server Error")): true
+isRetryable(new Error("401 Unauthorized")): false
+isRetryable(new Error("ECONNREFUSED")): true
+
+
+Integrating this into the retry wrapper:
+
+async function withSmartRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number; maxDelay?: number } = {}
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 1000, maxDelay = 30000 } = options;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      // Don't retry non-retryable errors
+      if (!isRetryable(error)) {
+        console.log(`Non-retryable error. Failing immediately.`);
+        throw error;
+      }
+
+      if (attempt === maxRetries) {
+        console.log(`Max retries exceeded. Giving up.`);
+        throw error;
+      }
+
+      const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+      const jitter = exponentialDelay * 0.2 * Math.random();
+      const delay = exponentialDelay + jitter;
+
+      console.log(`Retryable error. Attempt ${attempt + 1}/${maxRetries}. Waiting ${Math.round(delay)}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error("Unreachable");
+}
+
+Circuit Breaker: Fail Fast When Service Is Down​
+
+Retries work for transient failures. But what if the service is completely down for 10 minutes? With 3 retries and exponential backoff, each request takes 7+ seconds to fail. Users wait 7 seconds to see an error, and you're wasting resources on doomed requests.
+
+A circuit breaker tracks failure rates and opens the circuit when failures exceed a threshold. While open, all requests fail immediately without even trying. Periodically, the circuit allows one test request through. If it succeeds, the circuit closes and normal operation resumes.
+
+┌─────────────────────────────────────────────────────────────────┐
+│                     CIRCUIT BREAKER STATES                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   CLOSED ────────────────────► OPEN                              │
+│   (Normal operation)           (Fail fast)                       │
+│   Requests go through.         All requests fail immediately.    │
+│   Track failures.              No actual calls made.             │
+│   If failures > threshold,     After timeout period,             │
+│   transition to OPEN.          transition to HALF-OPEN.          │
+│        │                              │                          │
+│        │                              ▼                          │
+│        │                        HALF-OPEN                        │
+│        │                        (Testing)                        │
+│        │                        Allow ONE request through.       │
+│        │                        If it succeeds → CLOSED          │
+│        │                        If it fails → OPEN               │
+│        │                              │                          │
+│        └──────────────────────────────┘                          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Implementation:
+
+type CircuitState = "closed" | "open" | "half-open";
+
+class CircuitBreaker {
+  private state: CircuitState = "closed";
+  private failureCount = 0;
+  private lastFailureTime = 0;
+
+  constructor(
+    private readonly failureThreshold: number = 5,
+    private readonly resetTimeout: number = 30000  // 30 seconds
+  ) {}
+
+  async call<T>(fn: () => Promise<T>): Promise<T> {
+    // Check if circuit should transition from open to half-open
+    if (this.state === "open") {
+      const timeSinceFailure = Date.now() - this.lastFailureTime;
+      if (timeSinceFailure >= this.resetTimeout) {
+        console.log("Circuit transitioning to half-open (testing)...");
+        this.state = "half-open";
+      } else {
+        throw new Error(`Circuit is OPEN. Failing fast. Try again in ${Math.round((this.resetTimeout - timeSinceFailure) / 1000)}s.`);
+      }
+    }
+
+    try {
+      const result = await fn();
+
+      // Success! Reset failure count and close circuit if it was half-open
+      if (this.state === "half-open") {
+        console.log("Test request succeeded. Circuit CLOSED.");
+        this.state = "closed";
+      }
+      this.failureCount = 0;
+      return result;
+
+    } catch (error) {
+      this.recordFailure();
+      throw error;
+    }
+  }
+
+  private recordFailure(): void {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+
+    if (this.failureCount >= this.failureThreshold) {
+      console.log(`Failure threshold (${this.failureThreshold}) reached. Circuit OPEN.`);
+      this.state = "open";
+    } else if (this.state === "half-open") {
+      console.log("Test request failed. Circuit remains OPEN.");
+      this.state = "open";
+    }
+  }
+
+  getState(): CircuitState {
+    return this.state;
+  }
+}
+
+
+Output (simulating failures then recovery):
+
+Call 1: Success
+Call 2: Failed (1/5 failures)
+Call 3: Failed (2/5 failures)
+Call 4: Failed (3/5 failures)
+Call 5: Failed (4/5 failures)
+Call 6: Failed - Failure threshold (5) reached. Circuit OPEN.
+Call 7: Circuit is OPEN. Failing fast. Try again in 28s.
+Call 8: Circuit is OPEN. Failing fast. Try again in 27s.
+[30 seconds later...]
+Call 9: Circuit transitioning to half-open (testing)...
+Call 9: Success - Test request succeeded. Circuit CLOSED.
+Call 10: Success
+
+Combining Retries and Circuit Breakers​
+
+In production, you typically use both patterns together. The circuit breaker wraps the retry logic. If the service is responding (circuit closed), retries handle transient failures. If the service is down (circuit open), requests fail immediately without wasting time on retries.
+
+class ResilientClient {
+  private circuitBreaker = new CircuitBreaker(5, 30000);
+
+  async callWithResilience<T>(fn: () => Promise<T>): Promise<T> {
+    // Circuit breaker is the outer layer
+    return this.circuitBreaker.call(async () => {
+      // Retries are the inner layer
+      return withSmartRetry(fn, { maxRetries: 3, baseDelay: 1000 });
+    });
+  }
+}
+
+// Usage
+const client = new ResilientClient();
+
+async function fetchAIResponse(prompt: string): Promise<string> {
+  return client.callWithResilience(async () => {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+  });
+}
+
+
+This layered approach gives you:
+
+Transient failure handling: Retries with exponential backoff
+Sustained failure handling: Circuit breaker fails fast
+Resource protection: No wasted retries when service is down
+Automatic recovery: Circuit tests and closes when service recovers
+Choosing Your Resilience Strategy​
+Scenario	Strategy	Why
+Rate limited (429)	Retry with backoff	Limit will reset, just wait
+Server error (5xx)	Retry 2-3 times	Often transient, quick recovery likely
+Network timeout	Retry once	Network glitch, might work immediately
+Auth error (401/403)	Fail immediately	Retrying won't fix credentials
+Validation error (400)	Fail immediately	Fix the request, don't retry
+5+ failures in 30 seconds	Open circuit	Service is down, stop trying
+Circuit open	Fail fast	Don't waste time or resources
+Try With AI​
+Prompt 1: Extend the Retry Wrapper​
+Extend this retry wrapper to include:
+1. A callback that's called before each retry (for logging/metrics)
+2. Support for respecting Retry-After headers from 429 responses
+3. A maximum total time limit (not just max retries)
+
+Show me the enhanced implementation with TypeScript types.
+
+
+What you're learning: Production retry logic needs more than basic backoff. The Retry-After header tells you exactly how long to wait, and total time limits prevent endless retry sequences.
+
+Prompt 2: Circuit Breaker State Machine​
+The circuit breaker implementation tracks failure count, but in real systems,
+you often want a sliding window (e.g., "5 failures in the last 60 seconds").
+
+Design and implement a SlidingWindowCircuitBreaker that:
+- Opens when failure rate exceeds 50% in a 60-second window
+- Uses a rolling window (not fixed buckets)
+- Exposes metrics: successRate, failureRate, requestCount
+
+
+What you're learning: Production circuit breakers need time-windowed tracking. A single bad minute shouldn't keep the circuit open forever, and a slow trickle of failures might not warrant opening at all.
+
+Prompt 3: Resilience for Your Domain​
+I'm building an AI application that calls multiple external services:
+- OpenAI API (main LLM)
+- Vector database (Qdrant for RAG)
+- Custom Python backend (my domain logic)
+
+Each service has different reliability characteristics.
+Help me design a resilience strategy with:
+- Different retry policies per service
+- Separate circuit breakers per service
+- A fallback strategy when OpenAI is down (use a simpler model or cached responses)
+
+
+What you're learning: Real applications have multiple dependencies with different failure modes. A one-size-fits-all resilience strategy misses important nuances. You need per-service configuration and graceful degradation.
+
+Safety note: When implementing retries in production AI applications, always consider cost implications. Each retry consumes API tokens and may incur charges. Set reasonable limits and monitor retry rates. An unexpected spike in retries often indicates an upstream problem that retrying won't solve, and you'll be paying for failed attempts.

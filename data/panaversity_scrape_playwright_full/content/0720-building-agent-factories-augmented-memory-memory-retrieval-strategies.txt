@@ -1,0 +1,443 @@
+Memory Retrieval Strategies
+
+Storing memories is only half the problem. The other half—often the harder half—is getting the right memories back when you need them. Ask the wrong question of your memory system and you get irrelevant context. Ask the right question the wrong way and you miss crucial information.
+
+This lesson covers four retrieval strategies: recency-based (what happened recently), relevance-based (what matches the query), entity-based (what involves specific entities), and hybrid (combining all three). You'll learn when to use each and how to manage the constraint that makes it all tricky: the token budget.
+
+The Retrieval Challenge​
+
+When a user asks "What about the project?"—which memories should the agent retrieve?
+
+Available Memories:
+├── "Alex completed OAuth implementation" (yesterday)
+├── "Phoenix project deadline is Jan 31" (2 weeks ago)
+├── "Alex prefers morning meetings" (1 month ago)
+├── "Sprint planning discussed Phoenix blockers" (3 days ago)
+├── "User's favorite color is blue" (2 months ago)
+└── "Phoenix project uses auth-service" (2 weeks ago)
+
+
+Different strategies give different answers:
+
+Strategy	Selected Memories
+Recency	OAuth implementation, Sprint planning
+Relevance	Phoenix deadline, Phoenix uses auth-service
+Entity ("Phoenix")	Phoenix deadline, Sprint planning, Phoenix uses auth-service
+Hybrid	Phoenix deadline, Sprint planning, OAuth implementation
+
+The right choice depends on context. Let's explore each strategy.
+
+Recency-Based Retrieval​
+
+Principle: Most recent memories are most likely relevant to current context.
+
+When to Use​
+Continuing an ongoing conversation
+Following up on recent events
+When the user references "what we just discussed"
+Implementation​
+def get_recent_memories(user_id: str, limit: int = 10):
+    """Retrieve most recent memories regardless of content."""
+    return memory.search(
+        query="",  # Empty query = no semantic filtering
+        filters={"user_id": user_id},
+        sort_by="created_at",
+        sort_order="desc",
+        limit=limit
+    )
+
+
+Output:
+
+[
+    {"memory": "Alex completed OAuth implementation", "created_at": "2025-01-20"},
+    {"memory": "Sprint planning discussed Phoenix blockers", "created_at": "2025-01-18"},
+    {"memory": "Phoenix project deadline is Jan 31", "created_at": "2025-01-06"},
+    ...
+]
+
+Limitations​
+Misses old but highly relevant memories
+Recency doesn't equal importance
+Fails for queries about past events
+Relevance-Based Retrieval (Semantic Search)​
+
+Principle: Memories semantically similar to the query are most relevant.
+
+When to Use​
+Answering specific questions
+Looking up facts
+When the query clearly states what's needed
+Implementation​
+def get_relevant_memories(user_id: str, query: str, limit: int = 10, threshold: float = 0.5):
+    """Retrieve memories semantically similar to query."""
+    results = memory.search(
+        query=query,
+        filters={"user_id": user_id},
+        limit=limit
+    )
+
+    # Filter by similarity threshold
+    return [r for r in results['results'] if r['score'] >= threshold]
+
+
+Example:
+
+query = "What is the project deadline?"
+
+results = get_relevant_memories("alex", query)
+
+
+Output:
+
+[
+    {"memory": "Phoenix project deadline is Jan 31", "score": 0.91},
+    {"memory": "Sprint planning discussed Phoenix blockers", "score": 0.67},
+    {"memory": "Phoenix project uses auth-service", "score": 0.54},
+]
+
+How It Works​
+Query is embedded into a vector
+Memory vectors are compared using cosine similarity
+Highest-similarity memories are returned
+Query: "What is the project deadline?"
+         ↓ (embedding)
+    [0.1, 0.8, 0.3, 0.5, ...]
+
+Compare to each memory vector:
+Memory A: "Phoenix project deadline is Jan 31"
+         [0.15, 0.75, 0.28, 0.48, ...] → similarity: 0.91
+
+Memory B: "Alex prefers morning meetings"
+         [0.7, 0.1, 0.9, 0.2, ...] → similarity: 0.23
+
+Limitations​
+May miss memories with different wording
+Semantic similarity isn't always relevance
+Requires good embeddings
+Entity-Based Retrieval​
+
+Principle: When a specific entity (person, project, concept) is mentioned, retrieve all memories involving that entity.
+
+When to Use​
+User mentions a name or project
+Building context around a specific topic
+Answering "What do you know about X?"
+Implementation​
+def get_entity_memories(user_id: str, entity: str, limit: int = 10):
+    """Retrieve memories involving a specific entity."""
+    # Option 1: Semantic search for entity name
+    return memory.search(
+        query=entity,
+        filters={"user_id": user_id},
+        limit=limit
+    )
+
+    # Option 2: Metadata filter (if entities are tagged)
+    # return memory.search(
+    #     query="",
+    #     filters={
+    #         "user_id": user_id,
+    #         "entities": {"contains": entity}
+    #     }
+    # )
+
+Entity Extraction​
+
+First, extract entities from the user's message:
+
+def extract_entities(message: str) -> list:
+    """Extract named entities from message."""
+    # Using LLM for extraction
+    prompt = f"""
+    Extract named entities from this message.
+    Categories: people, projects, companies, products, dates
+
+    Message: {message}
+
+    Return as JSON: {{"entities": [{{"name": "...", "type": "..."}}]}}
+    """
+    result = llm.generate(prompt)
+    return json.loads(result)['entities']
+
+
+Example:
+
+message = "What's happening with the Phoenix project that Alex is working on?"
+
+entities = extract_entities(message)
+# [{"name": "Phoenix", "type": "project"}, {"name": "Alex", "type": "person"}]
+
+# Retrieve memories for each entity
+for entity in entities:
+    memories = get_entity_memories(user_id, entity['name'])
+
+Limitations​
+Entity extraction can miss or misidentify entities
+Same entity may have multiple names ("Phoenix", "the project")
+Requires entity disambiguation
+Hybrid Retrieval​
+
+Principle: Combine multiple strategies to get the best of all worlds.
+
+When to Use​
+Most production scenarios
+When query type is unclear
+When maximum recall is important
+Implementation​
+def hybrid_retrieve(user_id: str, query: str, limit: int = 10):
+    """Combine recency, relevance, and entity retrieval."""
+
+    # 1. Get relevant memories (semantic)
+    relevant = memory.search(
+        query=query,
+        filters={"user_id": user_id},
+        limit=limit
+    )['results']
+
+    # 2. Extract entities and get entity-based memories
+    entities = extract_entities(query)
+    entity_memories = []
+    for entity in entities:
+        entity_results = memory.search(
+            query=entity['name'],
+            filters={"user_id": user_id},
+            limit=5
+        )['results']
+        entity_memories.extend(entity_results)
+
+    # 3. Get recent memories
+    recent = memory.search(
+        query="",
+        filters={"user_id": user_id},
+        sort_by="created_at",
+        sort_order="desc",
+        limit=5
+    )['results']
+
+    # 4. Combine and deduplicate
+    all_memories = deduplicate(relevant + entity_memories + recent)
+
+    # 5. Re-score with weighted formula
+    scored = []
+    for mem in all_memories:
+        score = calculate_hybrid_score(
+            memory=mem,
+            query=query,
+            semantic_weight=0.5,
+            recency_weight=0.3,
+            entity_weight=0.2
+        )
+        scored.append({**mem, "hybrid_score": score})
+
+    # 6. Sort by hybrid score and return top
+    scored.sort(key=lambda x: x['hybrid_score'], reverse=True)
+    return scored[:limit]
+
+Weighted Scoring​
+def calculate_hybrid_score(memory, query, semantic_weight, recency_weight, entity_weight):
+    """Calculate weighted hybrid score."""
+
+    # Semantic similarity (from vector search)
+    semantic = memory.get('score', 0)
+
+    # Recency decay
+    days_old = (datetime.now() - memory['created_at']).days
+    recency = math.exp(-days_old / 30)
+
+    # Entity match boost
+    entities = extract_entities(query)
+    entity_match = 1.0 if any(e['name'].lower() in memory['memory'].lower() for e in entities) else 0.0
+
+    return (
+        semantic_weight * semantic +
+        recency_weight * recency +
+        entity_weight * entity_match
+    )
+
+The Token Budget Constraint​
+
+You can retrieve 100 relevant memories, but you can only inject so many into the context window.
+
+The Problem​
+Context Window: 128,000 tokens
+System Prompt: 2,000 tokens
+User Message: 500 tokens
+Available for Memories: 4,000 tokens (budget decision)
+Reserved for Response: 2,000 tokens
+Remaining for Conversation: 119,500 tokens
+
+Average Memory Size: 200 tokens
+Maximum Memories: 4,000 / 200 = 20 memories
+
+Token-Aware Selection​
+def select_within_budget(memories: list, token_budget: int) -> list:
+    """Select highest-scored memories that fit within token budget."""
+    selected = []
+    current_tokens = 0
+
+    # Memories should already be sorted by score
+    for memory in memories:
+        mem_tokens = estimate_tokens(memory['memory'])
+
+        if current_tokens + mem_tokens <= token_budget:
+            selected.append(memory)
+            current_tokens += mem_tokens
+        else:
+            # Check if we can fit a smaller memory
+            continue
+
+    return selected
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count. Rule of thumb: ~4 chars per token."""
+    return len(text) // 4
+
+Budget Allocation Strategies​
+
+Fixed Budget:
+
+# Always use same budget
+memory_budget = 4000  # tokens
+
+
+Dynamic Budget:
+
+# Adjust based on query complexity
+if is_simple_query(query):
+    memory_budget = 2000
+elif is_complex_query(query):
+    memory_budget = 6000
+else:
+    memory_budget = 4000
+
+
+Priority Tiers:
+
+# Allocate budget across tiers
+budgets = {
+    "critical": 1500,  # Must-have context
+    "relevant": 2000,  # Highly relevant
+    "background": 500  # Nice to have
+}
+
+for tier, budget in budgets.items():
+    tier_memories = get_memories_by_priority(tier)
+    selected.extend(select_within_budget(tier_memories, budget))
+
+Strategy Selection Guide​
+Scenario	Recommended Strategy
+"What did we just discuss?"	Recency
+"What's the project deadline?"	Relevance
+"Tell me about Alex"	Entity
+"Help me with the next step"	Hybrid (recency + relevance)
+"What do you know about me?"	Entity (user) + Relevance
+Complex, unclear query	Hybrid
+Complete Retrieval Pipeline​
+class MemoryRetriever:
+    def __init__(self, memory_client, token_budget: int = 4000):
+        self.memory = memory_client
+        self.token_budget = token_budget
+
+    def retrieve(self, user_id: str, query: str) -> list:
+        """Full retrieval pipeline."""
+
+        # 1. Classify query type
+        query_type = self.classify_query(query)
+
+        # 2. Choose strategy
+        if query_type == "recent":
+            memories = self.recency_retrieve(user_id, query)
+        elif query_type == "specific":
+            memories = self.relevance_retrieve(user_id, query)
+        elif query_type == "entity":
+            memories = self.entity_retrieve(user_id, query)
+        else:
+            memories = self.hybrid_retrieve(user_id, query)
+
+        # 3. Apply token budget
+        selected = self.select_within_budget(memories, self.token_budget)
+
+        # 4. Format for injection
+        return self.format_for_context(selected)
+
+    def format_for_context(self, memories: list) -> str:
+        """Format memories for prompt injection."""
+        if not memories:
+            return ""
+
+        lines = ["Relevant context from previous interactions:"]
+        for mem in memories:
+            lines.append(f"- {mem['memory']}")
+
+        return "\n".join(lines)
+
+Try With AI​
+
+Use these prompts to practice retrieval strategy design with Claude or your preferred AI assistant.
+
+Prompt 1: Hybrid Strategy Design​
+Design a hybrid retrieval strategy for a project management agent.
+
+The agent needs to answer questions like:
+- "What's the status of Project Alpha?" (entity + relevance)
+- "What did we discuss yesterday?" (recency)
+- "Who's responsible for the API?" (entity + relevance)
+- "What are my priorities?" (entity + recency + relevance)
+
+For each query type:
+1. Which retrieval strategies should be combined?
+2. What weights would you assign to each strategy?
+3. Show example memories that would be retrieved
+
+Then design a query classifier that determines which strategy to use.
+
+
+What you're learning: Different queries need different strategy mixes. A hybrid approach with query classification adapts to user needs dynamically.
+
+Prompt 2: Token Budget Optimization​
+Your agent has 20 relevant memories but only 2000 tokens of budget.
+
+Memories (with token counts):
+1. "User prefers Python over JavaScript" (50 tokens) - relevance: 0.92
+2. "Project Phoenix deadline Jan 31" (60 tokens) - relevance: 0.88
+3. "User completed 5 tasks yesterday" (80 tokens) - relevance: 0.75
+4. "Phoenix uses microservices architecture" (150 tokens) - relevance: 0.85
+5. "User had meeting with Sarah about auth" (100 tokens) - relevance: 0.70
+... (15 more memories)
+
+Design an algorithm that:
+1. Maximizes total relevance within the token budget
+2. Ensures diversity (not all memories about same topic)
+3. Handles the case where a high-relevance memory is also very long
+
+Show which memories would be selected and the reasoning.
+
+
+What you're learning: Token budget management is an optimization problem. Sometimes a shorter, less relevant memory is better than a longer, more relevant one. Diversity constraints prevent over-concentration on one topic.
+
+Prompt 3: Entity-Based Retrieval System​
+Build an entity-based retrieval system for a customer relationship management (CRM) agent.
+
+Entity types:
+- Companies (customers)
+- Contacts (people at companies)
+- Deals (sales opportunities)
+- Products
+- Issues (support tickets)
+
+Design:
+1. How to extract these entities from user queries
+2. How to link related entities (e.g., Contact → works at → Company)
+3. A retrieval strategy that follows entity relationships
+
+Example query: "What's happening with the Acme deal?"
+
+Show the retrieval steps:
+- Entity extraction
+- Relationship traversal
+- Memory retrieval
+- Final context assembly
+
+
+What you're learning: Entity-based retrieval shines in domain-specific agents. A CRM agent needs to understand relationships—when you ask about a deal, you probably also need context about the company and contacts involved.

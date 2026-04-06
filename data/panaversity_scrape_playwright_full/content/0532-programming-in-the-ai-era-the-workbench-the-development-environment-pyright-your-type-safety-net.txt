@@ -1,0 +1,432 @@
+Pyright -- Your Type Safety Net
+
+In Lesson 4, James ran ruff on his first block of Python code and discovered the difference between code that runs and code that is correct. Ruff caught style problems and potential bugs. But there is an entire category of errors that ruff cannot see -- errors where the code uses the wrong kind of data. A piece of code expects a name, and someone passes it a number. Another piece returns text, and someone tries to do math with the result. Python does not complain about any of this until the program is already running. AI assistants can introduce these same errors -- generating code that passes a number where a string is expected -- and neither you nor the AI will notice by reading alone.
+
+Emma gives James two files. Both contain the same piece of code -- called greet -- that takes a name and returns a greeting.
+
+You will learn the Python syntax in later chapters. For now, focus on the difference between the two versions -- one has type labels, one does not.
+
+The first file has no type information:
+
+def greet(name):
+    return f"Hello, {name}"
+
+result = greet(42)
+print(result)
+
+
+Output:
+
+Hello, 42
+
+
+Python runs it without complaint. The code received a number where a name should go, produced nonsense output, and nobody was notified. James shrugs. "It ran fine."
+
+"Python does not require types," he adds, sensing where Emma is going. "That is one of the reasons people choose Python over Java or C++. Dynamic typing is a feature, not a flaw. It makes code shorter and faster to write."
+
+"What happens when someone calls greet with a user ID instead of a user name?" Emma asks.
+
+James looks at the output again. Hello, 42. A greeting addressed to a number. In a real application, that would be a nonsensical message displayed to an actual user -- or worse, a corrupted database record, a broken export, a silent error that compounds every time the function runs.
+
+"Dynamic typing did not catch that," James says. "But neither did I, by reading the code."
+
+James opens the second file. Same code, but with type annotations: labels that tell Python what kind of data each piece expects:
+
+def greet(name: str) -> str:
+    return f"Hello, {name}"
+
+result = greet(42)
+print(result)
+
+
+She runs a single command: uv run pyright. The terminal shows:
+
+Output:
+
+/home/james/smartnotes/main.py
+  /home/james/smartnotes/main.py:4:16 - error: Argument of type "int" is not
+    assignable to parameter "name" of type "str"
+    "int" is not assignable to "str" (reportArgumentType)
+1 error, 0 warnings, 0 informations
+
+
+The bug was caught without executing a single line of code. James reads the message: line 4, the value 42 is a number (int), but name expects text (str). The rule name in parentheses -- reportArgumentType -- tells him exactly what kind of error it is.
+
+"That," Emma says, "is why every piece of code in this course has types."
+
+The Problem Without Type Checking​
+
+Python does not check what kind of data your code uses ahead of time. When you write code that accepts a name, Python does not know or care whether name will hold text, a number, or something else entirely. It figures it out only when the code is already running.
+
+This flexibility is convenient for small projects. It becomes dangerous in real ones. Here is a concrete example:
+
+def get_username(user_id: int) -> str:
+    # Imagine this looks up a user in a database
+    if user_id == 0:
+        return None  # Bug: returns None, not str
+    return "alice"
+
+
+Python runs this without complaint. The function promises to return text (str) but sometimes returns None instead. The caller writes greeting = "Hello, " + get_username(0) and gets a crash -- not at the line with the bug, but at a completely different line, in a completely different context. Without pyright, this bug hides until someone passes the right input at the wrong time. With pyright in strict mode, the error appears instantly: Type "None" is not assignable to return type "str".
+
+The broader pattern:
+
+Scenario	What Happens Without Type Checking
+Code receives wrong kind of data	Code runs, produces wrong output silently
+Code returns unexpected kind of data	The next piece of code crashes later, far from the actual bug
+A value is missing (None)	Error appears only when the code runs, not when you write it
+Someone changes what code returns	Everything that depends on it breaks, but you discover breakage one piece at a time
+
+The common thread: bugs hide. They do not surface at the point where the mistake was made. They surface later, in a different file, during a different operation. James experienced this pattern in Chapter 43 -- a failure in one part of the system cascaded because nothing checked assumptions early.
+
+A static type checker solves this by analyzing code without running it. It reads type annotations (those labels like : str and : int), traces how data moves through your code, and reports every place where the declared types do not match the actual usage. Errors appear in your terminal seconds after you save the file -- not hours later in a crash.
+
+IF YOU'VE CODED BEFORE
+
+You may know Python as "dynamically typed" -- a language where variables can hold any kind of data without declaring types. This course adds static type annotations checked by pyright in strict mode. The annotations are not optional documentation -- they are required guardrails that catch an entire category of bugs before code runs. If you have written Python without types, the workflow here will feel different by design.
+
+Pyright Defined​
+
+Pyright is a static type checker for Python, built by Microsoft. It reads the type labels in your code (like : str and : int) and verifies that every piece of code receives and returns the correct kind of data -- all without running your program.
+
+Aspect	Detail
+Creator	Microsoft
+Version	Check with uv run pyright --version
+Speed	Analyzes most projects in under a second
+Modes	off, basic, standard (default), strict
+Configuration	[tool.pyright] section in pyproject.toml
+Run command	uv run pyright
+
+Pyright has four type checking modes, each progressively stricter:
+
+Mode	What It Checks	When to Use
+"off"	Nothing (syntax errors only)	Never in this course
+"basic"	Minimal rules	Legacy projects being gradually typed
+"standard"	Moderate coverage (CLI default)	General-purpose development
+"strict"	All rules enabled; requires complete type annotations	This course, new projects, AI-generated code
+
+You switch modes by changing one word in pyproject.toml. The command to run pyright is always the same (uv run pyright):
+
+# off -- pyright does almost nothing
+typeCheckingMode = "off"
+
+# basic -- catches obvious mismatches only
+typeCheckingMode = "basic"
+
+# standard -- the default if you don't set anything
+typeCheckingMode = "standard"
+
+# strict -- checks everything, requires type labels on all code
+typeCheckingMode = "strict"
+
+
+Your SmartNotes pyproject.toml already has pyright configured in strict mode from Lesson 3:
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+
+
+Strict mode enables dozens of additional diagnostic rules that are completely disabled in standard mode, plus escalates several more rules from warnings to errors. The most important ones fall into three categories:
+
+Category	What Strict Mode Catches	Example
+Missing annotations	Code without type labels on its inputs or outputs	def greet(name): -- what kind of data is name? Unknown.
+Unknown types	A stored value whose type pyright cannot determine	result = some_code() where the return type is not declared
+Unused code	Lines that load libraries or store values that are never used	import os when os is never used in the file
+Axiom V in Action​
+
+In Axiom V from Chapter 43, you learned that types are guardrails -- not bureaucracy. They prevent your code from driving off a cliff by making the rules explicit. Pyright is the guardrail inspector. It walks along every type label in your code before it runs and tells you which guardrails are missing.
+
+This matters more in the AI era than it ever did before. When AI generates code, it generates fast. Dozens of lines in seconds. Without types, you have to read every line and mentally trace every piece of data to verify correctness. With types, pyright does that verification for you. The type labels serve double duty: they document what kind of data your code expects (for humans and AI to read), and they enable automated checking (for pyright to verify). One label, two benefits.
+
+Consider the difference:
+
+As before, focus on the difference between the typed and untyped versions -- not the syntax itself.
+
+# Without types: what kind of data does this code accept? What does it return?
+# You have to read the entire code to find out.
+def process(data):
+    return data.strip().lower()
+
+# With types: the labels tell you immediately.
+# Pyright verifies that every use passes text (str) and handles text back.
+def process(data: str) -> str:
+    return data.strip().lower()
+
+
+The typed version tells you everything upfront: process expects text and gives back text. You do not need to read the code inside to figure that out; the labels : str and -> str say it clearly. If someone passes a number or something else instead of text, pyright will catch it before the code runs.
+
+Practical Application​
+Step 1: Create a File with Type Errors​
+
+Open the SmartNotes main.py and replace its contents with the following code. This version has deliberate type problems that Python will run without complaint but pyright will catch:
+
+Type this code exactly as shown and focus on pyright's output, not the syntax details.
+
+def greet(name: str) -> str:
+    return f"Hello, {name}"
+
+
+def add_numbers(a: int, b: int) -> int:
+    return a + b
+
+
+def format_title(title: str, prefix: str | None = None) -> str:
+    if prefix:
+        return f"{prefix}: {title}"
+    return title
+
+
+# Bug 1: passing a number where text is expected
+greeting = greet(42)
+
+# Bug 2: passing text where a number is expected
+total = add_numbers("five", 10)
+
+# Bug 3: the result is text, but the label says number
+length: int = format_title("My Note")
+
+
+The code at the top is correct -- it has type labels (: str, : int) that tell pyright what kind of data each piece expects. The bugs are at the bottom, where the wrong kinds of data are passed or stored.
+
+Note the str | None label on prefix. This is a union type -- it means the code accepts either text (str) or nothing (None). The | None part makes it explicitly optional. Without it, passing None would be a type error.
+
+Step 2: Run Pyright​
+
+Run pyright on the project:
+
+uv run pyright
+
+
+Output:
+
+/home/james/smartnotes/main.py
+  /home/james/smartnotes/main.py:16:21 - error: Argument of type "int" is not
+    assignable to parameter "name" of type "str"
+    "int" is not assignable to "str" (reportArgumentType)
+  /home/james/smartnotes/main.py:19:26 - error: Argument of type "str" is not
+    assignable to parameter "a" of type "int"
+    "str" is not assignable to "int" (reportArgumentType)
+  /home/james/smartnotes/main.py:22:15 - error: Type "str" is not assignable
+    to declared type "int" (reportAssignmentType)
+3 errors, 0 warnings, 0 informations
+
+IF PYRIGHT REPORTS MANY ERRORS YOU DID NOT EXPECT
+
+Check that typeCheckingMode in pyproject.toml is set to "basic" (not "strict") for your first run. Strict mode flags more issues. You will switch to strict later in this lesson.
+
+Step 3: Read the Error Output​
+
+Every pyright error follows the same format:
+
+[file path]:[line]:[column] - error: [description] ([rule name])
+
+
+Break down the three errors:
+
+Error	Line	What Pyright Found	Rule
+1	16	42 is a number (int), but name expects text (str)	reportArgumentType
+2	19	"five" is text (str), but a expects a number (int)	reportArgumentType
+3	22	format_title returns text (str), but length is labeled as number (int)	reportAssignmentType
+
+Each error points to the exact line, the exact mismatch, and the exact rule that caught it. No guessing. No searching through error messages. The errors appear before the code runs.
+
+Quick Check: Two of the three errors use the rule reportArgumentType and one uses reportAssignmentType. Based on the rule names alone, what is the difference? Is reportArgumentType about data being passed in, or data being returned?
+
+Spot the Bug: An AI assistant generates the following typed code for James:
+
+def get_discount(price: float, percent: int) -> float:
+    return price * (percent / 100)
+
+final_price: str = get_discount(49.99, 20)
+
+
+Without running pyright, read the type labels and find the type mismatch. Which line has the bug? What type does get_discount return, and what type does final_price declare? What pyright rule would catch this?
+
+Step 4: Fix the Type Errors​
+
+Replace the buggy calls with corrected versions:
+
+def greet(name: str) -> str:
+    return f"Hello, {name}"
+
+
+def add_numbers(a: int, b: int) -> int:
+    return a + b
+
+
+def format_title(title: str, prefix: str | None = None) -> str:
+    if prefix:
+        return f"{prefix}: {title}"
+    return title
+
+
+# Fixed: passing text where text is expected
+greeting = greet("James")
+
+# Fixed: passing numbers where numbers are expected
+total = add_numbers(5, 10)
+
+# Fixed: result is text, so the label should say text
+title: str = format_title("My Note")
+
+
+Run pyright again:
+
+uv run pyright
+
+
+Output:
+
+0 errors, 0 warnings, 0 informations
+
+
+Clean. Every type label matches. Every piece of code receives the right kind of data. Every stored value has the right type. Pyright verified all of this in under a second, without executing the code.
+
+CHECKPOINT: VERIFY YOUR PROGRESS
+
+Run this command in the SmartNotes directory:
+
+uv run pyright
+
+
+You should see 0 errors, 0 warnings, 0 informations. If you still see errors, compare your main.py against the corrected version above. Every function and every call must have matching types.
+
+Strict Mode vs Standard Mode​
+
+Your SmartNotes project uses typeCheckingMode = "strict". In standard mode, pyright catches explicit type mismatches (passing a number where text is expected) but ignores code that has no type labels at all. Strict mode requires every piece of code to declare its types -- nothing goes unchecked. This is why the course starts with strict: it ensures complete coverage from day one.
+
+Anti-Patterns​
+
+James now understands what pyright catches and why the course runs in strict mode. Here are the patterns Emma warned him to avoid:
+
+Anti-Pattern	What Happens	The Fix
+Ignoring type errors	James runs pyright, sees 12 errors, and skips them because "the code works." The errors accumulate. Eventually a type mismatch causes a crash.	Fix every error before committing. Pyright errors are not suggestions -- they are guardrails reporting missing protection.
+Using Any everywhere	James labels everything as Any to silence pyright. Every piece of code accepts everything, which means pyright checks nothing.	Use the most specific type possible: str, int, list[str]. Reserve Any for genuinely dynamic cases.
+Disabling strict mode	James switches to basic or standard mode because strict "has too many errors." Those errors represent real coverage gaps.	Start with strict mode on a new project (like SmartNotes). Fix errors as you write. Strict mode is harder to add later than to start with.
+Types as afterthought	James writes all his code without types, then adds labels later as a chore. The labels become inaccurate because they describe what he intended, not what the code does.	Add types as you write. The type label is part of the design, not a comment added afterward.
+Separate config files	A teammate creates a pyrightconfig.json alongside pyproject.toml. Pyright uses pyrightconfig.json when it exists, silently ignoring [tool.pyright] in pyproject.toml. The team thinks strict mode is active, but the separate file sets standard mode.	Keep all pyright configuration in pyproject.toml. If you find a pyrightconfig.json in your project, delete it and move its settings into [tool.pyright].
+Try With AI​
+Prompt 1: Explain a Pyright Error Message​
+I ran uv run pyright on my Python file and got this error:
+
+/home/james/smartnotes/main.py:19:26 - error: Argument of type "str" is not
+  assignable to parameter "a" of type "int"
+  "str" is not assignable to "int" (reportArgumentType)
+
+I am new to Python and do not fully understand types yet.
+Explain this error to me step by step in simple terms:
+1. What file and line is the error on?
+2. What did I write that caused the error?
+3. What kind of data did pyright expect? (Explain what "str" and "int" mean)
+4. What kind of data did I actually pass?
+5. What is "reportArgumentType" -- what category of error is this?
+6. How would I fix this error?
+
+
+What you're learning: How to read pyright error messages step by step. Every pyright error follows the same format -- file, line, column, description, rule name. By asking AI to break down a real error in simple terms, you are building the pattern recognition to read these messages on your own. This is the most practical type-checking skill: not writing types, but understanding what pyright tells you when types are wrong.
+
+Prompt 2: Add Type Labels to Unlabeled Code​
+Here is a piece of Python code without type labels:
+
+def calculate_total(items, tax_rate, discount):
+    subtotal = sum(item["price"] * item["quantity"] for item in items)
+    tax = subtotal * tax_rate
+    discounted = subtotal - discount
+    return discounted + tax
+
+It is called like this:
+items = [{"price": 9.99, "quantity": 2}, {"price": 4.50, "quantity": 1}]
+result = calculate_total(items, 0.08, 5.00)
+
+I am new to Python and learning about type labels for the first time.
+Add type labels to this code so it would pass pyright in strict mode.
+For each label you add, explain in simple terms:
+1. What kind of data it describes
+2. Why you chose that type
+3. What would go wrong if someone passed the wrong kind of data
+
+
+What you're learning: How type labels describe what kind of data flows through your code. By seeing AI add labels and explain each one in plain language, you start to read what labels like : str, : int, and : float mean. You are not writing these labels yourself yet -- you are learning to read and understand them, which is the foundation for every typed Python chapter ahead.
+
+Prompt 3: Try Standard Mode, Then Ask AI Why Strict Is Better​
+
+Before prompting, try this experiment. Open pyproject.toml and temporarily change typeCheckingMode from "strict" to "standard". Run uv run pyright and note the output. Then change it back to "strict", run uv run pyright again, and compare. Now ask AI:
+
+I tried switching pyright from strict to standard mode on my project.
+In standard mode I got [X] errors. In strict mode I got [Y] errors.
+
+My teammate wants to use standard because strict shows more errors.
+Explain:
+
+1. What specific categories of errors does strict mode catch that
+   standard mode ignores?
+2. Give me 3 concrete code examples where strict catches a real bug
+   but standard lets it pass silently.
+3. Why is strict mode easier to start with on a new project than to
+   add later to an existing one?
+4. Is there ever a good reason to use standard instead of strict?
+
+
+What you're learning: You saw the difference yourself before asking AI to explain it. The gap between standard and strict is not abstract -- you measured it in error counts on your own project. The AI's explanation will now connect to something you observed, not something you read about. This is the iterative pattern for the entire course: try it yourself, observe the result, ask AI to deepen your understanding, then apply what you learned. The understanding comes from the cycle, not from any single step.
+
+PRIMM-AI+ Practice: Pyright -- Your Type Safety Net​
+Predict [AI-FREE]​
+
+You ran pyright on your SmartNotes project in the Practical Application above. Before scrolling back, predict from memory: how many errors did pyright report in strict mode? How many did it report in standard mode? What was the difference between the two counts? Write your answers and a confidence score from 1 to 5, then scroll back to check.
+
+Run​
+
+Now try a small experiment. Open pyproject.toml and temporarily change typeCheckingMode from "strict" to "standard". Run uv run pyright and count the errors. Change it back to "strict" and run again. How many more errors does strict mode catch? This gap is the difference between "mostly checked" and "fully checked."
+
+Investigate​
+
+Your SmartNotes project should be clean (0 errors) after the Practical Application. To practice reading pyright output, ask your AI assistant to generate code that has type problems on purpose:
+
+Write a short Python function (5-10 lines) with type annotations
+that contains 2-3 deliberate type errors -- for example, passing
+a string where an int is expected, or returning the wrong type.
+Do not tell me where the errors are. I want pyright to find them.
+
+
+You do not need to understand the code's logic -- focus on the tool. Paste the AI's code into main.py and run uv run pyright. Look at the first error pyright reports. Before asking your AI assistant, write in your own words: what do you think this error means? Then ask:
+
+Pyright reported this error: [paste the full error message]
+Explain in simple terms: what file, what line, what went wrong,
+and how would someone fix it?
+
+
+Compare the AI's explanation to your own guess. Now think about the Error Taxonomy from Chapter 42, Lesson 3: pyright catches problems where the type of data is wrong (for example, passing text where a number is expected). These are called type errors. But what if the types are all correct and the code still gives the wrong answer? That is a logic error -- and pyright cannot catch it. Only tests (Lesson 6) can.
+
+Modify​
+
+Look at the pyright errors from the Investigate step. Pick one and try to fix it yourself based on the error message -- read what pyright says is expected versus what it found. Run pyright again after your fix. Did the error disappear? If not, ask your AI assistant for help. When done, restore your original clean main.py. The skill here is reading the error message, not writing Python from scratch.
+
+Make​
+
+Self-check: answer these without looking back at the lesson.
+
+What exact command runs pyright on your project? Write it out and run it in SmartNotes to confirm zero errors.
+What is the specific pyproject.toml key and value that enables strict mode? Write the exact TOML line. If you wrote typeCheckingMode = "strict" under [tool.pyright], you are correct.
+Name one category of bug pyright catches and one category it cannot catch. Hint: pyright handles structure; a different tool handles behavior.
+What does str | None mean, and why does pyright require you to handle both cases? If your answer mentions "union type" and "the value might be missing," you understood the concept.
+
+Verification Ladder checkpoint: Running pyright is Rung 2 (Types) of the Verification Ladder. It catches structural type mismatches automatically. The gap that remains -- logic correctness -- is what pytest at Rung 3 (Tests) fills in the next lesson.
+
+Operational Takeaways​
+
+A static type checker analyzes code without running it. Pyright reads type labels, traces how data moves through your code, and reports every type mismatch before your program executes.
+
+Type labels serve double duty. They document what kind of data your code expects (for humans and AI to read) and they enable automated checking (for pyright to verify). One label, two benefits.
+
+Every pyright error follows the same format: file path, line number, column, description, and rule name in parentheses. Learning to read this format is the key skill.
+
+Strict mode requires complete type labels. It enables dozens of additional diagnostic rules beyond standard mode, catching missing labels, unknown types, and unused code. New projects should start in strict mode.
+
+str | None is a union type. It means a value can hold either text (str) or nothing (None). This pattern appears throughout typed Python to make optional values explicit.
+
+Looking Ahead​
+
+Your SmartNotes project now has two verification tools running clean: ruff checks code quality and pyright checks type safety. But there is a third question neither tool can answer: does the code do what it is supposed to do? Code can be perfectly formatted, fully typed, and still produce the wrong result.
+
+In Lesson 6, James writes his first test with pytest -- a tool that checks whether your code does what you specified it should do.

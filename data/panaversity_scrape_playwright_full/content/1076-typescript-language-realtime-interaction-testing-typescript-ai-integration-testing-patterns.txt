@@ -1,0 +1,1032 @@
+Integration Testing Patterns
+
+You've built a comprehensive test suite using mocks and contract tests. Every unit test passes. Your streaming parser handles every edge case. Then you deploy, and users report that responses get truncated. The real OpenAI API formats tool calls differently than your mocks assumed.
+
+Mocks verify your code does what you think it should. Integration tests verify your code works with the real world.
+
+AI integration testing presents a unique challenge: real API calls are expensive, slow, and non-deterministic. A test that passes today might fail tomorrow because the model responded slightly differently. You can't afford to run thousands of API calls on every commit. But you also can't ship code that's never touched a real API.
+
+The solution is a layered strategy: mocks for fast unit tests (covered in Lesson 2), recorded fixtures for reliable integration tests, and selective real API calls for validation. This lesson teaches you to balance these approaches—getting the confidence of real API testing without the cost and flakiness.
+
+The Integration Testing Spectrum​
+
+Integration tests for AI applications exist on a spectrum from fully mocked to fully live:
+
+Approach	Speed	Cost	Determinism	Reality
+Mocks	Instant	Free	Perfect	Low
+Recorded Fixtures	Fast	One-time	High	Medium
+Seeds + Real API	Slow	Per-run	Medium	High
+Live API (no seeds)	Slow	Per-run	None	Highest
+
+Each approach fits different testing needs:
+
+Mocks: Unit tests, rapid iteration, testing error handling
+Recorded Fixtures: Integration tests in CI, regression testing
+Seeds + Real API: Validating fixture accuracy, periodic updates
+Live API: Smoke tests, production verification, exploratory testing
+
+Your test suite should use all four strategically.
+
+When to Use Real APIs​
+
+Real API calls are expensive. At $0.01-0.03 per request, a 1000-test suite costs $10-30 per run. That adds up fast in CI. But some tests genuinely need real APIs.
+
+Scenarios That Require Real APIs​
+
+Contract validation: When you update fixtures, verify they match current API behavior:
+
+import { describe, it, expect, beforeAll } from "vitest";
+import { OpenAI } from "openai";
+
+describe("API contract validation", () => {
+  const client = new OpenAI();
+
+  // Only run when explicitly requested
+  it.skipIf(!process.env.VALIDATE_CONTRACTS)(
+    "verifies fixture matches real API response shape",
+    async () => {
+      const response = await client.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: "Say hello" }],
+        max_tokens: 10,
+      });
+
+      // Verify response has expected structure
+      expect(response).toHaveProperty("id");
+      expect(response).toHaveProperty("choices");
+      expect(response.choices[0]).toHaveProperty("message");
+      expect(response.choices[0].message).toHaveProperty("content");
+      expect(response.choices[0]).toHaveProperty("finish_reason");
+
+      // Log for fixture update if needed
+      console.log("Current API response shape:", JSON.stringify(response, null, 2));
+    },
+    { timeout: 30000 }
+  );
+});
+
+
+Output:
+
+# Normal run (skipped)
+ ✓ API contract validation (1 test) 0ms
+   ↓ verifies fixture matches real API response shape [skipped]
+
+# With VALIDATE_CONTRACTS=true
+ ✓ API contract validation (1 test) 2541ms
+   ✓ verifies fixture matches real API response shape
+   Current API response shape: {
+     "id": "chatcmpl-abc123",
+     "choices": [{ "message": { "content": "Hello!" }, ... }],
+     ...
+   }
+
+
+Smoke tests: Quick checks that the API is reachable and your credentials work:
+
+import { describe, it, expect } from "vitest";
+import { OpenAI } from "openai";
+
+describe("smoke tests", () => {
+  it.skipIf(!process.env.RUN_SMOKE_TESTS)(
+    "can connect to OpenAI API",
+    async () => {
+      const client = new OpenAI();
+
+      const models = await client.models.list();
+
+      expect(models.data.length).toBeGreaterThan(0);
+      expect(models.data.some((m) => m.id.includes("gpt"))).toBe(true);
+    },
+    { timeout: 10000 }
+  );
+});
+
+
+Output:
+
+# With RUN_SMOKE_TESTS=true
+ ✓ smoke tests (1 test) 823ms
+   ✓ can connect to OpenAI API
+
+
+Exploratory testing during development: When building a new feature, test against real APIs first, then create fixtures:
+
+// During development - run against real API
+// npm test -- --run tests/explore-tool-calls.test.ts
+
+import { describe, it, expect } from "vitest";
+import { OpenAI } from "openai";
+
+describe("explore tool calls", () => {
+  it("discovers tool call response format", async () => {
+    const client = new OpenAI();
+
+    const response = await client.chat.completions.create({
+      model: "gpt-4",
+      messages: [{ role: "user", content: "What's the weather in NYC?" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: {
+              type: "object",
+              properties: { location: { type: "string" } },
+            },
+          },
+        },
+      ],
+    });
+
+    // Save this output as a fixture
+    console.log("Tool call response:", JSON.stringify(response, null, 2));
+
+    expect(response.choices[0].finish_reason).toBe("tool_calls");
+  });
+});
+
+Recorded Fixtures​
+
+Fixtures are recorded API responses saved as JSON files. Tests replay these instead of calling the real API.
+
+Recording Fixtures​
+
+Create a fixture recording script:
+
+// scripts/record-fixtures.ts
+import { OpenAI } from "openai";
+import { writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
+
+const client = new OpenAI();
+const fixturesDir = "tests/fixtures";
+
+mkdirSync(fixturesDir, { recursive: true });
+
+interface FixtureConfig {
+  name: string;
+  request: Parameters<typeof client.chat.completions.create>[0];
+}
+
+const fixtures: FixtureConfig[] = [
+  {
+    name: "simple-greeting",
+    request: {
+      model: "gpt-4",
+      messages: [{ role: "user", content: "Say hello in exactly 3 words" }],
+      max_tokens: 20,
+      seed: 42,
+    },
+  },
+  {
+    name: "tool-call-weather",
+    request: {
+      model: "gpt-4",
+      messages: [{ role: "user", content: "What's the weather in Paris?" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "get_weather",
+            description: "Get weather for a location",
+            parameters: {
+              type: "object",
+              properties: { location: { type: "string" } },
+              required: ["location"],
+            },
+          },
+        },
+      ],
+      seed: 42,
+    },
+  },
+  {
+    name: "json-mode-extraction",
+    request: {
+      model: "gpt-4-turbo-preview",
+      messages: [
+        {
+          role: "user",
+          content: "Extract: John Doe, 30 years old, engineer",
+        },
+        {
+          role: "system",
+          content:
+            "Extract name, age, occupation as JSON. Format: {name, age, occupation}",
+        },
+      ],
+      response_format: { type: "json_object" },
+      seed: 42,
+    },
+  },
+];
+
+async function recordFixtures() {
+  console.log("Recording fixtures...\n");
+
+  for (const fixture of fixtures) {
+    console.log(`Recording: ${fixture.name}`);
+
+    try {
+      const response = await client.chat.completions.create(fixture.request);
+
+      const fixtureData = {
+        _meta: {
+          recordedAt: new Date().toISOString(),
+          request: fixture.request,
+        },
+        response,
+      };
+
+      const path = join(fixturesDir, `${fixture.name}.json`);
+      writeFileSync(path, JSON.stringify(fixtureData, null, 2));
+
+      console.log(`  Saved to ${path}`);
+    } catch (error) {
+      console.error(`  Error: ${(error as Error).message}`);
+    }
+  }
+
+  console.log("\nDone!");
+}
+
+recordFixtures();
+
+
+Output:
+
+Recording fixtures...
+
+Recording: simple-greeting
+  Saved to tests/fixtures/simple-greeting.json
+Recording: tool-call-weather
+  Saved to tests/fixtures/tool-call-weather.json
+Recording: json-mode-extraction
+  Saved to tests/fixtures/json-mode-extraction.json
+
+Done!
+
+Using Fixtures in Tests​
+
+Load fixtures and use them to mock API responses:
+
+// tests/chat-service.test.ts
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+// Load fixture
+function loadFixture(name: string) {
+  const path = join(__dirname, "fixtures", `${name}.json`);
+  const data = JSON.parse(readFileSync(path, "utf-8"));
+  return data.response;
+}
+
+// Mock OpenAI
+vi.mock("openai", () => ({
+  OpenAI: vi.fn().mockImplementation(() => ({
+    chat: {
+      completions: {
+        create: vi.fn(),
+      },
+    },
+  })),
+}));
+
+import { OpenAI } from "openai";
+import { processChat } from "../src/chat-service";
+
+describe("chat service with fixtures", () => {
+  let mockCreate: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCreate = vi.mocked(new OpenAI()).chat.completions.create;
+  });
+
+  it("processes a simple greeting", async () => {
+    const fixture = loadFixture("simple-greeting");
+    mockCreate.mockResolvedValue(fixture);
+
+    const result = await processChat("Say hello");
+
+    expect(result.content).toContain("Hello");
+    expect(result.tokensUsed).toBeGreaterThan(0);
+  });
+
+  it("handles tool calls", async () => {
+    const fixture = loadFixture("tool-call-weather");
+    mockCreate.mockResolvedValue(fixture);
+
+    const result = await processChat("What's the weather?");
+
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0].name).toBe("get_weather");
+    expect(result.toolCalls[0].arguments).toHaveProperty("location");
+  });
+
+  it("parses JSON responses", async () => {
+    const fixture = loadFixture("json-mode-extraction");
+    mockCreate.mockResolvedValue(fixture);
+
+    const result = await processChat("Extract: John, 30, engineer");
+
+    expect(result.structured).toEqual({
+      name: "John Doe",
+      age: 30,
+      occupation: "engineer",
+    });
+  });
+});
+
+
+Output:
+
+ ✓ chat service with fixtures (3 tests) 5ms
+   ✓ processes a simple greeting
+   ✓ handles tool calls
+   ✓ parses JSON responses
+
+Fixture Versioning Strategy​
+
+Fixtures can become stale when APIs change. Implement a versioning strategy:
+
+// tests/fixtures/index.ts
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+
+interface FixtureMetadata {
+  recordedAt: string;
+  apiVersion?: string;
+  request: Record<string, unknown>;
+}
+
+interface FixtureData<T> {
+  _meta: FixtureMetadata;
+  response: T;
+}
+
+const FIXTURE_MAX_AGE_DAYS = 30;
+
+export function loadFixture<T>(name: string): T {
+  const path = join(__dirname, `${name}.json`);
+
+  if (!existsSync(path)) {
+    throw new Error(
+      `Fixture not found: ${name}. Run 'npm run record-fixtures' to create it.`
+    );
+  }
+
+  const data: FixtureData<T> = JSON.parse(readFileSync(path, "utf-8"));
+
+  // Warn if fixture is old
+  const recordedAt = new Date(data._meta.recordedAt);
+  const ageInDays =
+    (Date.now() - recordedAt.getTime()) / (1000 * 60 * 60 * 24);
+
+  if (ageInDays > FIXTURE_MAX_AGE_DAYS) {
+    console.warn(
+      `Warning: Fixture '${name}' is ${Math.floor(ageInDays)} days old. ` +
+        `Consider re-recording with 'npm run record-fixtures'.`
+    );
+  }
+
+  return data.response;
+}
+
+export function getFixtureMetadata(name: string): FixtureMetadata {
+  const path = join(__dirname, `${name}.json`);
+  const data = JSON.parse(readFileSync(path, "utf-8"));
+  return data._meta;
+}
+
+
+Output:
+
+# When using a 45-day-old fixture:
+Warning: Fixture 'simple-greeting' is 45 days old. Consider re-recording with 'npm run record-fixtures'.
+
+Deterministic Testing with Seeds​
+
+OpenAI and other providers support a seed parameter that makes responses more reproducible. While not perfectly deterministic, seeds significantly reduce variation.
+
+How Seeds Work​
+import { describe, it, expect } from "vitest";
+import { OpenAI } from "openai";
+
+describe("seed determinism", () => {
+  const client = new OpenAI();
+
+  it.skipIf(!process.env.TEST_SEEDS)(
+    "produces similar output with same seed",
+    async () => {
+      const request = {
+        model: "gpt-4",
+        messages: [
+          { role: "user" as const, content: "Give me a random number 1-10" },
+        ],
+        seed: 12345,
+        max_tokens: 10,
+      };
+
+      // Make the same request twice
+      const response1 = await client.chat.completions.create(request);
+      const response2 = await client.chat.completions.create(request);
+
+      // With same seed, responses should match
+      // Note: Not guaranteed to be identical, but highly likely
+      expect(response1.choices[0].message.content).toBe(
+        response2.choices[0].message.content
+      );
+
+      // System fingerprint indicates if same model version was used
+      console.log("Fingerprint 1:", response1.system_fingerprint);
+      console.log("Fingerprint 2:", response2.system_fingerprint);
+    },
+    { timeout: 30000 }
+  );
+});
+
+
+Output:
+
+ ✓ seed determinism (1 test) 3521ms
+   ✓ produces similar output with same seed
+   Fingerprint 1: fp_abc123
+   Fingerprint 2: fp_abc123
+
+Seed Strategy for Testing​
+
+Use seeds when recording fixtures and when validating them:
+
+// tests/helpers/seed-test.ts
+import { OpenAI } from "openai";
+
+const TEST_SEEDS: Record<string, number> = {
+  "simple-greeting": 1001,
+  "tool-call-weather": 1002,
+  "json-extraction": 1003,
+  "long-response": 1004,
+};
+
+export function getSeedForTest(testName: string): number {
+  return TEST_SEEDS[testName] ?? Math.floor(Math.random() * 100000);
+}
+
+export async function validateFixtureWithSeed(
+  client: OpenAI,
+  fixtureName: string,
+  request: Parameters<typeof client.chat.completions.create>[0]
+) {
+  const seed = getSeedForTest(fixtureName);
+
+  const response = await client.chat.completions.create({
+    ...request,
+    seed,
+  });
+
+  return {
+    response,
+    seed,
+    fingerprint: response.system_fingerprint,
+  };
+}
+
+Handling Seed Limitations​
+
+Seeds don't guarantee identical output—they reduce variation. Design tests that tolerate minor differences:
+
+import { describe, it, expect, vi } from "vitest";
+
+describe("seed-tolerant tests", () => {
+  it("validates response structure, not exact content", async () => {
+    // Instead of exact match:
+    // expect(response.content).toBe("The answer is 42");
+
+    // Test structure and constraints:
+    expect(response.content).toBeDefined();
+    expect(response.content.length).toBeGreaterThan(0);
+    expect(response.content.length).toBeLessThan(500);
+  });
+
+  it("uses semantic validation for content", async () => {
+    // If you need content validation, check semantics
+    const response = { content: "Hello there! How can I assist?" };
+
+    // Check for greeting patterns, not exact words
+    const isGreeting = /hello|hi|hey|greetings/i.test(response.content);
+    expect(isGreeting).toBe(true);
+  });
+
+  it("validates JSON structure, allows value variation", async () => {
+    const response = {
+      content: JSON.stringify({
+        name: "John Doe",
+        age: 30,
+        occupation: "engineer",
+      }),
+    };
+
+    const parsed = JSON.parse(response.content);
+
+    // Validate structure
+    expect(parsed).toHaveProperty("name");
+    expect(parsed).toHaveProperty("age");
+    expect(parsed).toHaveProperty("occupation");
+
+    // Validate types, not exact values
+    expect(typeof parsed.name).toBe("string");
+    expect(typeof parsed.age).toBe("number");
+    expect(parsed.age).toBeGreaterThan(0);
+  });
+});
+
+
+Output:
+
+ ✓ seed-tolerant tests (3 tests) 2ms
+   ✓ validates response structure, not exact content
+   ✓ uses semantic validation for content
+   ✓ validates JSON structure, allows value variation
+
+Test Environment Configuration​
+
+Separate test environments prevent accidental production API calls and enable different testing strategies.
+
+Environment Variables​
+// src/config.ts
+export interface Config {
+  openaiApiKey: string;
+  environment: "development" | "test" | "production";
+  apiBaseUrl: string;
+  maxRetries: number;
+  timeout: number;
+}
+
+export function getConfig(): Config {
+  const env = process.env.NODE_ENV ?? "development";
+
+  // Base configuration
+  const config: Config = {
+    openaiApiKey: process.env.OPENAI_API_KEY ?? "",
+    environment: env as Config["environment"],
+    apiBaseUrl: "https://api.openai.com/v1",
+    maxRetries: 3,
+    timeout: 30000,
+  };
+
+  // Test overrides
+  if (env === "test") {
+    return {
+      ...config,
+      openaiApiKey: process.env.OPENAI_TEST_API_KEY ?? config.openaiApiKey,
+      maxRetries: 1, // Fail fast in tests
+      timeout: 10000, // Shorter timeout
+    };
+  }
+
+  return config;
+}
+
+Test Setup File​
+
+Configure Vitest to set up the test environment:
+
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    globals: false,
+    environment: "node",
+    setupFiles: ["./tests/setup.ts"],
+    env: {
+      NODE_ENV: "test",
+    },
+    // Separate test types
+    include: ["**/*.test.ts"],
+    exclude: ["**/*.integration.test.ts", "**/*.e2e.test.ts"],
+  },
+});
+
+// tests/setup.ts
+import { beforeAll, afterAll, vi } from "vitest";
+
+beforeAll(() => {
+  // Verify we're in test environment
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("Tests must run with NODE_ENV=test");
+  }
+
+  // Fail if trying to use production API key in unit tests
+  if (
+    process.env.OPENAI_API_KEY &&
+    !process.env.OPENAI_API_KEY.includes("test")
+  ) {
+    console.warn(
+      "Warning: Using production API key in tests. " +
+        "Set OPENAI_TEST_API_KEY for test environment."
+    );
+  }
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
+});
+
+
+Output:
+
+# Running tests
+Tests must run with NODE_ENV=test
+ ✓ setup complete
+
+# If using production key:
+Warning: Using production API key in tests. Set OPENAI_TEST_API_KEY for test environment.
+
+Rate Limit Handling​
+
+Integration tests that hit real APIs need rate limit awareness:
+
+// tests/helpers/rate-limiter.ts
+class TestRateLimiter {
+  private queue: Array<() => Promise<unknown>> = [];
+  private processing = false;
+  private requestsPerMinute: number;
+  private lastRequestTime = 0;
+
+  constructor(requestsPerMinute = 20) {
+    this.requestsPerMinute = requestsPerMinute;
+  }
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          const result = await fn();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+
+      this.process();
+    });
+  }
+
+  private async process() {
+    if (this.processing || this.queue.length === 0) return;
+
+    this.processing = true;
+
+    while (this.queue.length > 0) {
+      const minInterval = 60000 / this.requestsPerMinute;
+      const timeSinceLastRequest = Date.now() - this.lastRequestTime;
+
+      if (timeSinceLastRequest < minInterval) {
+        await new Promise((r) =>
+          setTimeout(r, minInterval - timeSinceLastRequest)
+        );
+      }
+
+      const task = this.queue.shift();
+      if (task) {
+        this.lastRequestTime = Date.now();
+        await task();
+      }
+    }
+
+    this.processing = false;
+  }
+}
+
+export const testRateLimiter = new TestRateLimiter(20);
+
+CI/CD Considerations​
+
+CI pipelines need fast, reliable tests. Design your test suite with CI in mind.
+
+Test Tiers​
+
+Organize tests into tiers that run at different stages:
+
+// package.json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude '**/*.integration.test.ts'",
+    "test:integration": "vitest run --include '**/*.integration.test.ts'",
+    "test:smoke": "RUN_SMOKE_TESTS=true vitest run tests/smoke/",
+    "test:contracts": "VALIDATE_CONTRACTS=true vitest run tests/contracts/"
+  }
+}
+
+Tier	When to Run	Cost	Time
+Unit tests	Every commit	Free	Seconds
+Integration (fixtures)	Every PR	Free	Seconds
+Smoke tests	Pre-deploy	~$0.10	Minutes
+Contract validation	Weekly/manual	~$1.00	Minutes
+GitHub Actions Example​
+# .github/workflows/test.yml
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:unit
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:integration
+
+  smoke-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [unit-tests, integration-tests]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:smoke
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RUN_SMOKE_TESTS: "true"
+
+
+Output:
+
+# PR workflow (fast, free)
+✓ unit-tests (23s)
+✓ integration-tests (31s)
+
+# Main branch (includes smoke)
+✓ unit-tests (23s)
+✓ integration-tests (31s)
+✓ smoke-tests (2m 14s)
+
+Cost Budgeting​
+
+Track and limit API costs in CI:
+
+// tests/helpers/cost-tracker.ts
+interface CostEntry {
+  test: string;
+  promptTokens: number;
+  completionTokens: number;
+  estimatedCost: number;
+}
+
+class CostTracker {
+  private entries: CostEntry[] = [];
+  private budget: number;
+
+  constructor(budgetDollars: number) {
+    this.budget = budgetDollars;
+  }
+
+  track(test: string, usage: { prompt_tokens: number; completion_tokens: number }) {
+    // GPT-4 pricing: $0.03/1K prompt, $0.06/1K completion
+    const promptCost = (usage.prompt_tokens / 1000) * 0.03;
+    const completionCost = (usage.completion_tokens / 1000) * 0.06;
+    const totalCost = promptCost + completionCost;
+
+    this.entries.push({
+      test,
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+      estimatedCost: totalCost,
+    });
+
+    const totalSpent = this.entries.reduce((sum, e) => sum + e.estimatedCost, 0);
+
+    if (totalSpent > this.budget) {
+      throw new Error(
+        `Test cost budget exceeded! Spent $${totalSpent.toFixed(4)} of $${this.budget} budget.`
+      );
+    }
+  }
+
+  report(): string {
+    const totalCost = this.entries.reduce((sum, e) => sum + e.estimatedCost, 0);
+    const totalTokens = this.entries.reduce(
+      (sum, e) => sum + e.promptTokens + e.completionTokens,
+      0
+    );
+
+    return `
+Cost Report:
+- Tests: ${this.entries.length}
+- Total tokens: ${totalTokens}
+- Estimated cost: $${totalCost.toFixed(4)}
+- Budget remaining: $${(this.budget - totalCost).toFixed(4)}
+    `;
+  }
+}
+
+export const testCostTracker = new CostTracker(1.0); // $1 budget per run
+
+
+Output:
+
+Cost Report:
+- Tests: 5
+- Total tokens: 2341
+- Estimated cost: $0.1124
+- Budget remaining: $0.8876
+
+Complete Integration Test Example​
+
+Putting it all together—a complete integration test file:
+
+// tests/integration/chat-service.integration.test.ts
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { OpenAI } from "openai";
+import { loadFixture, getFixtureMetadata } from "../fixtures";
+import { testCostTracker } from "../helpers/cost-tracker";
+import { testRateLimiter } from "../helpers/rate-limiter";
+import { ChatService } from "../../src/chat-service";
+
+describe("ChatService Integration", () => {
+  let service: ChatService;
+
+  beforeAll(() => {
+    service = new ChatService();
+  });
+
+  afterAll(() => {
+    if (process.env.SHOW_COST_REPORT) {
+      console.log(testCostTracker.report());
+    }
+  });
+
+  describe("with fixtures", () => {
+    it("processes greeting responses", async () => {
+      const fixture = loadFixture("simple-greeting");
+      const result = service.processResponse(fixture);
+
+      expect(result.content).toBeDefined();
+      expect(result.content.length).toBeGreaterThan(0);
+    });
+
+    it("handles tool calls from fixtures", async () => {
+      const fixture = loadFixture("tool-call-weather");
+      const result = service.processResponse(fixture);
+
+      expect(result.toolCalls).toBeDefined();
+      expect(result.toolCalls.length).toBeGreaterThan(0);
+      expect(result.toolCalls[0]).toHaveProperty("name", "get_weather");
+    });
+  });
+
+  describe("with real API", () => {
+    it.skipIf(!process.env.RUN_INTEGRATION_TESTS)(
+      "sends and receives messages",
+      async () => {
+        const result = await testRateLimiter.execute(() =>
+          service.chat("What is 2+2? Answer with just the number.")
+        );
+
+        expect(result.content).toContain("4");
+
+        if (result.usage) {
+          testCostTracker.track("sends and receives messages", result.usage);
+        }
+      },
+      { timeout: 30000 }
+    );
+
+    it.skipIf(!process.env.RUN_INTEGRATION_TESTS)(
+      "validates fixture accuracy",
+      async () => {
+        const fixtureName = "simple-greeting";
+        const metadata = getFixtureMetadata(fixtureName);
+
+        const liveResponse = await testRateLimiter.execute(() =>
+          new OpenAI().chat.completions.create({
+            ...metadata.request,
+            seed: 42,
+          } as Parameters<typeof OpenAI.prototype.chat.completions.create>[0])
+        );
+
+        // Structure should match fixture
+        expect(liveResponse).toHaveProperty("choices");
+        expect(liveResponse.choices[0]).toHaveProperty("message");
+        expect(liveResponse.choices[0].message).toHaveProperty("content");
+
+        if (liveResponse.usage) {
+          testCostTracker.track("validates fixture accuracy", liveResponse.usage);
+        }
+      },
+      { timeout: 30000 }
+    );
+  });
+});
+
+
+Output:
+
+# Normal run (fixtures only)
+ ✓ ChatService Integration (2 tests) 4ms
+   ✓ with fixtures (2 tests)
+     ✓ processes greeting responses
+     ✓ handles tool calls from fixtures
+   ↓ with real API (2 tests) [skipped]
+
+# With RUN_INTEGRATION_TESTS=true
+ ✓ ChatService Integration (4 tests) 5234ms
+   ✓ with fixtures (2 tests)
+     ✓ processes greeting responses
+     ✓ handles tool calls from fixtures
+   ✓ with real API (2 tests)
+     ✓ sends and receives messages
+     ✓ validates fixture accuracy
+
+Cost Report:
+- Tests: 2
+- Total tokens: 156
+- Estimated cost: $0.0089
+- Budget remaining: $0.9911
+
+Try With AI​
+Prompt 1: Design a Fixture Strategy​
+I'm building a TypeScript SDK that wraps multiple AI providers
+(OpenAI, Anthropic, Google). Each provider has different response
+formats. Help me design a fixture recording strategy that:
+
+1. Captures responses from all three providers
+2. Normalizes them to a common format
+3. Includes metadata for staleness tracking
+4. Works with my existing Vitest test setup
+
+What's the directory structure and recording script I should use?
+
+
+What you're learning: How to design fixture strategies for multi-provider applications. AI can help you see patterns across providers and suggest normalization approaches you might not have considered.
+
+Prompt 2: CI/CD Test Organization​
+My AI application has these test categories:
+- Unit tests (mocked, ~200 tests)
+- Fixture-based integration tests (~50 tests)
+- Real API tests (~20 tests, expensive)
+- E2E tests with Playwright (~10 tests)
+
+Design a CI/CD pipeline that:
+- Runs unit tests on every commit
+- Runs integration tests on every PR
+- Runs API tests only on main branch
+- Limits API test costs to $5/day
+- Runs E2E tests before deployment
+
+Show me the GitHub Actions workflow.
+
+
+What you're learning: How to balance test coverage with cost constraints in CI. AI can suggest pipeline structures and cost control mechanisms you can adapt for your project.
+
+Prompt 3: Seed Selection Strategy​
+I'm using OpenAI's seed parameter for reproducible tests. I have 30 different
+test scenarios. Should I:
+
+1. Use the same seed for all tests?
+2. Use different seeds per test?
+3. Use a seed per fixture file?
+4. Calculate seeds from test names?
+
+What are the tradeoffs? How do I handle the case where the API updates
+its model and seeds no longer produce the same output?
+
+
+What you're learning: How to think systematically about determinism in AI testing. The tradeoffs between consistency and isolation in seed strategies apply beyond testing to any scenario requiring reproducible AI behavior.
+
+Safety note: When running integration tests against real APIs, use separate API keys with spending limits. Most providers offer usage caps that prevent runaway costs. Never use production credentials in CI—always use test environment keys with restricted quotas.
+
+Sources:
+
+OpenAI API Seed Parameter
+Vitest Test Context
+GitHub Actions Environments

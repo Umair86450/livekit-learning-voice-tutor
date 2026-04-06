@@ -1,0 +1,221 @@
+The Banking Plugin Architecture: 17 Skills, Three Pillars
+
+In Lesson 1, you learned that every bank is simultaneously governed by three regulatory pillars: Accounting (IFRS 9), Solvency (Basel), and Financial Crime (AML). Now you will examine the plugin architecture that translates those three pillars into agent capabilities. The banking plugin contains 17 skills: 1 router and 16 product skills: organised by pillar, with four domain commands that provide direct entry points.
+
+Installing the Banking Plugin​
+
+The banking plugin installs the same way as the Islamic finance plugin from Chapter 31.
+
+Claude Code CLI:
+
+claude plugin install banking@agentfactory-business
+
+
+Verify installation: Start a new session and say "I need to calculate the ECL for a corporate loan portfolio." The agent should reference IFRS 9 staging and ask for PD, LGD, and EAD inputs. If it treats this as a general question rather than routing to the ifrs9-ecl skill, the plugin is not active.
+
+The 17-Skill Library​
+
+The banking plugin contains 1 router and 16 product skills spanning all three regulatory pillars plus a reconciliation domain. The router auto-activates whenever it detects banking terminology in a query: terms like "ECL," "CET1," "RWA," "SAR," "KYC," "LCR," or "NSFR."
+
+Pillar	Skill Name	What It Calculates
+IFRS 9	ifrs9-ecl	Expected Credit Loss calculation (12-month and lifetime)
+	ifrs9-staging	Stage 1/2/3 classification and SICR assessment
+	ifrs9-scenarios	Macroeconomic scenario design and probability-weighted ECL
+	ifrs9-disclosure	IFRS 9 disclosure note drafting and reconciliation tables
+Basel	basel-capital	CET1, AT1, Tier 2 capital classification and deductions
+	basel-rwa-credit	Credit risk RWA under Standardised and IRB approaches
+	basel-rwa-market	Market risk RWA calculation
+	liquidity-lcr	Liquidity Coverage Ratio (HQLA / net cash outflows)
+	liquidity-nsfr	Net Stable Funding Ratio
+	stress-testing	Stress test scenario design and capital impact
+AML	aml-typologies	Money laundering pattern identification and red flags
+	aml-sar-drafting	Suspicious Activity Report narrative generation
+	aml-cdd-edd	Customer Due Diligence and Enhanced Due Diligence
+	sanctions-screening	Sanctions list screening and match analysis
+	kyc-risk-rating	Customer risk rating and periodic review
+Reconciliation	bank-reconciliation	Nostro/vostro, suspense, GL-to-sub-ledger reconciliation
+
+The router (banking-global-router) sits above all 16 product skills. It reads the query, determines which pillar or pillars are involved, and loads the appropriate skills before any calculation begins.
+
+The Four Domain Commands​
+
+The plugin provides four shortcut commands that bypass the router and go directly to the most common workflows:
+
+Command	Pillar	What It Does
+/bank-ecl	IFRS 9	Runs the full ECL workflow: staging, PD/LGD/EAD, scenario weighting, disclosure
+/bank-capital	Basel	Runs the capital stack: CET1 classification, deductions, RWA, capital ratios
+/bank-recon	Reconciliation	Runs reconciliation: nostro, suspense clearing, GL matching, provision reconciliation
+/bank-aml	AML	Runs AML workflow: typology screening, CDD/EDD, risk rating, SAR drafting if needed
+
+These commands are convenience shortcuts. The router handles the same queries automatically: the commands simply guarantee the correct skill chain loads without requiring the router to parse the query.
+
+How the Router Works​
+
+The banking router operates differently from the Islamic finance router in Chapter 31. Where the Islamic finance router routes by jurisdiction (Bahrain vs Malaysia vs UK), the banking router routes by pillar (IFRS 9 vs Basel vs AML). The routing protocol has three steps.
+
+Step 1: Detect the pillar. The router reads the query for pillar signals:
+
+Signal Terms	Maps to Pillar
+ECL, provision, staging, SICR, PD, LGD, EAD, impairment	IFRS 9
+CET1, capital ratio, RWA, leverage ratio, LCR, NSFR, buffer	Basel
+SAR, suspicious, KYC, CDD, EDD, sanctions, PEP, transaction monitoring	AML
+Nostro, vostro, suspense, reconciliation, GL matching	Reconciliation
+
+If the query contains signals from multiple pillars, the router identifies it as a cross-pillar query and chains the relevant skills.
+
+Step 2 (Load the skill chain. Based on the pillar detection, the router loads one or more product skills. A single-pillar query loads one skill. A cross-pillar query loads multiple skills in dependency order) for example, an IFRS 9 provision increase that affects Basel capital loads ifrs9-ecl first (to calculate the provision), then basel-capital (to recalculate the CET1 ratio with the reduced retained earnings).
+
+Step 3: Apply hooks. Two hooks run on every query:
+
+SessionStart hook: Confirms the pillar context and asks clarifying questions if the pillar cannot be determined. Like the Islamic finance router, it never defaults. If the query says "calculate the provision" without specifying IFRS 9 or US CECL, the router asks.
+PostToolUse hook: Validates that the output uses correct regulatory terminology. An IFRS 9 output must reference "Expected Credit Loss," not "Allowance for Loan Losses" (the US term). A Basel output must reference "CET1" and "RWA," not informal terms.
+Tracing a Query: Single-Pillar​
+
+To see the architecture in action, trace a single-pillar query through the router.
+
+Query: "A UK bank's residential mortgage portfolio has 12,000 accounts. 300 accounts have had rating downgrades exceeding 2 notches since origination. Classify these accounts into IFRS 9 stages."
+
+Step 1 (Pillar detection: The router detects "IFRS 9 stages," "rating downgrades," and "origination") all IFRS 9 signals. Single-pillar query.
+
+Step 2: Skill loaded: The router loads ifrs9-staging. This skill contains the SICR criteria (quantitative triggers like 2-notch downgrades, qualitative triggers like watchlist status, backstop triggers like 30+ days past due) and the stage classification rules.
+
+Step 3: Output: The skill classifies the 300 downgraded accounts as Stage 2 (significant increase in credit risk, not yet defaulted) and the remaining 11,700 as Stage 1 (no SICR since origination). The output includes the SICR rationale and the measurement implication: Stage 2 accounts now require lifetime ECL instead of 12-month ECL.
+
+Tracing a Query: Cross-Pillar​
+
+Now trace a cross-pillar query: the more complex routing scenario.
+
+Query: "A regulator asks: what is the CET1 capital impact of your Q4 IFRS 9 provision increase of $200 million?"
+
+Step 1: Pillar detection: The router detects "CET1 capital" (Basel signal) and "IFRS 9 provision" (IFRS 9 signal). This is a cross-pillar query spanning two pillars.
+
+Step 2: Skill chain loaded: The router loads two skills in order:
+
+ifrs9-ecl: to understand the provision increase and its components
+basel-capital: to recalculate the CET1 ratio with the reduced retained earnings
+
+Step 3: Chained output: The IFRS 9 skill confirms the $200 million provision increase reduces pre-tax profit by $200 million. After tax at (for example) 25%, retained earnings fall by $150 million. The Basel skill then recalculates: CET1 capital decreases by $150 million, and the CET1 ratio falls by $150M / total RWA. The output quantifies both the accounting impact and the capital impact in a single response.
+
+This chaining is what single-pillar agents cannot do. An IFRS 9-only agent would calculate the provision but stop there. A Basel-only agent would need the provision number as input: it could not calculate it independently. The router chains them so the output flows from one skill to the next.
+
+The Plugin File Structure​
+
+The banking plugin follows the same directory structure as the Islamic finance plugin from Chapter 31:
+
+.claude/skills/
+├── banking-global-router/
+│   └── SKILL.md              # Router: pillar detection, skill chaining
+├── ifrs9-ecl/
+│   └── SKILL.md              # ECL calculation engine
+├── ifrs9-staging/
+│   └── SKILL.md              # Stage classification and SICR
+├── ifrs9-scenarios/
+│   └── SKILL.md              # Macro scenario design
+├── ifrs9-disclosure/
+│   └── SKILL.md              # Disclosure note drafting
+├── basel-capital/
+│   └── SKILL.md              # Capital stack and ratios
+├── basel-rwa-credit/
+│   └── SKILL.md              # Credit risk RWA
+├── basel-rwa-market/
+│   └── SKILL.md              # Market risk RWA
+├── liquidity-lcr/
+│   └── SKILL.md              # LCR calculation
+├── liquidity-nsfr/
+│   └── SKILL.md              # NSFR calculation
+├── stress-testing/
+│   └── SKILL.md              # Stress test scenarios
+├── aml-typologies/
+│   └── SKILL.md              # ML pattern identification
+├── aml-sar-drafting/
+│   └── SKILL.md              # SAR narrative generation
+├── aml-cdd-edd/
+│   └── SKILL.md              # CDD/EDD procedures
+├── sanctions-screening/
+│   └── SKILL.md              # Sanctions list matching
+├── kyc-risk-rating/
+│   └── SKILL.md              # Customer risk rating
+└── bank-reconciliation/
+    └── SKILL.md              # Reconciliation procedures
+
+
+Each SKILL.md file follows the standard format from Chapter 26: YAML frontmatter with name and description, followed by the skill's calculation rules, decision logic, and output templates. The key difference from Chapter 31 is the routing dimension: instead of routing by jurisdiction, the banking router routes by pillar.
+
+Worked Example: Monthly IFRS 9 ECL Workflow​
+
+To see how multiple skills chain in a real workflow, consider the monthly ECL calculation that every IFRS 9 bank performs:
+
+Step	Action	Skill Used	Output
+1	Classify all exposures into stages	ifrs9-staging	Stage 1/2/3 assignment for each facility
+2	Calculate PD, LGD, EAD per facility	ifrs9-ecl	Component-level ECL inputs
+3	Apply macroeconomic scenarios	ifrs9-scenarios	Probability-weighted ECL per scenario
+4	Calculate final ECL	ifrs9-ecl	Portfolio-level ECL provision
+5	Draft disclosure notes	ifrs9-disclosure	Stage migration table, ECL reconciliation
+6	Assess capital impact	basel-capital	Updated CET1 ratio after provision
+
+The /bank-ecl command runs steps 1-5 automatically. Step 6 requires the /bank-capital command or a cross-pillar query that the router chains.
+
+CONNECTION TO CHAPTER 31
+
+The banking plugin's pillar-aware routing and the Islamic finance plugin's jurisdiction-aware routing are two instances of the same architectural pattern: a router that detects context, loads specialised skills, and chains outputs. If you mastered the three-layer architecture in Chapter 31, the banking plugin's architecture is the same pattern applied to a different routing dimension.
+
+Try With AI​
+
+Setup: Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1: Reproduce​
+I have the banking plugin installed. Here is my query:
+
+"Calculate the ECL for a UK mortgage portfolio with 5,000
+accounts. Average PD is 1.5%, average LGD is 18%, and
+average EAD is GBP 200,000. All accounts are Stage 1."
+
+Walk me through:
+1. Which pillar does the router detect?
+2. Which skill(s) does it load?
+3. What calculation does the skill perform?
+4. What is the portfolio-level 12-month ECL?
+
+Show the arithmetic step by step.
+
+
+What you are learning: Single-pillar routing is the simplest case: one pillar, one skill, one calculation. By tracing the routing yourself, you verify that you understand both the architecture and the underlying calculation. This prepares you for Lesson 3, where you build the ECL formula in depth.
+
+Prompt 2: Adapt​
+A regulator sends a bank this question:
+
+"Your IFRS 9 Stage 2 provisions increased by $150 million
+this quarter. What is the impact on your CET1 ratio,
+assuming a 25% tax rate and total RWA of $80 billion?"
+
+Walk me through the routing:
+1. Which pillars are involved?
+2. Which skills does the router chain, and in what order?
+3. What does each skill contribute to the answer?
+4. Calculate the CET1 ratio impact.
+
+Then explain: why can't a single-pillar agent answer
+this question?
+
+
+What you are learning: Cross-pillar routing is the banking plugin's distinctive capability. By tracing a cross-pillar query, you see why the router chains skills rather than loading them independently: and why the output from one skill becomes the input to the next.
+
+Prompt 3: Apply​
+List all 16 product skills in the banking plugin, grouped
+by pillar. For each skill, give me:
+1. The skill name
+2. One sentence describing what it calculates
+3. Which command (/bank-ecl, /bank-capital, /bank-recon,
+   or /bank-aml) includes it in its chain
+
+Then answer: which skills would be chained if I asked
+"A borrower has defaulted — what is the provision impact,
+the capital impact, and do we need to file a SAR?"
+
+
+What you are learning: The skill inventory is your reference map for the rest of this chapter. By cataloguing all 16 skills and their pillar assignments, you build the mental model that the router uses: and you can predict which skills any banking query will activate.
+
+Flashcards Study Aid​
+Loading flashcards...
+
+Continue to Lesson 3: IFRS 9 ECL: Staging and the ECL Formula →

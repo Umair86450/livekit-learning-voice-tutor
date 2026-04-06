@@ -1,0 +1,540 @@
+Dapr Observability Integration
+
+You've built your observability stack. Prometheus collects metrics. Jaeger visualizes traces. Loki aggregates logs. Your Task API endpoints are instrumented, and you can answer questions like "What's our P95 latency?" and "Why did that request fail?"
+
+But something is invisible. Every request to your Dapr-enabled services goes through a sidecar. That sidecar calls Redis for state, Kafka for pub/sub, and other services for invocations. When a request is slow, is it your application code or the Dapr sidecar? When an actor method fails, did the method throw an error or did the state store timeout? When a workflow step takes too long, which activity is the bottleneck?
+
+Without Dapr observability integration, you see your application and you see your infrastructure, but the bridge between them is a black box. You're debugging half the story.
+
+This lesson integrates Dapr's native observability into your existing stack. You'll configure sidecars to export metrics to Prometheus and traces to Jaeger. You'll learn the Dapr-specific metrics that reveal actor and workflow behavior. And you'll connect the dots between your application traces and Dapr's internal operations.
+
+The Dapr Observability Gap​
+
+When you deployed Dapr, you gained powerful abstractions: state management, pub/sub, service invocation, actors, workflows. But every abstraction hides complexity, and hidden complexity is hard to debug.
+
+Consider this trace from your Task API:
+
+task-api: POST /tasks/create
+  [45ms] Total request time
+
+
+What happened inside that 45ms? Did your application spend 40ms and Dapr 5ms? Or did your application spend 5ms and Dapr 40ms waiting for Redis? Without Dapr observability, you can't answer this.
+
+With Dapr observability integrated:
+
+task-api: POST /tasks/create
+  [2ms] Application logic
+  [38ms] dapr: state/set (statestore)
+    [35ms] Redis SET operation
+  [5ms] dapr: publish (pubsub)
+    [3ms] Kafka produce
+
+
+Now you know: the bottleneck is Redis, not your code. You can optimize in the right place.
+
+Configuring Dapr Metrics​
+
+Dapr sidecars expose Prometheus metrics on port 9090 by default. But you need to configure this explicitly and tell Prometheus where to scrape.
+
+Step 1: Create the Dapr Configuration​
+
+The Configuration CRD controls observability for all sidecars that reference it:
+
+# components/dapr-observability.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: dapr-observability
+  namespace: default
+spec:
+  metric:
+    enabled: true
+    port: 9090
+    path: /metrics
+  tracing:
+    samplingRate: "1"
+    otel:
+      endpointAddress: "jaeger-collector.monitoring:4317"
+      isSecure: false
+      protocol: grpc
+
+
+Apply it:
+
+kubectl apply -f components/dapr-observability.yaml
+
+
+Output:
+
+configuration.dapr.io/dapr-observability created
+
+
+Each field serves a specific purpose:
+
+Field	Value	Purpose
+metric.enabled	true	Expose Prometheus metrics endpoint
+metric.port	9090	Port for metrics (default)
+metric.path	/metrics	Endpoint path (default)
+tracing.samplingRate	"1"	Trace 100% of requests (use "0.1" for 10% in production)
+tracing.otel.endpointAddress	jaeger-collector.monitoring:4317	Where to send traces
+tracing.otel.protocol	grpc	Use efficient gRPC protocol
+Step 2: Reference Configuration in Deployments​
+
+Your applications must reference this Configuration via annotation:
+
+# kubernetes/task-api-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: default
+spec:
+  template:
+    metadata:
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "task-api"
+        dapr.io/app-port: "8000"
+        dapr.io/config: "dapr-observability"  # Reference the Configuration
+        dapr.io/log-as-json: "true"           # Structured logging for Loki
+    spec:
+      containers:
+        - name: task-api
+          image: task-api:latest
+          ports:
+            - containerPort: 8000
+
+
+The critical annotation is dapr.io/config: "dapr-observability". Without it, the sidecar won't export metrics or traces.
+
+Step 3: Create ServiceMonitor for Dapr Sidecars​
+
+Your Prometheus operator needs to know where to scrape Dapr metrics. Create a ServiceMonitor:
+
+# monitoring/dapr-servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dapr-sidecars
+  namespace: monitoring
+  labels:
+    release: prometheus  # Match your prometheus-stack release name
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      dapr.io/enabled: "true"
+  endpoints:
+    - port: "9090"
+      path: /metrics
+      interval: 15s
+
+
+Wait, there's a problem. Dapr sidecars don't have their own Service objects. They run inside pods alongside your application. The ServiceMonitor above won't find them.
+
+Instead, use a PodMonitor to scrape pods directly:
+
+# monitoring/dapr-podmonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dapr-sidecars
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      dapr.io/enabled: "true"
+  podMetricsEndpoints:
+    - port: "9090"
+      path: /metrics
+      interval: 15s
+
+
+Apply and verify:
+
+kubectl apply -f monitoring/dapr-podmonitor.yaml
+
+
+Output:
+
+podmonitor.monitoring.coreos.com/dapr-sidecars created
+
+
+Check Prometheus targets (in Prometheus UI or via API):
+
+kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n monitoring 9090:9090 &
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job == "dapr-sidecars")'
+
+
+Output:
+
+{
+  "discoveredLabels": {
+    "pod": "task-api-7b9f5c6d4-x2k9j",
+    "container": "daprd"
+  },
+  "labels": {
+    "job": "dapr-sidecars"
+  },
+  "scrapeUrl": "http://10.244.1.23:9090/metrics",
+  "health": "up"
+}
+
+Dapr Tracing with OpenTelemetry Collector​
+
+The Configuration we created sends traces directly to Jaeger. But in production, you often want traces to flow through an OpenTelemetry Collector for processing, filtering, and routing.
+
+Architecture with OTel Collector​
+Your App  -->  Dapr Sidecar  -->  OTel Collector  -->  Jaeger
+                  |                    |
+                  |                    +--> (future: Tempo, Datadog, etc.)
+                  v
+              Prometheus
+
+Configure Dapr to Send to OTel Collector​
+
+Update your Configuration to point to the collector:
+
+# components/dapr-observability.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: dapr-observability
+  namespace: default
+spec:
+  metric:
+    enabled: true
+  tracing:
+    samplingRate: "1"
+    otel:
+      endpointAddress: "otel-collector.monitoring:4317"
+      isSecure: false
+      protocol: grpc
+
+
+The collector then routes to Jaeger (or any backend). This lets you change backends without touching Dapr configuration.
+
+Observability for Dapr Actors​
+
+Dapr Actors have their own metrics that reveal activation patterns, method durations, and pending call queues.
+
+Key Actor Metrics​
+Metric	What It Measures	Why It Matters
+dapr_actor_invocations_total	Total actor method calls	Request volume per actor type and method
+dapr_actor_pending_calls	Calls waiting in actor queue	Turn-based concurrency backlog
+dapr_actor_active_count	Currently activated actors	Memory pressure indicator
+dapr_actor_operation_duration_seconds	Method execution time	Performance per method
+dapr_actor_timers_count	Active timers	Timer resource usage
+dapr_actor_reminders_count	Active reminders	Reminder resource usage
+PromQL Queries for Actors​
+
+Request rate by actor type and method:
+
+sum(rate(dapr_actor_invocations_total[5m])) by (actor_type, method)
+
+
+Output (in Prometheus UI or Grafana):
+
+{actor_type="ChatAgent", method="ProcessMessage"} 23.4
+{actor_type="ChatAgent", method="GetHistory"} 8.7
+{actor_type="TaskActor", method="UpdateStatus"} 15.2
+
+
+95th percentile method duration:
+
+histogram_quantile(0.95,
+  rate(dapr_actor_operation_duration_seconds_bucket[5m])
+) by (actor_type, method)
+
+
+Output:
+
+{actor_type="ChatAgent", method="ProcessMessage"} 0.045
+{actor_type="ChatAgent", method="GetHistory"} 0.012
+
+
+ChatAgent.ProcessMessage is at 45ms P95; GetHistory is 12ms. If ProcessMessage suddenly jumps to 500ms, you know where to investigate.
+
+Pending calls (turn-based concurrency backlog):
+
+dapr_actor_pending_calls{actor_type="ChatAgent"}
+
+
+Output:
+
+{actor_type="ChatAgent", app_id="task-api"} 3
+
+
+Three calls are waiting. If this number grows continuously, the actor can't keep up with demand.
+
+Tracing Actor Method Calls​
+
+In Jaeger, search for traces from your Dapr-enabled service. Actor method calls appear as spans:
+
+task-api: POST /chat/user123
+  [48ms] task-api: actor/ChatAgent/user123/method/ProcessMessage
+    [15ms] task-api: state/get (statestore)
+    [25ms] task-api: state/set (statestore)
+
+
+The trace shows the full flow: HTTP request to actor invocation to state operations. You can see that state operations account for most of the time.
+
+Observability for Dapr Workflows​
+
+Dapr Workflows orchestrate multi-step processes. Observability reveals which steps are slow, which fail, and how long workflows take end-to-end.
+
+Key Workflow Metrics​
+Metric	What It Measures	Why It Matters
+dapr_workflow_execution_count	Workflow executions started	Throughput
+dapr_workflow_activity_execution_count	Activity invocations	Per-step volume
+dapr_workflow_execution_duration_seconds	Total workflow duration	End-to-end performance
+dapr_workflow_activity_duration_seconds	Activity duration	Per-step performance
+dapr_workflow_failure_count	Failed workflows	Error rate
+dapr_workflow_activity_failure_count	Failed activities	Per-step error rate
+PromQL Queries for Workflows​
+
+Workflow execution rate by workflow type:
+
+sum(rate(dapr_workflow_execution_count[5m])) by (workflow_name)
+
+
+Output:
+
+{workflow_name="OrderProcessingWorkflow"} 12.3
+{workflow_name="TaskApprovalWorkflow"} 4.5
+
+
+Activity step duration (identify slow steps):
+
+histogram_quantile(0.95,
+  rate(dapr_workflow_activity_duration_seconds_bucket[5m])
+) by (activity_name)
+
+
+Output:
+
+{activity_name="SendEmail"} 0.250
+{activity_name="UpdateDatabase"} 0.045
+{activity_name="CallExternalAPI"} 1.200
+
+
+CallExternalAPI takes 1.2 seconds at P95. That's your bottleneck.
+
+Workflow failure rate:
+
+sum(rate(dapr_workflow_failure_count[5m])) by (workflow_name)
+/
+sum(rate(dapr_workflow_execution_count[5m])) by (workflow_name)
+
+
+Output:
+
+{workflow_name="OrderProcessingWorkflow"} 0.02
+{workflow_name="TaskApprovalWorkflow"} 0.00
+
+
+OrderProcessingWorkflow has a 2% failure rate. Drill into traces to find the failing step.
+
+Tracing Workflow Execution​
+
+Workflow traces show the full orchestration:
+
+task-api: Start OrderProcessingWorkflow
+  [2.5s] OrderProcessingWorkflow
+    [45ms] Activity: ValidateOrder
+    [200ms] Activity: ReserveInventory
+    [1200ms] Activity: ProcessPayment  <-- Bottleneck
+    [250ms] Activity: SendConfirmation
+    [100ms] Activity: UpdateAnalytics
+
+
+The trace reveals that ProcessPayment dominates workflow duration. Optimize there first.
+
+Correlating App Traces with Dapr Traces​
+
+Your application might already emit its own traces using OpenTelemetry. How do you connect them with Dapr's traces?
+
+Trace Context Propagation​
+
+Dapr automatically propagates trace context (W3C Trace Context headers) through sidecars. When your app makes an HTTP call to localhost:3500, Dapr extracts the trace context and includes it in downstream operations.
+
+For full correlation, instrument your FastAPI app with OpenTelemetry and export to the same Jaeger instance:
+
+# main.py
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+# Configure tracing
+provider = TracerProvider()
+exporter = OTLPSpanExporter(
+    endpoint="otel-collector.monitoring:4317",
+    insecure=True
+)
+provider.add_span_processor(BatchSpanProcessor(exporter))
+trace.set_tracer_provider(provider)
+
+# Instrument FastAPI
+app = FastAPI()
+FastAPIInstrumentor.instrument_app(app)
+
+
+Now your app's spans and Dapr's spans share the same trace ID. In Jaeger, you see the complete picture:
+
+task-api: POST /tasks/create
+  [2ms] FastAPI middleware
+  [1ms] Application: validate_task()
+  [40ms] dapr: state/set (statestore)
+    [38ms] Redis SET
+  [5ms] dapr: publish (pubsub)
+    [4ms] Kafka produce
+  [1ms] Application: format_response()
+
+
+Your code (2ms + 1ms + 1ms = 4ms) versus Dapr (40ms + 5ms = 45ms). Crystal clear.
+
+Dapr System Components Observability​
+
+The Dapr control plane components (dapr-operator, dapr-placement, dapr-sentry) also expose metrics. Monitor them to ensure platform health:
+
+# monitoring/dapr-system-podmonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dapr-system
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - dapr-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: dapr
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+
+
+Key system metrics:
+
+Component	Metric	Purpose
+dapr-placement	dapr_placement_actor_table_entries	Actors registered in placement table
+dapr-operator	dapr_operator_reconcile_duration_seconds	Component reconciliation performance
+dapr-sentry	dapr_sentry_cert_sign_count	Certificate signing operations
+Reflect on Your Skill​
+
+Your observability-cost-engineer skill should now include Dapr integration patterns. Test it:
+
+Test Your Skill​
+Using my observability-cost-engineer skill, configure Dapr observability for my
+Kubernetes cluster. I need:
+- Metrics scraped by Prometheus from all Dapr sidecars
+- Traces exported to Jaeger via OpenTelemetry
+- Actor and workflow metrics visible in Grafana
+
+Generate the Configuration CRD, PodMonitor, and explain how to verify it's working.
+
+
+Does your skill produce:
+
+Complete Dapr Configuration with metrics and tracing enabled?
+PodMonitor for scraping sidecar metrics?
+Verification steps to confirm observability is working?
+Identify Gaps​
+
+Ask yourself:
+
+Can my skill explain the difference between ServiceMonitor and PodMonitor for Dapr sidecars?
+Does it know the key actor metrics (dapr_actor_invocations_total, dapr_actor_pending_calls)?
+Can it generate PromQL queries for workflow step duration analysis?
+Does it understand trace context propagation between app and Dapr?
+Improve Your Skill​
+
+If gaps exist:
+
+My observability-cost-engineer skill needs better Dapr coverage. Update it to include:
+- Dapr Configuration CRD with OpenTelemetry tracing settings
+- PodMonitor for scraping sidecar metrics (not ServiceMonitor)
+- Key actor metrics and their meanings
+- Key workflow metrics and their meanings
+- Trace correlation between application and Dapr spans
+- Sampling rate guidance (100% dev, 10% production)
+
+Try With AI​
+
+Open your AI companion and explore Dapr observability scenarios.
+
+Prompt 1: Configure End-to-End Dapr Observability​
+Help me configure complete Dapr observability for my Kubernetes cluster.
+
+Current setup:
+- Prometheus operator installed (kube-prometheus-stack)
+- Jaeger deployed in monitoring namespace
+- Dapr installed in dapr-system namespace
+- My Task API uses Dapr for state, pub/sub, and service invocation
+
+I need:
+1. Dapr Configuration CRD that enables metrics and OpenTelemetry tracing
+2. PodMonitor to scrape Dapr sidecar metrics
+3. The deployment annotation to apply the configuration
+4. Verification commands to confirm everything is working
+
+Also explain: why PodMonitor instead of ServiceMonitor for Dapr sidecars?
+
+
+What you're learning: The complete flow from Dapr configuration to Prometheus/Jaeger integration. The AI helps you understand why sidecars require PodMonitor (no dedicated Service) rather than ServiceMonitor.
+
+Prompt 2: Debug Actor Performance Issues​
+My Dapr Actors are responding slowly. Users report 2-3 second response times
+for ChatAgent actors that should respond in under 100ms.
+
+I have Prometheus and Jaeger configured for Dapr. Walk me through systematic
+debugging:
+
+1. What PromQL queries identify which actor methods are slow?
+2. How do I find if pending_calls is building up (turn-based backlog)?
+3. In Jaeger, how do I trace an actor method to see if state operations are slow?
+4. What's the difference between actor method time and state store time?
+
+Give me specific queries and what the results would indicate.
+
+
+What you're learning: Using Dapr-specific metrics and traces to diagnose actor performance. The AI guides you through metrics-then-traces workflow for root cause analysis.
+
+Prompt 3: Monitor Dapr Workflow Health​
+I'm running Dapr Workflows for order processing. Some workflows take 30+ seconds
+when they should complete in 5 seconds. Others are failing silently.
+
+Help me build observability for these workflows:
+1. PromQL query to find which activity steps are slowest
+2. PromQL query to calculate workflow failure rate by workflow type
+3. How to trace a specific workflow execution in Jaeger
+4. Alerting rules for workflow step timeouts and failure thresholds
+
+My workflow has these activities: ValidateOrder, ReserveInventory, ProcessPayment,
+SendConfirmation. Which metrics tell me where to investigate?
+
+
+What you're learning: Workflow-specific observability patterns. The AI helps you translate workflow concepts (steps, activities, execution) into PromQL queries and tracing strategies.
+
+Safety Note​
+
+Dapr observability adds overhead. Each sidecar exposes metrics (memory for metric storage) and exports traces (CPU for serialization, network for transmission). With samplingRate: "1" (100% tracing), every request generates trace data. In high-throughput production:
+
+Reduce sampling to 10% or 1% (samplingRate: "0.1" or "0.01")
+Set resource limits on sidecars via annotations (dapr.io/sidecar-cpu-limit, dapr.io/sidecar-memory-limit)
+Monitor the observability pipeline itself (Prometheus storage, Jaeger ingestion rate)
+
+If your observability system can't keep up with your application's volume, you'll lose visibility precisely when you need it most.

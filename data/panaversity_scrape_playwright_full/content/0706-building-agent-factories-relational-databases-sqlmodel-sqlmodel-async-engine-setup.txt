@@ -1,0 +1,438 @@
+SQLModel + Async Engine Setup
+
+Before your agent can read or write data, you need a database engine. The engine manages connections, handles pooling, and translates your Python code into SQL.
+
+For async operations, you use create_async_engine from SQLAlchemy—and configure it for production reliability.
+
+Installation​
+
+Install the async database stack:
+
+pip install sqlmodel sqlalchemy[asyncio] asyncpg alembic
+
+
+Output:
+
+Successfully installed sqlmodel-0.0.22 sqlalchemy-2.0.35 asyncpg-0.29.0 alembic-1.13.1 greenlet-3.0.3
+
+
+For local testing with SQLite:
+
+pip install aiosqlite
+
+
+What each package does:
+
+Package	Purpose
+sqlmodel	ORM combining Pydantic + SQLAlchemy
+sqlalchemy[asyncio]	Async engine and session support
+asyncpg	PostgreSQL async driver
+alembic	Database migrations
+aiosqlite	SQLite async driver (testing)
+Creating the Async Engine​
+
+The engine is your connection to the database. Create it once at application startup:
+
+from sqlalchemy.ext.asyncio import create_async_engine
+
+DATABASE_URL = "postgresql+asyncpg://user:password@localhost:5432/taskdb"
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,  # Log SQL statements (dev only)
+)
+
+
+Output (when using echo=True):
+
+2024-01-15 10:30:00,123 INFO sqlalchemy.engine.Engine SELECT 1
+2024-01-15 10:30:00,125 INFO sqlalchemy.engine.Engine [generated in 0.00012s] ()
+
+URL Format: Sync to Async​
+
+Database URLs have a protocol prefix that specifies the driver. For async, you need async-compatible drivers:
+
+Sync URL	Async URL	Driver
+postgresql://...	postgresql+asyncpg://...	asyncpg
+sqlite:///./test.db	sqlite+aiosqlite:///./test.db	aiosqlite
+
+Create a helper function to handle this conversion:
+
+def get_async_database_url(url: str) -> str:
+    """Convert sync database URL to async format."""
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        # Heroku-style URLs
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("sqlite:///"):
+        return url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+    return url  # Already async or unknown format
+
+
+Output:
+
+>>> get_async_database_url("postgresql://user:pass@localhost/db")
+'postgresql+asyncpg://user:pass@localhost/db'
+
+Production Pooling Configuration​
+
+Connection pools maintain a set of database connections ready for use. Without pooling, every query opens a new connection—slow and resource-intensive.
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=settings.debug,
+    pool_size=5,         # Maintain 5 connections
+    max_overflow=10,     # Allow up to 15 total under load
+    pool_pre_ping=True,  # Check connection health before use
+    pool_recycle=300,    # Recreate connections every 5 minutes
+)
+
+
+What each parameter does:
+
+Parameter	Value	Why
+pool_size	5	Base number of connections kept open
+max_overflow	10	Extra connections allowed during spikes
+pool_pre_ping	True	Prevents "connection closed" errors
+pool_recycle	300	Handles cloud DB connection timeouts
+
+pool_pre_ping=True is essential. Managed databases (Neon, Supabase, RDS) close idle connections. Without pre-ping, your first query after idle time fails.
+
+Connection Pooling Deep Dive​
+
+Understanding pools prevents production outages.
+
+How Pooling Works​
+Application                    Connection Pool                   Database
+    │                               │                               │
+    ├── Request 1 ─────────────────►│ [conn1: busy]                 │
+    │                               │ [conn2: idle] ◄───────────────┤
+    ├── Request 2 ─────────────────►│ [conn2: busy]                 │
+    │                               │ [conn3: idle]                 │
+    │   Request 1 done ────────────►│ [conn1: idle] ◄── returned    │
+    │                               │                               │
+
+
+Lifecycle:
+
+Pool creates pool_size connections at startup
+When you request a session, pool gives you an idle connection
+When you're done, connection returns to pool (not closed)
+Under load, pool creates up to pool_size + max_overflow connections
+Overflow connections are closed when returned, not kept
+Pool Exhaustion​
+
+When all connections are busy and overflow is maxed:
+
+# This will hang waiting for a connection
+async with AsyncSession(engine) as session:
+    await session.exec(select(Task))  # Blocked!
+
+
+Symptoms:
+
+Requests hang then timeout
+Logs show: QueuePool limit of size 5 overflow 10 reached
+
+Causes:
+
+Long-running transactions - Hold connections too long
+Forgotten sessions - Not closing sessions properly
+N+1 queries - Many sequential queries
+Pool too small - Undersized for traffic
+
+Fixes:
+
+# Set pool timeout to fail fast instead of hanging
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,  # Fail after 30s waiting for connection
+)
+
+Sizing Your Pool​
+Application Type	pool_size	max_overflow	Why
+Low traffic API	2	5	Save resources
+Standard API	5	10	Good default
+High traffic API	10	20	Handle concurrency
+Background worker	2	3	Sequential processing
+
+Rule of thumb: pool_size + max_overflow ≤ database max connections / number of app instances
+
+External Pool Managers (PgBouncer)​
+
+For high-scale deployments, use external poolers:
+
+Application ──► PgBouncer ──► PostgreSQL
+(many conns)   (pool mgr)    (few conns)
+
+
+When to use PgBouncer:
+
+100+ concurrent connections needed
+Serverless (many cold starts)
+Multiple applications sharing one database
+
+Configuration with PgBouncer:
+
+# Disable SQLAlchemy pooling when using PgBouncer
+from sqlalchemy.pool import NullPool
+
+engine = create_async_engine(
+    DATABASE_URL,
+    poolclass=NullPool,  # Let PgBouncer handle pooling
+)
+
+Connection Security​
+
+Database credentials are high-value targets. Secure them properly.
+
+Never Hardcode Credentials​
+# WRONG - credentials in code
+DATABASE_URL = "postgresql+asyncpg://admin:supersecret@db.example.com/prod"
+
+# RIGHT - environment variable
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+Use .env for Local Development​
+# .env (add to .gitignore!)
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/taskdb
+
+# Load with python-dotenv
+from dotenv import load_dotenv
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+Secret Managers in Production​
+Platform	Secret Manager
+AWS	Secrets Manager, Parameter Store
+GCP	Secret Manager
+Azure	Key Vault
+Kubernetes	Secrets (encrypted at rest)
+
+Example with AWS Secrets Manager:
+
+import boto3
+import json
+
+def get_database_url() -> str:
+    """Fetch database URL from AWS Secrets Manager."""
+    client = boto3.client("secretsmanager")
+    response = client.get_secret_value(SecretId="prod/taskdb/credentials")
+    secret = json.loads(response["SecretString"])
+
+    return (
+        f"postgresql+asyncpg://{secret['username']}:{secret['password']}"
+        f"@{secret['host']}:{secret['port']}/{secret['database']}"
+    )
+
+SSL/TLS for Database Connections​
+
+Always use SSL in production:
+
+# PostgreSQL with SSL
+engine = create_async_engine(
+    DATABASE_URL,
+    connect_args={
+        "ssl": "require",  # Require SSL
+        # Or for self-signed certs:
+        # "ssl": ssl.create_default_context(cafile="path/to/ca.crt")
+    },
+)
+
+
+Verify SSL is working:
+
+-- In PostgreSQL
+SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+-- Should show: ssl = true
+
+SQLite for Testing​
+
+For local development and CI, use SQLite with async:
+
+import os
+
+if os.getenv("TESTING"):
+    DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    DATABASE_URL = get_async_database_url(os.getenv("DATABASE_URL"))
+    engine = create_async_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=5,
+    )
+
+
+Output (SQLite creation):
+
+Created test.db (0 tables)
+
+
+Why SQLite for testing?
+
+No server required
+Fast for unit tests
+Compatible with most SQLModel features
+
+Limitations:
+
+No JSONB (use JSON instead for tests)
+Different SQL dialect for some queries
+Creating Tables​
+
+After defining models (next lesson), create tables:
+
+from sqlmodel import SQLModel
+
+async def create_db_and_tables() -> None:
+    """Create all database tables."""
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+
+Output:
+
+INFO sqlalchemy.engine.Engine CREATE TABLE task (...)
+INFO sqlalchemy.engine.Engine COMMIT
+
+
+Call this at application startup:
+
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await create_db_and_tables()
+    yield
+    await engine.dispose()
+
+app = FastAPI(lifespan=lifespan)
+
+Complete Database Configuration​
+
+Here's a production-ready setup. Create database.py:
+
+import os
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
+from collections.abc import AsyncGenerator
+
+def get_async_database_url(url: str) -> str:
+    """Convert sync database URL to async format."""
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("sqlite:///"):
+        return url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+    return url
+
+DATABASE_URL = get_async_database_url(
+    os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./dev.db")
+)
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=os.getenv("DEBUG", "false").lower() == "true",
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
+
+async def create_db_and_tables() -> None:
+    """Create all database tables."""
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+async def get_session() -> AsyncGenerator[AsyncSession]:
+    """Dependency that yields async database sessions."""
+    async with AsyncSession(engine) as session:
+        yield session
+
+
+Output (on startup):
+
+Database configured: postgresql+asyncpg://...
+Pool size: 5, max overflow: 10
+Tables created successfully
+
+Try With AI​
+Prompt 1: Debug Connection Issues​
+I'm getting this error when my FastAPI app starts:
+"asyncpg.exceptions.InvalidPasswordError: password authentication failed"
+
+My DATABASE_URL is: postgresql://user:pass@localhost:5432/taskdb
+
+What's wrong and how do I fix it?
+
+
+What you're learning: URL format debugging—a common source of connection failures.
+
+Prompt 2: Optimize for Cloud​
+I'm deploying to Railway with a managed PostgreSQL database.
+My connections keep timing out after 5 minutes of inactivity.
+
+Show me the engine configuration that handles this, and explain
+each parameter.
+
+
+What you're learning: Production pooling—configuring for managed database services.
+
+Prompt 3: Environment-Based Configuration​
+I need different database configurations for:
+- Development: SQLite, echo=True
+- Testing: SQLite, echo=False
+- Production: PostgreSQL with pooling
+
+Show me how to structure database.py to handle all three
+environments using environment variables.
+
+
+What you're learning: Environment configuration—adapting database setup for different deployment contexts.
+
+Safety Note​
+
+Never commit database credentials to version control. Use environment variables or secret managers. For local development, use .env files excluded from git.
+
+Reflect on Your Skill​
+
+You built a relational-db-agent skill in Lesson 0. Test its engine configuration knowledge.
+
+Test Your Skill​
+Using my relational-db-agent skill, generate a production-ready
+database.py with:
+- Async engine for PostgreSQL
+- Connection pooling with pool_pre_ping
+- URL conversion function
+- get_session dependency for FastAPI
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include pool_pre_ping=True?
+Did it handle the URL conversion correctly?
+Did it structure get_session() with async with and yield?
+Did it include pool_recycle for cloud databases?
+Improve Your Skill​
+
+If you found gaps:
+
+My relational-db-agent skill is missing pool_recycle configuration.
+Update it to include pool_recycle=300 for managed database services
+like Neon, Supabase, and Railway that close idle connections.
+
+
+Your skill now generates cloud-ready database configurations.

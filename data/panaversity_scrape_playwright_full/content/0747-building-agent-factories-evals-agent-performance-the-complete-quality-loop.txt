@@ -1,0 +1,593 @@
+The Complete Quality Loop
+
+You've learned the pieces. Datasets that capture real user behavior. Graders that define "good" with binary precision. Error analysis that reveals where failures cluster. Component evals that isolate problems. Regression protection that prevents backsliding.
+
+But pieces alone don't ship agents. What matters is how they work together as a system.
+
+Andrew Ng, who has observed hundreds of teams building AI agents, distills successful agent development into a single insight:
+
+"When I'm building these workflows, there are two major activities. One is building the workflow, you know, prompting the agent or agents. And the second is then looking at the outputs and error analysis and adjusting based on learnings."
+
+Two activities. Building and analysis. The teams that master this loop ship reliable agents. The teams that don't keep wondering why their agents "work in testing but fail in production."
+
+This lesson brings everything together into the complete quality loop.
+
+The Two Activities Framework​
+
+Andrew Ng's observation is deceptively simple. Agent development alternates between two modes:
+
+Building Mode
+
+Writing prompts
+Configuring tools
+Setting up guardrails
+Designing agent architecture
+Making changes to improve quality
+
+Analysis Mode
+
+Running evals
+Reading outputs
+Finding patterns in failures
+Identifying which component is broken
+Measuring improvement from changes
+
+Most developers spend 90% of their time in building mode and 10% in analysis mode. Successful agent builders flip this ratio. They spend more time understanding WHY their agent fails than they spend writing code to fix it.
+
+The counterintuitive truth: The path to shipping faster is slowing down to analyze.
+
+When you guess at fixes, you might get lucky. But usually you fix the wrong thing, introduce new problems, or make marginal improvements that don't address root causes. When you analyze systematically, you find high-leverage fixes that improve multiple test cases at once.
+
+The complete loop formalizes this insight into a repeatable process.
+
+The Complete 10-Step Loop​
+
+Here's the full quality loop, synthesizing everything from this chapter:
+
+          THE COMPLETE QUALITY LOOP
+    ======================================
+
+    1. BUILD quick-and-dirty agent v1
+           |
+           v
+    2. CREATE eval dataset (10-20 cases)
+           |
+           v
+    3. RUN evals --> Find initial score (often 60-70%)
+           |
+           v
+    4. ERROR ANALYSIS --> "45% errors from routing"
+           |
+           v
+    5. FIX routing --> Re-run evals --> Score improves
+           |
+           v
+    6. ERROR ANALYSIS --> "30% errors from output format"
+           |
+           v
+    7. FIX format --> Re-run evals --> Score improves
+           |
+           v
+    8. DECISION: Ship or iterate?
+           |
+           +-----> If < threshold: Return to step 4
+           |
+           v
+    9. DEPLOY with regression protection
+           |
+           v
+   10. MONITOR production --> Add failed cases to dataset
+           |
+           +-----> Return to step 3 (continuous improvement)
+
+
+Each step builds on skills from earlier lessons:
+
+Step	Chapter Lesson	Skill Applied
+1	L00	Agent-evals skill foundation
+2	L03	Dataset design (typical, edge, error cases)
+3	L04-L05	Graders (binary criteria, LLM judges)
+4	L06	Error analysis (trace reading, pattern counting)
+5-7	L07	Component vs end-to-end focus
+8	This lesson	Ship decision framework
+9	L08	Regression protection
+10	L03	Growing datasets from production
+
+This isn't a linear process you complete once. It's a cycle you run continuously. Even after shipping, production failures feed back into your eval dataset, triggering new iterations.
+
+The Iteration Pattern: 70% to 85% to 92%​
+
+Let's trace a realistic improvement journey for the Task API agent:
+
+Iteration 1: Initial Baseline
+
+Pass rate: 70%
+
+Error breakdown:
+- routing_correct: 65%
+- tool_selection: 80%
+- output_format: 75%
+- helpful_response: 60%
+
+Error analysis: 45% of failures trace to routing.
+User says "what's on my plate today?" and agent
+creates a new task instead of listing existing ones.
+
+Action: Improve routing prompt with explicit examples
+
+
+Iteration 2: After Routing Fix
+
+Pass rate: 85%
+
+Error breakdown:
+- routing_correct: 92%  (improved!)
+- tool_selection: 82%
+- output_format: 78%
+- helpful_response: 72%
+
+Error analysis: 30% of remaining failures are output format.
+Task lists display as JSON instead of friendly text.
+
+Action: Add output formatting instructions
+
+
+Iteration 3: After Format Fix
+
+Pass rate: 92%
+
+Error breakdown:
+- routing_correct: 92%
+- tool_selection: 88%
+- output_format: 95%  (improved!)
+- helpful_response: 87%
+
+Error analysis: Remaining failures are edge cases -
+ambiguous requests where multiple interpretations are valid.
+
+Decision: 92% meets threshold. Ship.
+
+
+Notice the pattern: Each iteration targets the lowest-scoring component. This is highest-leverage improvement. Fixing a 60% component to 90% yields bigger gains than polishing a 90% component to 95%.
+
+The math is simple: Improving helpful_response from 60% to 87% adds 27 percentage points. Improving routing_correct from 92% to 98% adds only 6 points. Focus on the worst component first.
+
+When to Ship: The Decision Framework​
+
+Not every agent needs 99% quality. The threshold depends on stakes, alternatives, and improvement trajectory.
+
+Pass Rate	Decision	Appropriate When
+≥95%	Ship with confidence	High-stakes agents, customer-facing, replacing humans
+90-95%	Ship with light monitoring	Normal agents, users have fallback options
+80-90%	Ship if low-stakes, with active monitoring	Internal tools, experimental features, clear "beta" labeling
+70-80%	Ship only for demos/prototypes	Not production-ready; iterate before real users
+≤70%	Keep iterating	Too unreliable for any production use
+
+Beyond the number: Pass rate alone doesn't determine ship readiness. Also consider:
+
+Improvement trajectory: Are you still making gains? If you jumped from 70% to 88% in two iterations, you're likely to reach 95% with one more push. If you've been stuck at 88% for five iterations, you're hitting diminishing returns.
+
+Failure modes: A 90% agent that fails gracefully ("I'm not sure, let me get a human") is more shippable than a 92% agent that fails confidently with wrong answers.
+
+User expectations: Internal tools tolerate more failures than customer-facing products. "Beta" labels buy forgiveness. Mission-critical workflows demand near-perfection.
+
+Cost of delay: If users are currently doing this task manually with 75% accuracy, an 85% agent is an improvement. Don't let perfect be the enemy of deployed.
+
+from dataclasses import dataclass
+
+@dataclass
+class ShipDecisionContext:
+    """Context for making ship/iterate decisions."""
+    pass_rate: float
+    iterations_at_this_level: int
+    failure_mode: str  # "graceful" or "confident_wrong"
+    user_stakes: str  # "high", "medium", "low"
+    current_alternative_quality: float  # What's the baseline without agent?
+
+
+def should_ship(context: ShipDecisionContext) -> dict:
+    """
+    Decide whether to ship based on quality and context.
+
+    Returns:
+        Decision with reasoning
+    """
+    # High-stakes requires high quality
+    if context.user_stakes == "high" and context.pass_rate < 0.95:
+        return {
+            "decision": "ITERATE",
+            "reason": f"High-stakes use case requires 95%+; currently at {context.pass_rate:.0%}"
+        }
+
+    # Diminishing returns detection
+    if context.iterations_at_this_level >= 3:
+        if context.pass_rate >= 0.85:
+            return {
+                "decision": "SHIP",
+                "reason": f"Diminishing returns after {context.iterations_at_this_level} iterations; {context.pass_rate:.0%} is acceptable"
+            }
+
+    # Better than current alternative
+    if context.pass_rate > context.current_alternative_quality + 0.10:
+        if context.failure_mode == "graceful":
+            return {
+                "decision": "SHIP",
+                "reason": f"10%+ improvement over current ({context.current_alternative_quality:.0%}), graceful failures"
+            }
+
+    # Standard thresholds
+    if context.pass_rate >= 0.90:
+        return {"decision": "SHIP", "reason": f"{context.pass_rate:.0%} meets standard threshold"}
+
+    if context.pass_rate >= 0.80 and context.user_stakes == "low":
+        return {"decision": "SHIP_WITH_MONITORING", "reason": "80%+ acceptable for low-stakes with monitoring"}
+
+    return {"decision": "ITERATE", "reason": f"{context.pass_rate:.0%} below threshold for {context.user_stakes}-stakes use"}
+
+
+Output:
+
+context = ShipDecisionContext(
+    pass_rate=0.88,
+    iterations_at_this_level=4,
+    failure_mode="graceful",
+    user_stakes="medium",
+    current_alternative_quality=0.70
+)
+
+result = should_ship(context)
+print(f"Decision: {result['decision']}")
+print(f"Reason: {result['reason']}")
+
+Decision: SHIP
+Reason: Diminishing returns after 4 iterations; 88% is acceptable
+
+Cost and Latency: Only AFTER Quality​
+
+A common mistake: optimizing for cost and speed before the agent works well.
+
+The correct order:
+
+Quality first: Get pass rate above threshold
+Then latency: Reduce response time for user experience
+Then cost: Optimize inference spending
+
+Why this order matters: A fast, cheap agent that gives wrong answers is worthless. Users don't care about 200ms response time if the response is unhelpful. Saving $0.02 per request means nothing if users abandon the product.
+
+Only after quality meets your threshold should you ask: "Can we maintain this quality while reducing latency/cost?"
+
+Cost and latency optimization techniques (apply AFTER quality threshold met):
+
+Technique	Quality Impact	Cost Reduction	Latency Reduction
+Use smaller model	Risk regression	High	High
+Cache common responses	None if done correctly	High	Very high
+Reduce prompt length	Risk regression	Medium	Medium
+Batch similar requests	None	Medium	Negative (increases)
+Use tool caching	None if stateless	Medium	High
+
+Critical: Run your full eval suite after ANY optimization. Cost savings that cause quality regression are not savings—they're damage.
+
+def optimize_after_quality(
+    baseline: EvalRun,
+    optimized: EvalRun,
+    cost_before: float,
+    cost_after: float
+) -> dict:
+    """
+    Evaluate whether optimization is worthwhile.
+
+    Only accept if quality maintained and meaningful savings achieved.
+    """
+    quality_delta = optimized.pass_rate - baseline.pass_rate
+
+    # Reject if quality dropped
+    if quality_delta < -0.02:  # 2% tolerance
+        return {
+            "accept": False,
+            "reason": f"Quality dropped {abs(quality_delta):.1%}. Reject optimization."
+        }
+
+    cost_savings = (cost_before - cost_after) / cost_before
+
+    # Accept if quality maintained and savings meaningful
+    if quality_delta >= -0.02 and cost_savings >= 0.15:
+        return {
+            "accept": True,
+            "reason": f"Quality maintained ({quality_delta:+.1%}), cost reduced {cost_savings:.0%}"
+        }
+
+    return {
+        "accept": False,
+        "reason": f"Savings too small ({cost_savings:.0%}) to justify optimization effort"
+    }
+
+
+Output:
+
+from dataclasses import dataclass
+
+@dataclass
+class EvalRun:
+    pass_rate: float
+
+baseline = EvalRun(pass_rate=0.92)
+optimized = EvalRun(pass_rate=0.90)  # Small quality drop
+
+result = optimize_after_quality(baseline, optimized, cost_before=0.05, cost_after=0.02)
+print(f"Accept: {result['accept']}")
+print(f"Reason: {result['reason']}")
+
+Accept: True
+Reason: Quality maintained (-2.0%), cost reduced 60%
+
+Example: Complete Cycle with Task API Agent​
+
+Let's walk through the complete loop for the Task API agent:
+
+Step 1: Build v1
+
+task_agent = TaskAPIAgent(
+    model="gpt-4",
+    tools=["create_task", "list_tasks", "update_task", "delete_task"],
+    system_prompt="You help users manage their tasks..."
+)
+
+
+Step 2: Create eval dataset
+
+eval_cases = [
+    # Typical cases (10)
+    {"input": "Add buy groceries to my list", "expected": "creates_task"},
+    {"input": "What's on my plate today?", "expected": "lists_tasks"},
+    {"input": "Mark the grocery task done", "expected": "updates_task"},
+    # ... 7 more typical cases
+
+    # Edge cases (5)
+    {"input": "rm * ", "expected": "clarifies_intent"},  # Could be delete, could be gibberish
+    {"input": "", "expected": "asks_for_input"},  # Empty input
+    # ... 3 more edge cases
+
+    # Error cases (5)
+    {"input": "Delete task ID 99999", "expected": "graceful_not_found"},
+    # ... 4 more error cases
+]
+
+
+Step 3: Run initial evals
+
+Pass rate: 68%
+
+routing_correct: 60%
+tool_selection: 75%
+output_format: 72%
+helpful_response: 65%
+
+
+Step 4: Error analysis
+
+Examining 32% of failures (16 cases):
+
+- 7 cases: Routing errors (user asked to list, agent created)
+- 4 cases: Output format (JSON instead of friendly text)
+- 3 cases: Unhelpful responses (too brief, missed context)
+- 2 cases: Tool selection (used update when should delete)
+
+Highest concentration: Routing (7/16 = 44% of errors)
+
+
+Step 5: Fix routing
+
+# Enhanced system prompt with explicit routing examples
+system_prompt = """
+You help users manage their tasks. Route carefully:
+
+LISTING words: "what's on", "show me", "list", "what do I have"
+-> Call list_tasks
+
+CREATING words: "add", "create", "remind me to", "new task"
+-> Call create_task
+
+UPDATING words: "mark done", "complete", "change", "update"
+-> Call update_task
+
+DELETING words: "remove", "delete", "cancel"
+-> Call delete_task
+"""
+
+
+Iteration 2 results:
+
+Pass rate: 82% (up from 68%)
+
+routing_correct: 88% (was 60%)
+tool_selection: 80%
+output_format: 75%
+helpful_response: 72%
+
+
+Steps 6-7: Fix output format
+
+# Add formatting instructions
+output_instructions = """
+Always format responses as friendly text, not JSON.
+
+GOOD: "Here are your 3 tasks for today:
+- Buy groceries (due today)
+- Call mom (due tomorrow)
+- Prepare presentation (due Friday)"
+
+BAD: {"tasks": [{"title": "Buy groceries", ...}]}
+"""
+
+
+Iteration 3 results:
+
+Pass rate: 91%
+
+routing_correct: 88%
+tool_selection: 85%
+output_format: 94%
+helpful_response: 88%
+
+
+Step 8: Ship decision
+
+91% pass rate with:
+- Medium-stakes use case (personal task management)
+- Graceful failure mode (agent asks clarifying questions)
+- 4 iterations completed
+- Current alternative: Manual task management (~60% completion rate)
+
+Decision: SHIP
+
+
+Step 9: Deploy with regression protection
+
+# Baseline locked at 91%
+regression_config = RegressionConfig(
+    overall_threshold=0.05,  # Alert if drops more than 5%
+    criterion_threshold=0.10,
+    block_on_regression=True
+)
+
+
+Step 10: Monitor production
+
+Week 1 production:
+- 2 new failure modes discovered
+- Added to eval dataset (now 25 cases)
+- Re-ran evals: 89% (slight drop from production variety)
+- New iteration: Improved edge case handling
+- Current: 93%
+
+Exercise: Document Your Improvement Journey​
+
+Take an agent you're building (or plan to build) and document your complete quality loop:
+
+Phase 1: Planning
+
+What are your 5 key evaluation criteria?
+What's your target pass rate for shipping?
+What's your regression protection threshold?
+
+Phase 2: Initial Cycle 4. Create a 15-case eval dataset (8 typical, 4 edge, 3 error) 5. Run initial evals and record baseline 6. Perform error analysis: Where do failures cluster?
+
+Phase 3: Iteration 7. Make one focused fix targeting the highest-error component 8. Re-run evals and record improvement 9. Repeat until you hit threshold or diminishing returns
+
+Phase 4: Ship Decision 10. Document your decision: Ship, ship with monitoring, or iterate? 11. What factors beyond pass rate influenced your decision?
+
+Phase 5: Production 12. How will you capture production failures for dataset growth? 13. What's your schedule for regression checks?
+
+Reflect on Your Skill​
+
+This lesson synthesizes the entire chapter. Here's what to add to your agent-evals skill:
+
+The Complete Loop Pattern
+
+Build --> Dataset (10-20 cases) --> Evals --> Error Analysis
+   ^                                              |
+   |                                              v
+   +--------- Fix Lowest Component <--------------+
+                      |
+                      v
+              Ship Decision (≥90% or diminishing returns)
+                      |
+                      v
+              Deploy + Regression Protection
+                      |
+                      v
+              Production Monitoring --> Grow Dataset
+
+
+Ship Decision Heuristics
+
+≥95%: Ship with confidence (high-stakes OK)
+90-95%: Ship with light monitoring
+80-90%: Ship if low-stakes, active monitoring
+70-80%: Prototypes only
+≤70%: Keep iterating
+
+Also consider:
+- Improvement trajectory (still gaining vs stuck)
+- Failure mode (graceful vs confident-wrong)
+- User expectations (internal vs customer-facing)
+- Current alternative quality (is agent better than status quo?)
+
+
+Optimization Order
+
+ALWAYS: Quality first, then latency, then cost
+
+Only optimize cost/latency AFTER quality threshold met.
+Run full eval suite after ANY optimization.
+Reject optimizations that regress quality by more than 2%.
+
+
+The Two Activities Insight
+
+Agent development = Building + Analysis
+
+Most developers: 90% building, 10% analysis
+Successful builders: Flip the ratio
+
+More time understanding failures = faster path to shipping
+Don't guess at fixes - measure where errors cluster
+
+
+The key insight for your skill: The complete quality loop isn't just a process - it's a mindset. Every change is a hypothesis. Every eval run is an experiment. Every error analysis is learning. The teams that internalize this loop ship agents that work. The teams that skip steps ship agents that "work in testing but fail in production."
+
+Try With AI​
+Prompt 1: Analyze Your Current Loop​
+I'm building an agent that [describe your agent]. Here's my current
+development process:
+
+[Describe how you currently test/improve your agent]
+
+Help me identify:
+1. Which of the 10 loop steps am I already doing?
+2. Which steps am I skipping or doing poorly?
+3. What's the highest-leverage step I should improve first?
+4. How would adding that step change my development velocity?
+
+
+What you're learning: Self-assessment of your current process. Most developers have an informal loop; making it explicit reveals gaps.
+
+Prompt 2: Design Your Ship Decision Framework​
+My agent is at 85% pass rate. Here's the context:
+- Use case: [describe]
+- User stakes: [high/medium/low]
+- Current alternative: [what do users do without the agent?]
+- Iterations so far: [number]
+- Improvement trend: [improving/flat/declining]
+
+Help me decide:
+1. Should I ship, ship with monitoring, or iterate?
+2. What specific criteria would change my decision?
+3. If I iterate, what's my target and why?
+4. If I ship, what monitoring should I set up?
+
+
+What you're learning: Ship decisions require judgment, not just thresholds. AI helps you think through the factors systematically.
+
+Prompt 3: Plan Your Optimization Phase​
+My agent is at 92% quality - above my ship threshold. Now I want to
+optimize for cost without regressing quality.
+
+Current setup:
+- Model: [model name]
+- Average tokens per request: [number]
+- Cost per request: [amount]
+- Latency: [time]
+
+Help me plan:
+1. What optimizations should I try, in what order?
+2. What's the minimum eval coverage I need before each change?
+3. How do I know if an optimization is worth the risk?
+4. What's my rollback plan if quality drops?
+
+
+What you're learning: Optimization is a disciplined process, not random tweaking. The order matters. The eval coverage matters. The rollback plan matters.
+
+Safety Note​
+
+The complete quality loop gives you confidence, but not certainty. Evals measure what you define as quality - they can't catch unknown unknowns. Production will always surface failure modes your dataset missed. Build the loop, trust the loop, but stay humble. The best agents are built by teams who assume they're missing something and keep looking for it.

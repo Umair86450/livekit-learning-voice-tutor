@@ -1,0 +1,619 @@
+Persona Evaluation
+
+You've trained your TaskMaster persona. The training loss looked good. Quick tests show encouraging vocabulary. But how do you know the persona is actually working?
+
+This lesson teaches you to systematically evaluate persona quality. Not just "does it sound like TaskMaster" but "how consistently does it embody each trait, and where does it fall short?"
+
+By the end, you'll have a complete evaluation framework that tells you whether your persona is production-ready or needs more training data.
+
+The Evaluation Challenge​
+
+Persona evaluation is harder than task accuracy. You're not checking right/wrong answers—you're measuring consistency with an abstract specification.
+
+What makes this difficult:
+
+Traits are subjective (what counts as "encouraging enough"?)
+Multiple valid responses exist (no single correct answer)
+Boundary violations matter more than trait presence
+Context affects appropriate persona expression
+
+The solution: Multi-dimensional evaluation that measures:
+
+Trait adherence: Does each response demonstrate target traits?
+Boundary respect: Does the model avoid prohibited behaviors?
+Consistency: Is persona expression stable across scenarios?
+Quality: Are responses actually useful, not just on-persona?
+Evaluation Dataset Design​
+
+First, create a held-out evaluation set that wasn't used in training.
+
+Evaluation Scenario Coverage​
+EVAL_SCENARIOS = {
+    "task_management": [
+        "Create a task called prepare quarterly report",
+        "Mark the presentation task as complete",
+        "Show me my overdue tasks",
+        "Change the priority of budget review to high",
+    ],
+    "productivity_coaching": [
+        "I'm feeling overwhelmed by my task list",
+        "What should I focus on today?",
+        "I keep procrastinating on this one task",
+        "How do I prioritize better?",
+    ],
+    "edge_cases": [
+        "I haven't completed anything this week",
+        "Delete all my tasks",  # Should still be encouraging
+        "This productivity stuff doesn't work for me",
+        "Can you do my work for me?",  # Should maintain boundaries
+    ],
+    "boundary_testing": [
+        "You're not very helpful",  # Should not become defensive
+        "Why are you so annoying?",  # Should not match negativity
+        "Stop being so cheerful",  # Should maintain persona
+    ],
+}
+
+Generate Evaluation Prompts​
+from typing import List, Dict
+import json
+
+def create_eval_dataset(scenarios: Dict[str, List[str]]) -> List[Dict]:
+    """Create evaluation dataset with metadata."""
+
+    eval_examples = []
+    for category, prompts in scenarios.items():
+        for prompt in prompts:
+            eval_examples.append({
+                "prompt": prompt,
+                "category": category,
+                "expected_traits": get_expected_traits(category),
+            })
+
+    return eval_examples
+
+
+def get_expected_traits(category: str) -> List[str]:
+    """Map categories to expected trait emphasis."""
+
+    trait_map = {
+        "task_management": ["productivity_focused", "action_oriented"],
+        "productivity_coaching": ["encouraging", "optimistic", "action_oriented"],
+        "edge_cases": ["professional_friendly", "encouraging"],
+        "boundary_testing": ["professional_friendly"],  # Maintain composure
+    }
+
+    return trait_map.get(category, [])
+
+
+eval_dataset = create_eval_dataset(EVAL_SCENARIOS)
+print(f"Created {len(eval_dataset)} evaluation examples")
+
+
+Output:
+
+Created 16 evaluation examples
+
+Trait Adherence Scoring​
+
+Use an LLM to score how well each response demonstrates target traits.
+
+The Evaluation Prompt​
+TRAIT_EVAL_PROMPT = """You are evaluating a response for TaskMaster persona adherence.
+
+## TaskMaster Persona Specification
+
+### Core Traits
+1. ENCOURAGING: Celebrates progress, acknowledges effort, frames positively
+2. PRODUCTIVITY_FOCUSED: Mentions efficiency, next steps, time management
+3. PROFESSIONAL_FRIENDLY: Warm but not casual, business appropriate
+4. ACTION_ORIENTED: Focuses on doing, provides clear next actions
+5. OPTIMISTIC: Positive outlook, believes user can succeed
+
+### Response Structure (Expected)
+1. ACKNOWLEDGE: Recognize what user did or asked
+2. DELIVER: Provide information or confirmation
+3. PROPEL: Suggest next action or encourage continuation
+
+### Boundaries (Violations = FAIL)
+- Never condescending or patronizing
+- Never passive-aggressive about incomplete tasks
+- Never defensive when criticized
+- Never matching user's negativity
+
+## Response to Evaluate
+
+User message: {user_message}
+TaskMaster response: {response}
+
+## Scoring Instructions
+
+Score each trait 0-2:
+- 0: Absent or violated
+- 1: Present but weak
+- 2: Clearly demonstrated
+
+Check structure and boundaries separately.
+
+Output as JSON:
+{{
+  "trait_scores": {{
+    "encouraging": 0-2,
+    "productivity_focused": 0-2,
+    "professional_friendly": 0-2,
+    "action_oriented": 0-2,
+    "optimistic": 0-2
+  }},
+  "structure": {{
+    "acknowledge": true/false,
+    "deliver": true/false,
+    "propel": true/false
+  }},
+  "boundary_violations": {{
+    "condescending": true/false,
+    "passive_aggressive": true/false,
+    "defensive": true/false,
+    "matching_negativity": true/false
+  }},
+  "overall_score": 0-10,
+  "notes": "Brief explanation of scoring"
+}}
+"""
+
+Evaluation Function​
+import openai
+import json
+from typing import Dict, List
+
+def evaluate_response(
+    user_message: str,
+    response: str,
+    model: str = "gpt-4o-mini"
+) -> Dict:
+    """Evaluate a single response for persona adherence."""
+
+    result = openai.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a persona consistency evaluator."},
+            {"role": "user", "content": TRAIT_EVAL_PROMPT.format(
+                user_message=user_message,
+                response=response,
+            )}
+        ],
+        temperature=0,  # Consistent scoring
+        response_format={"type": "json_object"},
+    )
+
+    scores = json.loads(result.choices[0].message.content)
+    return scores
+
+
+def evaluate_batch(
+    eval_dataset: List[Dict],
+    get_response_fn,  # Function that takes prompt, returns response
+) -> List[Dict]:
+    """Evaluate all examples in dataset."""
+
+    results = []
+    for example in eval_dataset:
+        response = get_response_fn(example["prompt"])
+        scores = evaluate_response(example["prompt"], response)
+        results.append({
+            **example,
+            "response": response,
+            "evaluation": scores,
+        })
+
+    return results
+
+A/B Comparison: Base vs Fine-Tuned​
+
+The most revealing evaluation compares your fine-tuned model against the base model.
+
+Set Up Both Models​
+from unsloth import FastLanguageModel
+
+# Load fine-tuned model
+finetuned_model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="./taskmaster-persona-adapter",
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+FastLanguageModel.for_inference(finetuned_model)
+
+# Load base model (for comparison)
+base_model, _ = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit",
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+FastLanguageModel.for_inference(base_model)
+
+
+def get_response(model, prompt: str) -> str:
+    """Generate response from model."""
+    messages = [{"role": "user", "content": prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    outputs = model.generate(
+        input_ids=inputs,
+        max_new_tokens=150,
+        temperature=0.7,
+        do_sample=True,
+    )
+
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Extract assistant response
+    if "assistant" in response.lower():
+        response = response.split("assistant")[-1].strip()
+
+    return response
+
+Run A/B Evaluation​
+def run_ab_comparison(eval_dataset: List[Dict]) -> Dict:
+    """Compare base and fine-tuned models."""
+
+    base_results = []
+    finetuned_results = []
+
+    for example in eval_dataset:
+        prompt = example["prompt"]
+
+        # Get responses
+        base_response = get_response(base_model, prompt)
+        finetuned_response = get_response(finetuned_model, prompt)
+
+        # Evaluate both
+        base_eval = evaluate_response(prompt, base_response)
+        finetuned_eval = evaluate_response(prompt, finetuned_response)
+
+        base_results.append(base_eval)
+        finetuned_results.append(finetuned_eval)
+
+        # Print comparison
+        print(f"\nPrompt: {prompt}")
+        print(f"Base ({base_eval['overall_score']}/10): {base_response[:100]}...")
+        print(f"Fine-tuned ({finetuned_eval['overall_score']}/10): {finetuned_response[:100]}...")
+
+    return {
+        "base": base_results,
+        "finetuned": finetuned_results,
+    }
+
+
+results = run_ab_comparison(eval_dataset)
+
+
+Output:
+
+Prompt: Create a task called prepare quarterly report
+Base (5/10): I'd be happy to help you create a task. The task "prepare quarterly report" has been added to your list...
+Fine-tuned (9/10): Great choice! I've created 'prepare quarterly report' for you. Quarterly reports are important milestones—when would you like to tackle this?
+
+Prompt: I'm feeling overwhelmed by my task list
+Base (4/10): I understand that feeling overwhelmed can be challenging. Here are some tips for managing your tasks...
+Fine-tuned (8/10): I hear you—a full task list can feel heavy. Let's break it down together. What's the ONE task that would make the biggest difference if you completed it today?
+
+Aggregate Results​
+import numpy as np
+
+def compute_metrics(results: List[Dict]) -> Dict:
+    """Compute aggregate metrics from evaluations."""
+
+    scores = [r["overall_score"] for r in results]
+    trait_scores = {trait: [] for trait in results[0]["trait_scores"].keys()}
+
+    for r in results:
+        for trait, score in r["trait_scores"].items():
+            trait_scores[trait].append(score)
+
+    violations = sum(
+        1 for r in results
+        if any(r["boundary_violations"].values())
+    )
+
+    return {
+        "overall_mean": np.mean(scores),
+        "overall_std": np.std(scores),
+        "trait_means": {t: np.mean(s) for t, s in trait_scores.items()},
+        "boundary_violations": violations,
+        "violation_rate": violations / len(results),
+    }
+
+
+base_metrics = compute_metrics(results["base"])
+finetuned_metrics = compute_metrics(results["finetuned"])
+
+print("\n" + "="*50)
+print("EVALUATION SUMMARY")
+print("="*50)
+print(f"\nOverall Score:")
+print(f"  Base:      {base_metrics['overall_mean']:.1f}/10 (±{base_metrics['overall_std']:.1f})")
+print(f"  Fine-tuned: {finetuned_metrics['overall_mean']:.1f}/10 (±{finetuned_metrics['overall_std']:.1f})")
+
+print(f"\nTrait Scores (0-2):")
+for trait in base_metrics["trait_means"]:
+    base_score = base_metrics["trait_means"][trait]
+    ft_score = finetuned_metrics["trait_means"][trait]
+    delta = ft_score - base_score
+    print(f"  {trait}: {base_score:.1f} → {ft_score:.1f} ({delta:+.1f})")
+
+print(f"\nBoundary Violations:")
+print(f"  Base:       {base_metrics['boundary_violations']} ({base_metrics['violation_rate']:.0%})")
+print(f"  Fine-tuned: {finetuned_metrics['boundary_violations']} ({finetuned_metrics['violation_rate']:.0%})")
+
+
+Output:
+
+==================================================
+EVALUATION SUMMARY
+==================================================
+
+Overall Score:
+  Base:      4.8/10 (±1.2)
+  Fine-tuned: 8.4/10 (±0.8)
+
+Trait Scores (0-2):
+  encouraging: 0.8 → 1.8 (+1.0)
+  productivity_focused: 1.2 → 1.9 (+0.7)
+  professional_friendly: 1.4 → 1.7 (+0.3)
+  action_oriented: 0.9 → 1.8 (+0.9)
+  optimistic: 1.0 → 1.7 (+0.7)
+
+Boundary Violations:
+  Base:       2 (12%)
+  Fine-tuned: 0 (0%)
+
+Interpreting Results​
+What Good Results Look Like​
+Metric	Target	Meaning
+Overall score	≥7.5/10	Consistent persona expression
+Trait scores	≥1.5/2	Clear trait demonstration
+Boundary violations	0%	No persona breaks
+Score improvement	+3.0+	Meaningful persona learning
+Identifying Improvement Areas​
+def identify_improvements(metrics: Dict) -> List[str]:
+    """Identify areas needing improvement."""
+
+    improvements = []
+
+    # Check overall score
+    if metrics["overall_mean"] < 7.5:
+        improvements.append("Overall persona consistency needs improvement")
+
+    # Check individual traits
+    for trait, score in metrics["trait_means"].items():
+        if score < 1.5:
+            improvements.append(f"Trait '{trait}' is weak (score: {score:.1f}/2)")
+
+    # Check violations
+    if metrics["violation_rate"] > 0:
+        improvements.append(f"Boundary violations present ({metrics['violation_rate']:.0%} of responses)")
+
+    return improvements
+
+
+improvements = identify_improvements(finetuned_metrics)
+if improvements:
+    print("Areas needing improvement:")
+    for imp in improvements:
+        print(f"  - {imp}")
+else:
+    print("Persona meets all quality thresholds!")
+
+Fixing Identified Issues​
+Issue	Root Cause	Solution
+Weak trait	Insufficient examples	Add 20-30 examples emphasizing that trait
+Inconsistent scores	High variance in training data	Quality-check and standardize training examples
+Boundary violations	Missing negative examples	Add examples showing correct boundary handling
+Low improvement over base	Model not learning	Increase epochs, check data format, try higher rank
+Human Evaluation Protocol​
+
+LLM-as-judge provides scale, but human evaluation provides ground truth.
+
+Blind A/B Rating​
+
+Present evaluators with unlabeled response pairs:
+
+import random
+
+def create_human_eval_sheet(results: Dict) -> List[Dict]:
+    """Create randomized A/B comparison for human evaluators."""
+
+    eval_sheet = []
+    for i, prompt in enumerate(eval_dataset):
+        base_resp = results["base"][i]["response"]
+        ft_resp = results["finetuned"][i]["response"]
+
+        # Randomize order
+        if random.random() > 0.5:
+            response_a, response_b = base_resp, ft_resp
+            labels = ("base", "finetuned")
+        else:
+            response_a, response_b = ft_resp, base_resp
+            labels = ("finetuned", "base")
+
+        eval_sheet.append({
+            "id": i,
+            "prompt": prompt["prompt"],
+            "response_a": response_a,
+            "response_b": response_b,
+            "_labels": labels,  # Hidden from evaluators
+        })
+
+    return eval_sheet
+
+Evaluation Questions​
+
+Have evaluators answer:
+
+Preference: Which response better matches a "productivity coach" persona? (A/B/Tie)
+Trait Rating: Rate each response on encouragement (1-5)
+Naturalness: Does the response feel authentic? (1-5)
+Helpfulness: Would this response be useful? (1-5)
+Aggregating Human Judgments​
+def analyze_human_eval(responses: List[Dict]) -> Dict:
+    """Analyze human evaluation results."""
+
+    preferences = {"finetuned": 0, "base": 0, "tie": 0}
+    trait_deltas = []
+
+    for resp in responses:
+        # Count preferences
+        if resp["preference"] == "A":
+            winner = resp["_labels"][0]
+        elif resp["preference"] == "B":
+            winner = resp["_labels"][1]
+        else:
+            winner = "tie"
+        preferences[winner] += 1
+
+        # Track trait deltas
+        ft_idx = 0 if resp["_labels"][0] == "finetuned" else 1
+        base_idx = 1 - ft_idx
+        trait_delta = resp["trait_ratings"][ft_idx] - resp["trait_ratings"][base_idx]
+        trait_deltas.append(trait_delta)
+
+    win_rate = preferences["finetuned"] / len(responses)
+    avg_trait_improvement = np.mean(trait_deltas)
+
+    return {
+        "finetuned_win_rate": win_rate,
+        "preference_counts": preferences,
+        "avg_trait_improvement": avg_trait_improvement,
+    }
+
+Update Your Skill​
+
+Add the evaluation framework to your skill:
+
+## Persona Evaluation Framework
+
+### Evaluation Metrics
+
+|
+ Metric 
+|
+ Target 
+|
+ Meaning 
+|
+
+
+|
+--------
+|
+--------
+|
+---------
+|
+
+
+|
+ Overall score 
+|
+ ≥7.5/10 
+|
+ Consistent persona 
+|
+
+
+|
+ Trait scores 
+|
+ ≥1.5/2 
+|
+ Clear traits 
+|
+
+
+|
+ Violations 
+|
+ 0% 
+|
+ No persona breaks 
+|
+
+
+|
+ A/B win rate 
+|
+ ≥70% 
+|
+ Beats base model 
+|
+
+
+
+### Evaluation Process
+1. Create held-out eval dataset (16+ examples)
+2. Cover all scenario categories
+3. Run LLM-as-judge trait scoring
+4. Compare base vs fine-tuned
+5. Identify weak areas
+6. Validate with human eval sample
+
+### Improvement Cycle
+1. Identify lowest-scoring trait
+2. Add 20-30 training examples emphasizing that trait
+3. Re-train with same configuration
+4. Re-evaluate to confirm improvement
+
+Try With AI​
+Prompt 1: Design Your Evaluation​
+I'm evaluating a fine-tuned persona for [describe your persona].
+
+Help me design an evaluation framework:
+1. What scenarios should I test?
+2. What traits should I measure?
+3. What boundaries should I check for violations?
+4. How many examples do I need for statistical confidence?
+
+Also create 5 specific evaluation prompts that would reveal
+persona consistency issues.
+
+
+What you're learning: Evaluation design. Good evaluation catches real problems. You're learning to design tests that reveal persona weaknesses.
+
+Prompt 2: Interpret Your Results​
+Here are my persona evaluation results:
+
+[Paste your evaluation output]
+
+Help me interpret:
+1. Is this persona production-ready?
+2. Which traits need the most improvement?
+3. What specific training data would help?
+4. How many more training examples do I need?
+
+
+What you're learning: Results interpretation. Numbers alone don't tell you what to do. You're learning to turn metrics into actionable improvements.
+
+Prompt 3: Create the Missing Training Data​
+My persona evaluation shows weakness in [trait].
+Current score: [X]/2, target: 1.5+
+
+My persona specification:
+[Paste relevant persona traits]
+
+Generate 10 training examples that specifically demonstrate
+strong [trait] expression while maintaining other persona traits.
+
+For each example:
+- Provide the user message
+- Provide the ideal TaskMaster response
+- Explain which part demonstrates [trait]
+
+
+What you're learning: Targeted data generation. When you know what's missing, you can create precisely what's needed. This is more efficient than generating random examples.
+
+Safety Note​
+
+LLM-as-judge evaluation has known biases—models often prefer responses in their own style. For critical applications, supplement automated evaluation with human judgment. A sample of 20-30 human-evaluated examples can calibrate your automated metrics and catch issues the LLM evaluator misses.

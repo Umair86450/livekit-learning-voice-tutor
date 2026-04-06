@@ -1,0 +1,169 @@
+Relationships & Joins
+
+In Lesson 3, you proved that rows exist by creating and reading them back. Now you will prove that rows belong together correctly. A user's expenses should belong to that user, not float around unattached. A category should link to its expenses so you can ask "show me all Food purchases" in a single query.
+
+Here is the trap: your app runs fine with 5 users. Then you get 500 users, and suddenly it is making 501 database calls instead of 2. Nobody changed any code. What happened? That is the N+1 problem, and by the end of this lesson you will know exactly how to spot it and direct your agent to fix it.
+
+KEY TERMS FOR THIS LESSON
+Relationship: A link between two types of data -- like a contact card that connects a person to their company. If users have expenses, there is a relationship between them.
+Foreign key: An enforceable promise that one piece of data references another that actually exists. An expense's user reference is a foreign key -- the database refuses to create an expense pointing to a user that does not exist.
+Cascade: When deleting one thing automatically removes related things. Deleting a user can cascade to remove their expenses. Whether it should is a business decision, not a technical default.
+N+1 problem: A hidden performance trap where loading 100 parents triggers 100 separate child queries instead of 1 -- your app works fine until it suddenly does not.
+How to Ask for Linked Data​
+
+When you need data that spans multiple entities, describe it in business terms. The agent translates your intent into the correct database operations.
+
+What you want	How to say it to the agent
+All expenses for one user	"Show me all expenses for Alice"
+Expenses filtered by category	"Show me only Food expenses for Alice"
+Data from two entities together	"For each expense, show me the category name and the user's email"
+Users with at least one expense	"Only include users who have at least one expense"
+All users, even with no expenses	"Include all users, even those with no expenses yet"
+Grouped totals	"For each category, show me the total amount and number of expenses"
+
+The key phrases are "for each" (tells the agent to link entities), "only include" (tells the agent to filter), and "must reference" (tells the agent to enforce that a link is valid). You do not need to know SQL or any programming language to describe these relationships -- you need to know what data belongs together and what questions you want answered.
+
+When to Use What​
+Need	How to say it to the agent
+All expenses for one loaded user	"For Alice, show me all her expenses"
+All expenses where category is Food	"Filter expenses where category name is Food"
+A report grouped by category	"Group all expenses by category with totals"
+
+The first request starts from a specific person and navigates to their data. The second request starts from all expenses and filters by a linked attribute. The third request aggregates across all data. These are different operations and your phrasing tells the agent which one you need.
+
+Directing a Basic Linked Query​
+
+What you tell the agent
+
+Show me all expenses for Alice in March 2024, grouped by category. Include the category name and the total amount per category. Sort by highest total first.
+
+What you verify
+
+python verify_join.py
+
+Output:
+  Alice's March 2024 expenses by category:
+    Food:          $287.45 (3 expenses)
+    Transport:     $94.20  (2 expenses)
+    Entertainment: $45.00  (1 expense)
+  Total: $426.65
+
+
+What to check: the categories are real categories from your data, the totals add up, and the sort order is correct (highest first). If the agent shows categories that Alice has no expenses in, the filtering is wrong. If the total of the per-category amounts does not match the grand total, the grouping is wrong.
+
+Directing a Filtered Linked Query​
+
+What you tell the agent
+
+Show me only Food expenses over $50 for any user. Include the user's name with each expense.
+
+What you verify
+
+python verify_food_filter.py
+
+Output:
+  Food expenses over $50:
+    - Alice: Groceries $52.50 (2024-01-15)
+    - Bob:   Weekly shop $78.20 (2024-01-18)
+  2 results found.
+
+
+What to check: every result is in the Food category (not Transport, not Entertainment), every amount is over $50, and each result includes the user's name. If you see expenses from other categories, the agent's filter is wrong. If you see amounts under $50, the threshold is wrong.
+
+PAUSE AND REFLECT
+
+If linked queries make sense, continue to the N+1 section. If not, re-read the vocabulary table above and try directing the agent to run one simple linked query before moving on.
+
+The N+1 Problem​
+
+You might be thinking: "Why would the agent's code make too many database calls?" Because the most natural-looking approach -- loop through each user and grab their expenses -- is also the most wasteful.
+
+N+1 Problem (100 users):
+
+Without optimization:            With optimization:
++------------------+            +------------------+
+| Get all users    | 1 query    | Get all users    | 1 query
++--------+---------+            +--------+---------+
+         |                               |
+    +----+----+                     +----+----+
+    | For each|                     | Get ALL  |
+    | user... |                     | expenses |
+    +----+----+                     | in one   |
+         |                          | query    | 1 query
+  +------+------+                   +----------+
+  |      |      |
+  v      v      v                   Total: 2 queries
+query  query  query                 vs 101 queries!
+  1      2    ...100
+
+Total: 101 queries
+
+
+If the agent writes code that loops through users and makes a separate database call for each user's expenses, you get N+1: 1 call to get users + 1 call per user = 101 calls for 100 users. This works fine with 5 users and becomes slow with 500.
+
+The performance signal to monitor: if your summary gets slower as user count grows, tell the agent to check for N+1 patterns. A loop that fetches related data one-by-one is always suspicious.
+
+Directing the Fix​
+
+Tell the agent: "You're making one database call per user to get their expenses. Fix this to get all expenses in a single call instead." The agent will rewrite it to use a prefetch that reduces 101 calls to 2 calls, regardless of user count.
+
+What you tell the agent
+
+I notice your summary loop makes one database call per user to get their expenses. For 100 users that's 101 database calls. Fix this so it uses 2 calls total, no matter how many users there are.
+
+What you verify
+
+python verify_query_count.py
+
+Output:
+  Before fix: 101 queries for 100 users
+  After fix:  2 queries for 100 users
+  N+1 resolved
+
+
+What to check: the "before" number should be roughly N+1 (where N is the user count). The "after" number should be 2, regardless of how many users you have. If the "after" number still scales with user count, the fix did not work.
+
+Cascade: A Business Decision​
+
+When you define relationships, you also decide what happens when data is deleted. This is cascade policy, and it is a business decision:
+
+Delete a user, delete their expenses: Makes sense. An expense without a user is meaningless.
+Delete a category, delete all expenses in that category: Dangerous. Expenses belong to users too, and other categories would lose data.
+Delete a user, keep their comments on a shared forum: Probably correct. The comments have value to other readers even without the original author.
+
+When you tell the agent about your relationships, include the cascade rule: "When a user is deleted, their expenses should be deleted automatically. When a category is deleted, expenses in that category should NOT be deleted -- just remove the category link."
+
+Try With AI​
+
+Setup: Open your AI coding agent with the budget tracker project from this chapter.
+
+Prompt 1: Basic Linked Query​
+Here's what I need: show me all expenses for each user, with the user's
+name and category name for each expense. Build the query and show me
+what the output looks like for 3 sample users with 2-3 expenses each.
+
+
+What you're learning: You are practicing the skill of describing linked data needs in business terms. The agent handles the implementation -- your job is to verify the output makes sense: correct user-expense pairings, correct category names, no missing or duplicated data.
+
+Prompt 2: N+1 Detection and Fix​
+I think your code is making one database call per user. For 100 users,
+show me how many total calls it makes, then fix it to use 2 calls total
+and show the new call count.
+
+
+What you're learning: You are building the instinct to question performance. When you see query counts that scale with data size, that is a signal to direct the agent to optimize. The agent knows how to fix it -- you need to know when to ask.
+
+Prompt 3: Apply to Your Domain​
+I'm building [your project]. I need to show [linked data from two entities].
+Describe what query you'll use, how many database calls it makes, and show
+me a sample output.
+
+
+What you're learning: You are moving from following examples to making relationship decisions for your own domain. The agent helps with implementation, but the business logic -- what data belongs together and what happens when something is deleted -- is your decision to make.
+
+Checkpoint​
+ I can describe entity relationships in plain English: "show all expenses for Alice" and "group by category with totals"
+ I can ask for filtered joined data: "only Food expenses over $50, with the user's name"
+ I can recognize an N+1 pattern from query count output and tell the agent to fix it
+ I can verify linked query results by reading the output, not by reading the Python code
+Flashcards Study Aid​

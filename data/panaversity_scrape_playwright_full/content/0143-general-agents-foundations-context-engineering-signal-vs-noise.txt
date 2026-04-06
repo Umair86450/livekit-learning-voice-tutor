@@ -1,0 +1,467 @@
+Signal vs Noise: Auditing Your Context for Quality
+
+Context has a budget,and that quality degrades as session window fills in with messages, tool definitions and CLAUDE.md. Now the question becomes: how much of your CLAUDE.md is actually doing useful work?
+
+The uncomfortable answer, backed by research across enterprise deployments:
+
+"Across enterprise workloads, roughly 30% to 60% of tokens sent to models add no value.". Neal Patel
+
+That means between one-third and two-thirds of your carefully crafted CLAUDE.md might be noise,content that consumes attention budget without improving output quality. Worse, that noise competes with signal for the limited attention available.
+
+This lesson teaches you to tell the difference, and to engineer a CLAUDE.md that's lean, effective, and measurably better than a bloated one.
+
+The Instruction Limit Problem​
+
+Before diving into what counts as signal and noise, you need to understand a hard constraint most people don't know exists.
+
+Research suggests that frontier LLMs can reliably follow approximately 150-200 distinct instructions. Beyond that threshold, compliance drops. The model starts ignoring rules, conflating similar instructions, or applying them inconsistently.
+
+Here's the problem: Claude Code's system prompt already contains roughly 50 instructions. That's the identity, safety rules, and base capabilities that Anthropic bakes in. You don't see them, but they're consuming instruction budget.
+
+That leaves you roughly 100-150 instructions for your CLAUDE.md before you hit diminishing returns.
+
+Count the rules in your current CLAUDE.md. If you have 300 lines with 2-3 instructions per logical section, you might have 80-100 distinct instructions. Add the 50 from the system prompt, and you're at 130-150. You're already at the ceiling.
+
+This is why trimming noise matters. Every instruction that doesn't add value is stealing budget from instructions that do.
+
+The 4-Question Audit Framework​
+
+For each line, section, or instruction in your CLAUDE.md, ask these four questions:
+
+Question 1: Would Claude ask me about this if I didn't include it?​
+
+If the answer is yes,Claude would be uncertain, would ask for clarification, or would make the wrong assumption,then it's SIGNAL.
+
+If the answer is no,Claude would proceed correctly without being told,then it's potentially NOISE.
+
+Examples across domains:
+
+Legal: "Use APA citation format" → SIGNAL (Claude doesn't know your firm's preference)
+Marketing: "Write in active voice" → NOISE (Claude defaults to this)
+Research: "Include DOI links for all sources" → SIGNAL (specific requirement Claude wouldn't assume)
+Consulting: "Use client's internal terminology from glossary.md" → SIGNAL (project-specific)
+Question 2: Could Claude figure this out from reading existing materials?​
+
+If the information is already present in your workspace,in existing documents, configuration files, templates, or established patterns,then including it in CLAUDE.md is redundant. Claude will read those files anyway.
+
+Examples across domains:
+
+Legal: "Our contracts use Delaware choice of law" → NOISE (visible in contract templates)
+Marketing: "Target audience is B2B enterprise" → NOISE (evident from existing content)
+Research: "We follow AMA style" → SIGNAL if not in any template (style preference)
+Operations: "Invoices require three approval signatures" → NOISE (visible in existing invoices)
+Question 3: Does this change frequently?​
+
+Information that changes often becomes stale in CLAUDE.md. Stale information is worse than no information,it creates context poisoning where Claude follows outdated rules.
+
+Examples across domains:
+
+Legal: "Current matter focuses on the Johnson case" → NOISE (changes weekly; put in task file)
+Marketing: "Q4 campaign theme is sustainability" → NOISE (changes quarterly)
+Research: "Never cite retracted 2019 Smith paper" → SIGNAL (permanent constraint)
+Consulting: "Client budget is $500K" → NOISE (put in project brief, not CLAUDE.md)
+Question 4: Is this a default convention Claude already knows?​
+
+Claude is trained on millions of documents across every domain. It knows standard conventions for most professional fields. Restating defaults wastes budget.
+
+Examples across domains:
+
+Legal: "Put case citations in parentheses" → NOISE (standard legal convention)
+Legal: "Use OSCOLA format instead of Bluebook" → SIGNAL (deviates from common default)
+Marketing: "End emails with call to action" → NOISE (standard practice)
+Research: "Include methodology section in papers" → NOISE (standard academic convention)
+What Counts as Signal​
+
+After applying the framework, these categories typically survive as signal:
+
+Commands or workflows Claude can't guess:
+
+Submit briefs via client portal at portal.example.com
+Run compliance check before any client deliverable
+
+
+Style rules that DIFFER from defaults:
+
+- Use Oxford comma (firm standard)
+- Maximum 2 levels of heading depth in reports
+
+
+Review and approval requirements:
+
+All client-facing documents require partner review
+Use checklist in docs/review-checklist.md before submission
+
+
+Naming and organization conventions:
+
+File naming: [ClientCode]-[MatterNum]-[DocType]-[Date]
+All drafts go in /drafts before moving to /final
+
+
+Decisions specific to YOUR project or organization:
+
+Use firm's custom risk matrix (not standard 3x3)
+Client prefers bullet points over prose paragraphs
+
+
+Non-obvious behaviors or gotchas:
+
+Client timezone is Singapore (UTC+8), not US Eastern
+Confidential materials must NOT be referenced in summaries
+
+What Counts as Noise​
+
+These categories typically fail the audit:
+
+Things Claude can infer from existing materials:
+
+# NOISE: Claude will read existing documents
+
+Industry: Healthcare consulting
+Client: Acme Corporation
+
+# NOISE: Claude can see the folder structure
+
+Project Structure:
+├── briefs/
+├── research/
+└── deliverables/
+
+
+Standard professional conventions:
+
+# NOISE: Claude knows professional standards
+
+Use formal tone in client communications
+Proofread all documents before sending
+
+
+Information that changes frequently:
+
+# NOISE: Will be stale next week
+
+Current priority: finishing quarterly report
+Meeting with client: Thursday 2pm
+
+
+Detailed reference documentation:
+
+# NOISE: Too verbose, will be stale
+
+## Client Contacts
+
+John Smith - CEO - john@acme.com - Decision maker
+Jane Doe - CFO - jane@acme.com - Budget authority
+...
+[30 more lines of contact details]
+
+
+File-by-file descriptions:
+
+# NOISE: Claude will read the files anyway
+
+## Document Descriptions
+
+- briefs/summary.md: Executive summary
+- research/market-analysis.md: Market research
+- deliverables/final-report.md: Client deliverable
+  ...
+
+Position Matters: The Three-Zone Strategy​
+
+A lean CLAUDE.md is necessary but not sufficient. Research on LLM attention patterns reveals a U-shaped curve: models pay significantly more attention to the beginning and end of their context window, while middle content receives approximately 30% less recall. This isn't a bug,it's how attention mechanisms work.
+
+The Three Zones​
+Zone	Position	Attention Level	What Goes Here
+Zone 1	First 10%	HIGH (primacy)	Critical constraints, identity, non-negotiable rules
+Zone 2	Middle 80%	LOW	Reference material, templates, nice-to-haves
+Zone 3	Last 10%	HIGH (recency)	Workflow instructions, "how to start", "when done"
+Zone Examples​
+
+Zone 1 (Top Priority):
+
+# Identity
+You are a senior legal analyst specializing in M&A due diligence.
+
+# Critical Constraints
+- NEVER discuss confidential client matters outside secure channels
+- All deliverables require partner sign-off before sending
+
+
+Zone 2 (Reference Material):
+
+## Project Structure
+See docs/structure.md
+
+## Coding Conventions
+See docs/style-guide.md
+
+
+Zone 3 (Workflow Instructions):
+
+## Starting Any Task
+1. Read docs/current-priorities.md
+2. Check existing work in /drafts
+
+## When Complete
+Run the review checklist at docs/review-process.md
+
+The Key Insight​
+
+If you'd be upset when the AI ignores it, don't put it in the middle.
+
+Your most critical constraints belong in Zone 1 (top). Your workflow triggers belong in Zone 3 (bottom). Everything else,the reference material, the nice-to-haves, the detailed documentation,goes in Zone 2 or moves to external files entirely.
+
+This is why progressive disclosure matters even more than you might think: not only does it keep your CLAUDE.md lean, it keeps your high-attention zones reserved for high-priority content.
+
+Progressive Disclosure via File References​
+
+The key to a lean CLAUDE.md is progressive disclosure: don't include detailed information inline. Reference external files that Claude reads on demand.
+
+The Pattern​
+
+Instead of:
+
+## Quality Review Process
+
+All deliverables require three-stage review. First, peer review for accuracy.
+Second, senior review for completeness. Third, compliance review for regulatory
+requirements. Use the checklist in Appendix B. Document all review comments
+in the tracking spreadsheet. Final approval requires two signatures.
+[15 more lines of review process details]
+
+
+Use:
+
+## Quality Review
+
+Read docs/review-process.md before finalizing deliverables
+
+
+Then create docs/review-process.md with the full content.
+
+Why This Works​
+CLAUDE.md stays lean: Under 60 lines, under instruction budget
+Details load on demand: Claude reads the file when relevant
+Single source of truth: Update docs/review-process.md once, not CLAUDE.md plus separate docs
+Position-optimized: The reference line can stay in high-attention zones; verbose content doesn't consume prime real estate
+Recommended Reference Structure​
+docs/
+├── key-decisions.md           # Why we chose X over Y
+├── review-process.md          # How to review and approve work
+├── delivery-checklist.md      # Steps before client delivery
+├── style-conventions.md       # Formatting and style rules
+└── gotchas.md                 # Non-obvious behaviors to watch for
+
+
+Your CLAUDE.md then becomes:
+
+## Docs (read before relevant tasks)
+
+- docs/key-decisions.md — Read before strategic choices
+- docs/review-process.md — Read before finalizing work
+- docs/gotchas.md — Read if something behaves unexpectedly
+
+Lab: CLAUDE.md Signal-to-Noise Audit​
+
+Objective: Reduce your CLAUDE.md to under 60 lines while maintaining or improving effectiveness.
+
+Time: 60 minutes
+
+Choose your domain:
+
+Software development project
+Legal matter or case
+Marketing campaign
+Research project
+Consulting engagement
+Operations workflow
+
+What you'll need:
+
+Your current CLAUDE.md file (or create one for a project you're working on)
+A representative task you've done before (for comparison testing)
+Protocol​
+
+Step 1: Export and Measure Current State
+
+wc -l CLAUDE.md
+
+
+Record your starting line count.
+
+Count distinct instructions:
+
+grep -c "^-\|^[0-9]\." CLAUDE.md
+
+
+Record: explicit instructions + ~50 system prompt = total instruction count. How close to the 150-200 ceiling?
+
+Step 2: Apply the 4-Question Framework
+
+Create an audit table. For each major section of your CLAUDE.md:
+
+Section	Q1: Claude ask?	Q2: In materials?	Q3: Changes?	Q4: Default?	Verdict
+Project Overview	No	Yes (README)	No	N/A	NOISE
+Team/Client Info	No	Yes (docs)	Yes	N/A	NOISE
+Folder Structure	No	Yes (filesystem)	No	N/A	NOISE
+Style Conventions	Partially	Some	No	Mostly yes	PARTIAL
+Review Process	Yes	No	No	No	SIGNAL
+Naming Conventions	Yes	No	No	No	SIGNAL
+Confidentiality	Yes	No	No	No	SIGNAL
+
+Step 3: Delete or Move Noise
+
+For sections marked NOISE:
+
+If useful reference: Move to docs/X.md and add reference line
+If truly redundant: Delete entirely
+
+For sections marked PARTIAL:
+
+Keep only the instructions that deviate from defaults
+Delete anything Claude would do anyway
+
+Step 4: Tighten Signal
+
+For sections marked SIGNAL, make them terser:
+
+Before:
+
+## Document Review Process
+
+When finalizing any document for this project, please follow these steps:
+
+- Have a colleague review for accuracy
+- Check against the style guide
+- Ensure all references are properly formatted
+- Get approval from the project lead
+- Save the final version in the deliverables folder
+
+
+After:
+
+## Review
+
+Peer review → Style check → Lead approval → Save to /deliverables
+
+
+Step 5: Add Progressive Disclosure
+
+Create reference files for detailed content:
+
+mkdir -p docs
+
+
+Move detailed content to appropriate files and update CLAUDE.md with references:
+
+## Docs
+
+- docs/review-process.md — Before finalizing work
+- docs/style-conventions.md — For formatting questions
+
+
+Step 6: Measure New State
+
+wc -l CLAUDE.md
+
+
+Record your new line count (target: under 60).
+
+Step 7: Comparison Test
+
+Run your comparison task with the old CLAUDE.md (restore from backup or git):
+
+git stash
+claude
+# Run representative task, record quality
+git stash pop
+
+
+Run the same task with the new CLAUDE.md:
+
+claude
+# Run representative task, record quality
+
+
+Compare:
+
+Task completion quality (same or better?)
+Instruction compliance (same or better?)
+Questions asked (fewer means clearer context)
+
+Deliverable: A CLAUDE.md under 60 lines that performs equal to or better than your original.
+
+Expected Results​
+
+Most practitioners find:
+
+40-60% of original content was noise
+Shorter CLAUDE.md produces equal or better compliance
+Agent asks fewer clarifying questions (clearer signal)
+Sessions run longer before needing compaction (less budget consumed)
+Common Audit Mistakes​
+
+Mistake 1: Keeping "helpful" noise
+
+"But this context helps Claude understand the project!"
+
+If Claude can learn it by reading files, you're paying twice: once for the CLAUDE.md tokens, again for the file read. And the CLAUDE.md version might be stale.
+
+Mistake 2: Insufficient terseness
+
+Every word costs tokens. "Please always ensure that you thoroughly review all documents" becomes "Review all documents." Same meaning, 1/3 the tokens.
+
+Mistake 3: Not testing the result
+
+An audit without comparison testing is guesswork. You need empirical evidence that the new CLAUDE.md performs at least as well. Sometimes removing what you thought was signal reveals it wasn't.
+
+Mistake 4: Forgetting position optimization
+
+A lean CLAUDE.md still needs position engineering. Your 52 lines should have critical rules at the top and workflow instructions at the bottom,not signal buried in the middle.
+
+Try With AI​
+Prompt 1: Automated Audit​
+Read my CLAUDE.md file. For each section, apply these four questions:
+1. Would you ask me about this if it wasn't included?
+2. Could you figure this out from reading existing materials?
+3. Does this seem like information that changes frequently?
+4. Is this a default convention you already know?
+
+For each section, give a verdict: SIGNAL, NOISE, or PARTIAL.
+Then show me what a lean version would look like (under 60 lines).
+
+
+What you're learning: How to use AI as an audit partner. Claude can apply the 4-question framework to its own context,it knows what it would ask about, what it can infer, and what conventions it already follows. This prompt turns the audit from solo work into collaboration.
+
+Prompt 2: Progressive Disclosure Refactor​
+I want to refactor my CLAUDE.md to use progressive disclosure.
+Identify sections that should become external docs files.
+
+For each candidate:
+1. Suggest a filename (e.g., docs/review-process.md)
+2. Show what the CLAUDE.md reference line should be
+3. Explain when you would read this file during work
+
+Help me create a docs/ structure that keeps CLAUDE.md lean
+while making detailed information available on demand.
+
+
+What you're learning: The mechanics of progressive disclosure. Moving content to external files is straightforward, but knowing WHEN Claude will read those files matters. This prompt helps you design a reference structure where files get read at the right moments.
+
+Prompt 3: Signal Stress Test​
+I've reduced my CLAUDE.md to under 60 lines. Let's verify it has enough signal.
+
+Without reading any other files, tell me:
+1. What are the specific commands or workflows for this project?
+2. What are the non-obvious conventions or requirements?
+3. What mistakes should you avoid that aren't obvious from existing materials?
+
+If you can answer these confidently, my CLAUDE.md has sufficient signal.
+If you're uncertain, I've cut too much.
+
+
+What you're learning: Whether you've gone too far. A CLAUDE.md can be too lean,stripped of signal Claude actually needs. This prompt stress-tests your audit by checking whether essential information survived. If Claude can't answer these questions, you need to restore some content.
+
+Flashcards Study Aid​
+Loading flashcards...

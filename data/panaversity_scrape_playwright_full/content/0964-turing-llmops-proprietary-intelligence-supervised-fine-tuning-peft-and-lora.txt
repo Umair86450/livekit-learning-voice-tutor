@@ -1,0 +1,416 @@
+PEFT and LoRA Deep Dive
+
+Full fine-tuning of a 7B parameter model requires updating all 7 billion weights. This demands 50+ GB of VRAM and produces a model just as large as the original. LoRA (Low-Rank Adaptation) changes this equation dramatically.
+
+With LoRA, you train only 0.1-1% of parameters while achieving 95%+ of full fine-tuning quality. A 7B model's LoRA adapter is just 30MB instead of 14GB. You can fine-tune on consumer hardware and share adapters easily.
+
+This lesson builds your understanding of how LoRA achieves this efficiency, and how to configure it correctly for your use cases.
+
+The Core Insight: Most Changes Are Low-Rank​
+
+When you fine-tune a model for a specific task, you do not need to change everything. The fundamental insight behind LoRA is that task-specific adaptations can be captured in a low-dimensional space.
+
+The Analogy: Think of a large photograph (high resolution). When you compress it to JPEG, you lose some detail but the image remains recognizable. The important information lives in a smaller space than the full pixel grid.
+
+Similarly, the weight changes needed for fine-tuning can be represented in a much smaller space than the full weight matrices. LoRA exploits this by training small matrices that capture the essential adaptations.
+
+How LoRA Works: The Mechanics​
+Standard Fine-Tuning​
+
+In standard fine-tuning, you update a weight matrix W directly:
+
+Original:    W (4096 × 4096) = 16.7 million parameters
+After update: W' = W + ΔW (also 16.7 million to store ΔW)
+
+
+Every layer has such matrices. A typical 7B model has hundreds of these large matrices.
+
+LoRA's Approach​
+
+Instead of storing ΔW directly, LoRA represents it as the product of two smaller matrices:
+
+ΔW = B × A
+
+Where:
+- A has shape (rank × input_dim)  e.g., (16 × 4096) = 65,536 params
+- B has shape (output_dim × rank) e.g., (4096 × 16) = 65,536 params
+
+Total: 131,072 parameters (instead of 16.7 million)
+Reduction: 99.2%
+
+
+Visual Representation:
+
+                    Original Weight Matrix W
+                    ┌─────────────────────────┐
+                    │                         │
+                    │   4096 × 4096           │
+                    │   16.7M parameters      │
+                    │   (FROZEN - not trained)│
+                    │                         │
+                    └─────────────────────────┘
+                              +
+                    LoRA Adapter (B × A)
+                    ┌─────┐       ┌─────────────────────┐
+                    │     │       │                     │
+                    │  B  │   ×   │          A          │
+                    │4096 │       │     16 × 4096       │
+                    │ × 16│       │    65,536 params    │
+                    │     │       │                     │
+                    │65K  │       │                     │
+                    │     │       └─────────────────────┘
+                    └─────┘
+
+                    Combined: 131,072 trainable parameters
+
+The Forward Pass​
+
+During training and inference:
+
+# Conceptually, what happens inside the model:
+output = W @ input + (B @ A) @ input * (alpha / rank)
+#        ↑               ↑
+#        │               └── LoRA contribution (small matrices)
+#        └── Original frozen weights (not updated)
+
+
+The original weights remain frozen. Only A and B are trained.
+
+The Key Hyperparameters​
+Rank (r): Capacity of the Adapter​
+
+The rank determines how many dimensions the adaptation can use. Higher rank means more expressive power but more parameters.
+
+Rank	Parameters per Layer	When to Use
+4	~33K	Very simple tasks, minimal adaptation
+8	~66K	Simple style transfer, format adherence
+16	~131K	Default choice - balanced capacity
+32	~262K	Complex domain adaptation
+64	~524K	Significant behavior changes
+128+	~1M+	Approaching full fine-tuning territory
+
+Selection Framework:
+
+Q: How different is target behavior from base model?
+├── Very similar (just formatting) → rank 8
+├── Moderate changes (new domain) → rank 16-32
+└── Significant changes (new capabilities) → rank 64+
+
+Q: How much training data do you have?
+├── <500 examples → use lower rank (avoid overfitting)
+├── 500-2000 examples → rank 16 is safe
+└── >2000 examples → higher rank is justified
+
+Alpha (lora_alpha): The Scaling Factor​
+
+Alpha scales the LoRA contribution when merging with original weights. The effective scaling is alpha / rank.
+
+The Recommended Approach: Set alpha = rank. This means the scaling factor is 1.0, and LoRA updates are added at full strength.
+
+# Common configurations:
+r = 16, alpha = 16  # scaling = 1.0 (recommended default)
+r = 16, alpha = 32  # scaling = 2.0 (doubles LoRA effect)
+r = 16, alpha = 8   # scaling = 0.5 (halves LoRA effect)
+
+
+When to Adjust Alpha:
+
+Scenario	Alpha Setting	Reasoning
+Standard training	alpha = rank	Neutral scaling
+Want stronger adaptation	alpha = 2 * rank	Amplifies learned changes
+Want gentler adaptation	alpha = rank / 2	Preserves more base behavior
+Using rsLoRA	Auto-calculated	Uses sqrt(rank) scaling
+Target Modules: Where to Apply LoRA​
+
+LoRA can be applied to different parts of the transformer. Targeting more modules increases capacity but also parameters.
+
+Transformer Layer Structure:
+
+Input
+  │
+  ▼
+┌─────────────────────────────────────────────────────┐
+│  Multi-Head Self-Attention                          │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐│
+│  │  q_proj  │ │  k_proj  │ │  v_proj  │ │ o_proj  ││
+│  │  (LoRA)  │ │  (LoRA)  │ │  (LoRA)  │ │ (LoRA)  ││
+│  └──────────┘ └──────────┘ └──────────┘ └─────────┘│
+└─────────────────────────────────────────────────────┘
+  │
+  ▼
+┌─────────────────────────────────────────────────────┐
+│  Feed-Forward Network (MLP)                         │
+│  ┌────────────┐ ┌────────────┐ ┌─────────────────┐ │
+│  │ gate_proj  │ │  up_proj   │ │   down_proj     │ │
+│  │  (LoRA)    │ │  (LoRA)    │ │   (LoRA)        │ │
+│  └────────────┘ └────────────┘ └─────────────────┘ │
+└─────────────────────────────────────────────────────┘
+  │
+  ▼
+Output
+
+
+Target Module Configurations:
+
+Configuration	Modules	Parameters	Use Case
+Attention only	q_proj, v_proj	Fewer	Simple style/format changes
+Full attention	q_proj, k_proj, v_proj, o_proj	Moderate	General instruction tuning
+Attention + MLP	All 7 modules	Most	Complex domain adaptation
+
+Recommended Default (Unsloth):
+
+target_modules = [
+    "q_proj", "k_proj", "v_proj", "o_proj",  # All attention
+    "gate_proj", "up_proj", "down_proj",      # All MLP
+]
+
+
+This targets both attention and MLP layers for maximum adaptation capacity.
+
+Dropout: Regularization​
+
+LoRA dropout randomly zeros adapter outputs during training to prevent overfitting.
+
+lora_dropout = 0.0   # Unsloth default (recommended)
+lora_dropout = 0.05  # Light regularization for small datasets
+lora_dropout = 0.1   # Stronger regularization if overfitting
+
+
+For most cases with sufficient data (500+ examples), dropout of 0 works well. Unsloth specifically recommends keeping dropout at 0.
+
+Implementing LoRA with PEFT​
+
+The PEFT (Parameter-Efficient Fine-Tuning) library provides the standard interface for LoRA.
+
+Basic Configuration​
+from peft import LoraConfig, get_peft_model
+
+# Define LoRA configuration
+lora_config = LoraConfig(
+    r=16,                          # Rank
+    lora_alpha=16,                 # Scaling (alpha = rank recommended)
+    lora_dropout=0.0,              # No dropout (Unsloth recommendation)
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    bias="none",                   # Don't train biases
+    task_type="CAUSAL_LM",         # For language modeling
+)
+
+# Apply LoRA to base model
+model = get_peft_model(base_model, lora_config)
+
+
+Output:
+
+trainable params: 3,407,872 || all params: 8,030,261,248 || trainable%: 0.0424
+
+Checking Trainable Parameters​
+def print_trainable_parameters(model):
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in model.parameters())
+    print(
+        f"trainable params: {trainable_params:,} || "
+        f"all params: {all_params:,} || "
+        f"trainable%: {100 * trainable_params / all_params:.4f}%"
+    )
+
+print_trainable_parameters(model)
+
+
+Output:
+
+trainable params: 3,407,872 || all params: 8,030,261,248 || trainable%: 0.0424%
+
+
+Only 0.04% of parameters are trained, yet the model learns the new behavior effectively.
+
+Saving and Loading LoRA Adapters​
+
+One of LoRA's major advantages is the tiny adapter size:
+
+# Save only the adapter (not the full model)
+model.save_pretrained("./task-api-adapter")
+# Result: ~30MB directory
+
+# Later, load adapter onto any compatible base model
+from peft import PeftModel
+
+base_model = load_base_model()  # Load base model
+model = PeftModel.from_pretrained(base_model, "./task-api-adapter")
+
+
+This enables:
+
+Easy sharing: Upload 30MB adapter instead of 14GB model
+Version control: Git can track adapter changes
+A/B testing: Swap adapters on same base model
+Common Configuration Patterns​
+Pattern 1: Conservative Start​
+
+For initial experiments or small datasets:
+
+lora_config = LoraConfig(
+    r=8,                           # Lower rank
+    lora_alpha=8,                  # Equal to rank
+    target_modules=["q_proj", "v_proj"],  # Attention only
+    lora_dropout=0.05,             # Light regularization
+)
+
+Pattern 2: Balanced Default​
+
+For most production use cases:
+
+lora_config = LoraConfig(
+    r=16,                          # Standard rank
+    lora_alpha=16,                 # Equal to rank
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_dropout=0.0,              # No dropout
+)
+
+Pattern 3: Maximum Capacity​
+
+For complex adaptations with abundant data:
+
+lora_config = LoraConfig(
+    r=64,                          # High rank
+    lora_alpha=64,                 # Equal to rank
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_dropout=0.0,
+)
+
+Reflect on Your Skill​
+
+Update your llmops-fine-tuner skill with refined configuration guidance:
+
+## LoRA Configuration Refinement
+
+### Rank Selection by Use Case
+
+|
+ Use Case 
+|
+ Rank 
+|
+ Reasoning 
+|
+
+
+|
+----------
+|
+------
+|
+-----------
+|
+
+
+|
+ Format adherence 
+|
+ 8 
+|
+ Simple pattern matching 
+|
+
+
+|
+ Domain vocabulary 
+|
+ 16 
+|
+ Moderate new knowledge 
+|
+
+
+|
+ Complex behavior 
+|
+ 32-64 
+|
+ Significant adaptation 
+|
+
+
+|
+ Near full fine-tune 
+|
+ 128+ 
+|
+ Maximum capacity 
+|
+
+
+
+### Alpha Setting Rule
+- Default: alpha = rank (scaling factor = 1.0)
+- Stronger adaptation: alpha = 2 * rank
+- Preserve base behavior: alpha = rank / 2
+
+### Target Module Priorities
+1. Always include: q_proj, v_proj (minimum)
+2. Add for more capacity: k_proj, o_proj
+3. Add for complex tasks: gate_proj, up_proj, down_proj
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Configure for Your Use Case​
+I want to fine-tune for [describe your task]. Help me configure LoRA:
+
+My constraints:
+- Hardware: [GPU and VRAM]
+- Dataset size: [number of examples]
+- Task complexity: [simple format / moderate domain / complex behavior]
+
+Recommend:
+1. Rank value with reasoning
+2. Alpha value
+3. Which target modules
+4. Any dropout needed
+
+Explain your reasoning for each choice.
+
+
+What you are learning: Configuration reasoning. Instead of copying defaults, you are building the ability to derive appropriate configurations from first principles.
+
+Prompt 2: Interpret Parameter Counts​
+I configured LoRA and got this output:
+"trainable params: 3,407,872 || all params: 8,030,261,248 || trainable%: 0.0424%"
+
+Help me understand:
+1. Is this parameter count reasonable for my configuration?
+2. How does changing rank affect this number?
+3. How does targeting more modules affect this?
+4. What trade-offs am I making at this trainable percentage?
+
+
+What you are learning: Parameter budget intuition. You are learning to connect configuration choices to their computational implications.
+
+Prompt 3: Debug Configuration Issues​
+My LoRA training shows [describe issue: not learning, overfitting,
+quality problems]. My configuration is:
+
+r = [your rank]
+alpha = [your alpha]
+target_modules = [your modules]
+dropout = [your dropout]
+dataset size = [number of examples]
+
+What configuration changes might address this issue? Walk me through
+the diagnostic process.
+
+
+What you are learning: Troubleshooting methodology. Fine-tuning involves debugging. You are learning to systematically diagnose configuration problems.
+
+Safety Note​
+
+LoRA configurations interact with your dataset size and quality. Using very high rank with limited data causes overfitting. Using very low rank with complex tasks causes underfitting. Always validate on held-out examples before declaring success.

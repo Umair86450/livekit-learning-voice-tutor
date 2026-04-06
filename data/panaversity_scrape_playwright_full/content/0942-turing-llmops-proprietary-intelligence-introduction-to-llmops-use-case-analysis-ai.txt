@@ -1,0 +1,484 @@
+Use Case Analysis with AI
+
+You understand the LLMOps landscape. You can distinguish training methods and calculate costs. Now comes the critical question: Is YOUR specific use case right for fine-tuning?
+
+This lesson is different. Instead of learning concepts passively, you'll actively analyze a use case—your own domain or our Task Management example—working alongside AI to develop a complete specification. By the end, you'll have a document you can use to guide actual fine-tuning work.
+
+The Use Case Specification​
+
+Every successful fine-tuning project starts with a clear specification. Not a vague idea like "make the model better at tasks." A specification that answers:
+
+What capability does the model need? (Specific, testable)
+Why can't current solutions provide it? (Gap analysis)
+What does success look like? (Measurable criteria)
+What data will teach this capability? (Data strategy)
+What are the risks and constraints? (Reality check)
+
+Let's build one together.
+
+Starting Point: Define the Domain​
+
+Before diving into AI assistance, establish your domain context. We'll use Task Management, but substitute your own domain as you follow along.
+
+Domain: Task Management
+
+Business Context:
+
+A project management SaaS serving small teams
+Users create, update, and query tasks via chat interface
+Current solution uses GPT-4o-mini with extensive prompting
+Pain points: Inconsistent JSON output, generic responses, high latency
+
+Initial Capability Wish List:
+
+Understand task management terminology
+Produce valid JSON for CRUD operations
+Maintain consistent persona across conversations
+Handle edge cases gracefully
+
+This is a starting point—rough and incomplete. Now let's refine it.
+
+Refining Requirements Through Dialogue​
+
+You have a rough idea. AI has knowledge of what works in similar projects. Together, you can develop something neither would create alone.
+
+Your initial prompt:
+
+I'm planning to fine-tune a model for a task management chat assistant. Users will ask things like:
+- "Create a task to review the Q4 budget, high priority"
+- "What tasks are due this week?"
+- "Mark task 47 as complete"
+
+The model should output structured JSON that my application can parse. What questions should I be asking myself to properly scope this project?
+
+
+A response you might receive:
+
+Here are key scoping questions:
+
+Output Format Complexity
+Are you using a fixed schema or flexible structure?
+How do you handle ambiguous requests?
+What happens when required fields are missing?
+Conversation vs Single-Turn
+Does the model need memory of previous turns?
+How do you handle context from earlier in the conversation?
+Error Modes
+What should happen with invalid inputs?
+How do you handle requests outside task management?
+Integration Constraints
+What's your latency budget?
+How does the model output integrate with your backend?
+
+Would you like me to elaborate on any of these areas?
+
+Notice what happened: AI surfaced considerations you might not have thought of. Multi-turn conversation handling, error modes, integration constraints—these matter enormously for training data design.
+
+Your refinement:
+
+Good questions. Let me answer and then refine my requirements:
+
+1. Output format: Fixed schema - we have TypeScript types defining Task, User, etc.
+2. Conversation: Single-turn for now, but we want to add multi-turn later
+3. Error modes: Should return structured error JSON, never crash or hallucinate
+4. Latency: Under 500ms for 95% of requests
+
+Given these constraints, what capabilities are actually achievable with fine-tuning vs what needs to be handled in application logic?
+
+
+What might emerge:
+
+Based on your constraints, here's what fine-tuning can and can't do:
+
+Achievable through Fine-Tuning:
+
+Consistent JSON structure matching your schema
+Task management domain vocabulary
+Persona and response style
+Proper field mapping ("high priority" → {"priority": "high"})
+
+Needs Application Logic:
+
+Schema validation (model outputs text, not guaranteed valid JSON)
+Database lookups ("What tasks are due?" requires real data)
+Authentication/authorization
+Latency guarantees (infrastructure, not training)
+
+The model can learn to OUTPUT the right format, but you need validation layers. Should I help design those layers?
+
+This is valuable insight. The AI identified that latency is infrastructure-dependent, not training-dependent. That prevents wasted effort on the wrong problem.
+
+Discovering Capability Gaps​
+
+Now probe deeper. What specifically can't current solutions do?
+
+Your question:
+
+We're currently using GPT-4o-mini with this prompt: [paste your prompt].
+
+The problems we're seeing:
+1. About 15% of responses have malformed JSON
+2. The model sometimes adds fields we don't want
+3. Response style varies widely
+
+Which of these problems will fine-tuning solve vs which need other approaches?
+
+
+A response might reveal:
+
+Let me analyze each problem:
+
+1. Malformed JSON (15%) Fine-tuning can reduce this to <5% by training on correctly formatted examples. But you'll still need validation—models generate text probabilistically, not deterministically.
+
+2. Extra fields Fine-tuning directly addresses this. Training exclusively on your schema teaches the model which fields exist.
+
+3. Variable style Fine-tuning is ideal for this. Consistent examples = consistent output style.
+
+Recommendation: Fine-tuning addresses 2 and 3 well, partially addresses 1. For production reliability, add a JSON validation layer that requests regeneration on parse failure.
+
+Should I help estimate how many training examples you'd need for each capability?
+
+You've now learned that fine-tuning won't eliminate JSON errors entirely—you need a validation layer. This prevents a common failure mode: deploying a model expecting perfect outputs.
+
+Data Requirements Discussion​
+
+Training data is the lifeblood of fine-tuning. Estimate how much you need.
+
+Your question:
+
+For our task management use case, I've identified these capability categories:
+1. Task creation (various formats and phrasings)
+2. Task queries (filters, date ranges, priorities)
+3. Task updates (status changes, edits)
+4. Error handling (invalid inputs, out-of-scope requests)
+
+How many examples do you estimate we need for each category? What factors affect this estimate?
+
+
+An analysis you might receive:
+
+Here's my estimation framework:
+
+Base estimate: For a relatively narrow domain like task management with fixed output schema:
+
+Minimum viable: 500-1,000 examples total
+Recommended: 2,000-5,000 examples total
+High quality: 5,000-10,000 examples
+
+By category (recommended tier):
+
+Category	Examples	Reasoning
+Task creation	1,500	Highest variation in input phrasing
+Task queries	1,000	Complex date/filter logic
+Task updates	800	More constrained inputs
+Error handling	700	Critical for safety
+Total	4,000	
+
+Factors that increase requirements:
+
+More input variation (casual vs formal)
+Complex output logic (nested structures)
+Edge case coverage
+Multi-language support
+
+Factors that decrease requirements:
+
+Consistent input format
+Simple output structure
+Strong base model
+
+Your follow-up:
+
+4,000 examples is a lot. We could realistically create 500 high-quality examples in our first iteration. What's the minimum viable path that still produces a useful model? What would we be trading off?
+
+
+The trade-off analysis:
+
+With 500 examples, here's a pragmatic approach:
+
+Priority allocation:
+
+Task creation: 200 examples (core functionality)
+Task queries: 150 examples (most common operation)
+Task updates: 100 examples (relatively straightforward)
+Error handling: 50 examples (basic coverage only)
+
+What you gain:
+
+Consistent output format (your top problem)
+Domain vocabulary understanding
+Basic persona consistency
+
+What you sacrifice:
+
+Edge case coverage (more failures on unusual inputs)
+Error handling depth (may hallucinate on edge cases)
+Input variation tolerance (may fail on unexpected phrasings)
+
+Recommendation: Start with 500, deploy with monitoring, use failures to guide the next 500 examples. Iterative improvement beats waiting for perfect data.
+
+You've now discovered a practical path forward—and more importantly, you understand the trade-offs.
+
+Creating the Specification Document​
+
+Synthesize everything into a formal specification.
+
+Your request:
+
+Based on our discussion, help me create a structured use case specification document. I want something I can share with my team and use to guide our fine-tuning project.
+
+
+A specification template might emerge:
+
+Use Case Specification: Task Management Assistant​
+
+Version: 1.0 Date: [Today] Author: [You]
+
+1. Executive Summary​
+
+Fine-tune a Llama 3.1 8B model to serve as a task management chat assistant. The model will parse natural language task requests and output structured JSON matching our application schema.
+
+2. Capability Requirements​
+Capability	Description	Priority	Measurable Target
+JSON output	Consistent schema-compliant JSON	Critical	<5% parse failures
+Task creation	Parse creation requests into structured data	High	95% field accuracy
+Task queries	Translate filter requests to query params	High	90% query accuracy
+Error handling	Graceful response to invalid inputs	Medium	80% appropriate error responses
+3. Gap Analysis​
+
+Current state: GPT-4o-mini with custom prompt Current performance: 85% valid JSON, variable style, 800ms avg latency Target performance: 98% valid JSON (with retry), consistent style, 200ms avg latency
+
+4. Training Data Strategy​
+
+Total examples: 500 (MVP), scaling to 2,000+ Distribution:
+
+Task creation: 40%
+Task queries: 30%
+Task updates: 20%
+Error handling: 10%
+
+Data sources:
+
+Synthetic examples from template expansion
+Real user queries (anonymized)
+Edge cases from error logs
+5. Success Criteria​
+Metric	Target	Measurement Method
+JSON validity	>95%	Parse rate on test set
+Field accuracy	>90%	Ground truth comparison
+Response latency	<300ms p95	Production monitoring
+User satisfaction	>4.0/5	In-app rating
+6. Risks and Mitigations​
+Risk	Impact	Mitigation
+Hallucinated fields	High	JSON schema validation layer
+Training data bias	Medium	Diverse example sources
+Model degradation	Medium	A/B testing before full rollout
+7. Go/No-Go Criteria​
+
+Proceed if:
+
+Test set accuracy >85% (MVP threshold)
+Latency <500ms on target hardware
+Cost per query <50% of current API cost
+
+Revisit if:
+
+Accuracy <80% after 3 training iterations
+Required data volume exceeds available resources
+
+Your refinement:
+
+This is good, but our team will want more detail on the data format. Can you show me what 3-4 training examples would look like for task creation, including edge cases?
+
+
+Example data emerges:
+
+[
+  {
+    "input": "Create a high priority task to review the Q4 budget by Friday",
+    "output": {
+      "action": "create_task",
+      "data": {
+        "title": "Review the Q4 budget",
+        "priority": "high",
+        "due_date": "2026-01-03",
+        "status": "pending"
+      }
+    }
+  },
+  {
+    "input": "add task: team standup prep",
+    "output": {
+      "action": "create_task",
+      "data": {
+        "title": "Team standup prep",
+        "priority": "medium",
+        "due_date": null,
+        "status": "pending"
+      }
+    }
+  },
+  {
+    "input": "new urgent task call client re contract issues asap",
+    "output": {
+      "action": "create_task",
+      "data": {
+        "title": "Call client re contract issues",
+        "priority": "high",
+        "due_date": null,
+        "status": "pending",
+        "notes": "ASAP - urgent"
+      }
+    }
+  },
+  {
+    "input": "Create a task for tomorrow",
+    "output": {
+      "action": "error",
+      "error_type": "missing_title",
+      "message": "I need a title for this task. What should I call it?",
+      "suggested_followup": "What's the task about?"
+    }
+  }
+]
+
+
+The third example handles casual/abbreviated input. The fourth handles a missing required field gracefully.
+
+What Emerged From the Collaboration​
+
+Look at what you accomplished through this dialogue:
+
+Scoping questions you didn't initially consider—multi-turn handling, error modes, integration constraints
+Realistic expectations—fine-tuning helps but isn't magic; you still need validation
+Data prioritization—focus resources on highest-impact categories
+Pragmatic path forward—500 examples to start, iterate based on real failures
+Complete specification—a document your team can actually use
+
+This emerged from iteration. Neither you nor the AI had the complete picture at the start. Through back-and-forth refinement, you converged on something better than either would create alone.
+
+Creating Your Own Specification​
+
+Now apply this process to your domain. If you don't have a specific project, continue with Task Management or choose another domain you know well.
+
+Step 1: Establish Context​
+
+Write a paragraph describing:
+
+Your domain
+Current solution (if any)
+Pain points you're trying to solve
+Why you're considering fine-tuning
+Step 2: Explore Requirements​
+
+Engage AI with open-ended questions:
+
+"What questions should I be asking to scope this properly?"
+"What capabilities are achievable with fine-tuning vs other approaches?"
+"What are common failure modes in projects like this?"
+Step 3: Define Success​
+
+Collaboratively establish:
+
+Measurable success criteria
+Acceptable performance thresholds
+Go/no-go decision criteria
+Step 4: Plan Data Strategy​
+
+Work through:
+
+Capability categories
+Example volume estimates
+Data sources
+Priority allocation
+Step 5: Synthesize Specification​
+
+Create a structured document including:
+
+Executive summary
+Capability requirements
+Gap analysis
+Training data strategy
+Success criteria
+Risks and mitigations
+Common Patterns in Use Case Analysis​
+Pattern: Over-Scoping​
+
+Symptom: "The model should handle everything related to project management."
+
+Fix: Narrow to specific, testable capabilities. "The model should parse task creation requests into structured JSON matching our Task schema."
+
+Pattern: Unrealistic Expectations​
+
+Symptom: "Fine-tuning will eliminate all errors."
+
+Fix: Accept that models are probabilistic. Plan for validation layers and graceful failure handling.
+
+Pattern: Skipping Data Reality​
+
+Symptom: "We have lots of data, so data prep will be quick."
+
+Fix: Estimate actual effort. Raw data is never training-ready.
+
+Pattern: Ignoring Iteration​
+
+Symptom: "We'll train once and deploy."
+
+Fix: Budget for 3-10 training iterations. First attempts rarely hit targets.
+
+Try With AI​
+
+Complete your use case analysis through these exercises.
+
+Part 1: Initial Exploration
+
+Start a fresh conversation:
+
+I'm considering fine-tuning a model for [your domain]. Before I commit resources, help me scope this properly.
+
+Current situation:
+[Describe your domain, current solution, pain points]
+
+I want to determine:
+1. Is fine-tuning the right approach?
+2. What's the minimum viable scope?
+3. What are the biggest risks?
+
+Ask me clarifying questions to help scope this project.
+
+
+What you're practicing: This mirrors real project scoping. You'll discover that articulating your situation to AI forces clarity—and AI's questions reveal blind spots.
+
+Part 2: Critical Evaluation
+
+After AI's initial response, challenge assumptions:
+
+You suggested [X capability]. I'm skeptical because [your concern].
+
+Also, your data estimate seems [high/low] because [your reasoning].
+
+Where might your assumptions be wrong? What am I not considering?
+
+
+What you're practicing: You're not just accepting AI's output—you're evaluating and refining it. This is the bidirectional collaboration that produces better results than either party alone.
+
+Part 3: Specification Synthesis
+
+Once you've explored thoroughly:
+
+Based on our discussion, create a complete use case specification document I can share with my team.
+
+Include:
+1. Executive summary
+2. Capability requirements (with measurable targets)
+3. Data strategy (categories, volume estimates, sources)
+4. Success criteria
+5. Risks and mitigations
+6. Go/no-go decision criteria
+
+Be specific to my domain, not generic.
+
+
+What you're practicing: Synthesizing exploration into actionable documentation. The specification becomes the foundation for your fine-tuning project in later chapters.
+
+Save your specification—you'll use it throughout Part 8 as we implement the fine-tuning pipeline.

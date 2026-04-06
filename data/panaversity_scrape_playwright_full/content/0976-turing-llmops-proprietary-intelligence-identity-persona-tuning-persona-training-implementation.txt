@@ -1,0 +1,491 @@
+Persona Training Implementation
+
+You have your TaskMaster persona specification. You have 200+ high-quality training examples. Now it's time to actually train the model.
+
+This lesson walks you through executing persona fine-tuning on Google Colab's free T4 GPU. By the end, you'll have a trained LoRA adapter that embodies your TaskMaster persona—the first step toward a production Digital FTE.
+
+The goal is not just running code. It's understanding what each configuration choice does for persona training specifically, so you can adapt the process to your own personas.
+
+Setting Up the Colab Environment​
+
+Start a new Colab notebook with GPU runtime (Runtime → Change runtime type → T4 GPU).
+
+Install Dependencies​
+# Install Unsloth and dependencies (takes 2-3 minutes)
+!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+!pip install --no-deps "trl<0.9.0" peft accelerate bitsandbytes
+
+
+Output:
+
+Successfully installed unsloth-2024.12.0
+Successfully installed trl-0.8.6 peft-0.13.0 accelerate-0.34.0 bitsandbytes-0.44.0
+
+Verify GPU Access​
+import torch
+
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"GPU: {torch.cuda.get_device_name(0)}")
+print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
+
+Output:
+
+PyTorch version: 2.4.0+cu121
+CUDA available: True
+GPU: Tesla T4
+VRAM: 15.8 GB
+
+
+The T4's 15GB VRAM is sufficient for training 7-8B models with QLoRA/QDoRA.
+
+Loading the Base Model​
+
+Use Unsloth's optimized model loading:
+
+from unsloth import FastLanguageModel
+
+# Model configuration
+model_name = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
+max_seq_length = 2048  # Persona responses are typically short
+
+# Load model with 4-bit quantization
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name=model_name,
+    max_seq_length=max_seq_length,
+    dtype=None,            # Auto-detect (bfloat16 on T4)
+    load_in_4bit=True,     # Use 4-bit quantization
+)
+
+print(f"Model loaded: {model_name}")
+print(f"Max sequence length: {max_seq_length}")
+
+
+Output:
+
+Model loaded: unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit
+Max sequence length: 2048
+Unsloth: Fast loading from https://huggingface.co/unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit
+
+Configure LoRA for Persona Training​
+
+Persona training benefits from targeting all layers. The full adapter captures both style (attention) and vocabulary patterns (MLP).
+
+# Add LoRA adapters for persona training
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,                              # Rank: 16 is good for persona
+    lora_alpha=16,                     # Alpha = rank for neutral scaling
+    lora_dropout=0,                    # No dropout (Unsloth recommendation)
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",  # Attention
+        "gate_proj", "up_proj", "down_proj",      # MLP
+    ],
+    bias="none",
+    use_gradient_checkpointing="unsloth",  # Memory efficient
+    random_state=42,
+)
+
+# Print trainable parameters
+print("\nTrainable parameters:")
+model.print_trainable_parameters()
+
+
+Output:
+
+Trainable parameters:
+trainable params: 41,943,040 || all params: 8,030,261,248 || trainable%: 0.5222%
+
+
+For persona training specifically:
+
+r=16: Sufficient for style transfer; higher ranks rarely improve persona consistency
+All target modules: Persona affects both attention patterns and vocabulary choice
+No dropout: Persona training datasets are curated; regularization rarely needed
+Preparing Your Dataset​
+
+Upload your taskmaster_persona.jsonl file or mount Google Drive.
+
+Option A: Upload Directly​
+from google.colab import files
+import json
+
+# Upload file
+uploaded = files.upload()
+
+# Read examples
+filename = list(uploaded.keys())[0]
+with open(filename, 'r') as f:
+    examples = [json.loads(line) for line in f]
+
+print(f"Loaded {len(examples)} training examples")
+
+Option B: Mount Google Drive​
+from google.colab import drive
+import json
+
+drive.mount('/content/drive')
+
+# Read from Drive
+dataset_path = '/content/drive/MyDrive/llmops/taskmaster_persona.jsonl'
+with open(dataset_path, 'r') as f:
+    examples = [json.loads(line) for line in f]
+
+print(f"Loaded {len(examples)} training examples")
+
+
+Output:
+
+Loaded 215 training examples
+
+Format for Training​
+
+Convert to the format Unsloth expects:
+
+from datasets import Dataset
+
+def format_for_training(example):
+    """Format example for Llama-3 instruction format."""
+    messages = example["messages"]
+
+    # Llama-3 chat format
+    formatted = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    return {"text": formatted}
+
+
+# Create dataset
+dataset = Dataset.from_list(examples)
+dataset = dataset.map(format_for_training)
+
+print(f"Dataset size: {len(dataset)}")
+print(f"\nSample formatted text:\n{dataset[0]['text'][:500]}...")
+
+
+Output:
+
+Dataset size: 215
+
+Sample formatted text:
+<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+Create a task called Review Q4 budget with high priority<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Great choice! I've created 'Review Q4 budget' as a high-priority item. Financial reviews are exactly the kind of proactive work that keeps projects on track. When would you like to tackle this?<|eot_id|>...
+
+Configuring the Trainer​
+
+Set up training with hyperparameters optimized for persona fine-tuning.
+
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from unsloth import is_bfloat16_supported
+
+# Training configuration for persona
+training_args = TrainingArguments(
+    # Output
+    output_dir="./taskmaster-persona",
+
+    # Batch and gradient
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,      # Effective batch size = 8
+
+    # Training duration
+    num_train_epochs=3,                 # 3 epochs for persona
+    warmup_steps=10,
+
+    # Learning rate
+    learning_rate=2e-4,                 # Standard for LoRA
+    lr_scheduler_type="cosine",         # Smooth decay
+
+    # Precision
+    fp16=not is_bfloat16_supported(),
+    bf16=is_bfloat16_supported(),
+
+    # Logging
+    logging_steps=10,
+    save_strategy="epoch",
+
+    # Optimization
+    optim="adamw_8bit",                 # Memory efficient
+    weight_decay=0.01,
+    max_grad_norm=1.0,
+
+    # Reproducibility
+    seed=42,
+)
+
+# Create trainer
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",
+    max_seq_length=max_seq_length,
+    args=training_args,
+)
+
+print("Trainer configured successfully")
+
+
+Output:
+
+Trainer configured successfully
+
+Hyperparameter Choices for Persona Training​
+Parameter	Value	Reasoning for Persona
+num_train_epochs	3	Persona needs repeated exposure but not overfitting
+learning_rate	2e-4	Standard LoRA rate; lower can underfitting personality
+effective_batch	8	Larger batches stabilize persona learning
+warmup_steps	10	Short warmup—persona data is consistent
+lr_scheduler	cosine	Smooth decay preserves persona at end of training
+Running Training​
+
+Execute training with progress monitoring:
+
+# Show GPU memory before training
+print(f"GPU memory before: {torch.cuda.memory_allocated()/1e9:.1f} GB")
+
+# Train
+print("\nStarting training...")
+trainer_stats = trainer.train()
+
+# Show results
+print(f"\nTraining complete!")
+print(f"Total training time: {trainer_stats.metrics['train_runtime']:.0f} seconds")
+print(f"Training loss: {trainer_stats.metrics['train_loss']:.4f}")
+print(f"GPU memory after: {torch.cuda.memory_allocated()/1e9:.1f} GB")
+
+
+Output:
+
+GPU memory before: 6.2 GB
+
+Starting training...
+{'loss': 1.3245, 'learning_rate': 0.0001875, 'epoch': 0.37}
+{'loss': 0.8921, 'learning_rate': 0.000175, 'epoch': 0.74}
+{'loss': 0.6534, 'learning_rate': 0.00015, 'epoch': 1.11}
+{'loss': 0.4821, 'learning_rate': 0.000125, 'epoch': 1.49}
+{'loss': 0.3654, 'learning_rate': 0.0001, 'epoch': 1.86}
+{'loss': 0.2987, 'learning_rate': 0.000075, 'epoch': 2.23}
+{'loss': 0.2456, 'learning_rate': 0.00005, 'epoch': 2.60}
+{'loss': 0.2134, 'learning_rate': 0.000025, 'epoch': 2.97}
+
+Training complete!
+Total training time: 842 seconds
+Training loss: 0.2134
+GPU memory after: 7.8 GB
+
+Interpreting Training Logs​
+
+Healthy Training Pattern:
+
+Loss: 1.3 → 0.9 → 0.6 → 0.4 → 0.3 → 0.2
+      ↓     ↓     ↓     ↓     ↓     ↓
+   High  Learning  Converging  Stabilizing
+
+Pattern	Meaning	Action
+Steady decrease	Model learning persona	Continue training
+Loss plateaus early	Underfitting	Increase epochs or learning rate
+Loss spikes	Unstable training	Reduce learning rate
+Loss → 0 quickly	Overfitting	Reduce epochs, add regularization
+Loss stays high	Not learning	Check data format, increase rank
+
+For persona training, a final loss of 0.2-0.4 typically indicates good persona absorption without memorization.
+
+Saving the Trained Adapter​
+
+Save your LoRA adapter for later use:
+
+# Save LoRA adapter
+adapter_path = "./taskmaster-persona-adapter"
+model.save_pretrained(adapter_path)
+tokenizer.save_pretrained(adapter_path)
+
+print(f"Adapter saved to: {adapter_path}")
+
+# Check adapter size
+import os
+adapter_size = sum(
+    os.path.getsize(os.path.join(adapter_path, f))
+    for f in os.listdir(adapter_path)
+) / 1e6
+
+print(f"Adapter size: {adapter_size:.1f} MB")
+
+
+Output:
+
+Adapter saved to: ./taskmaster-persona-adapter
+Adapter size: 33.4 MB
+
+Download or Save to Drive​
+# Option A: Download to local machine
+from google.colab import files
+import shutil
+
+shutil.make_archive("taskmaster-persona-adapter", 'zip', adapter_path)
+files.download("taskmaster-persona-adapter.zip")
+
+# Option B: Copy to Google Drive
+!cp -r ./taskmaster-persona-adapter /content/drive/MyDrive/llmops/
+
+Quick Inference Test​
+
+Before full evaluation, verify the persona is present:
+
+# Enable inference mode
+FastLanguageModel.for_inference(model)
+
+# Test prompts
+test_prompts = [
+    "Create a task called Review Q4 budget",
+    "I just finished the presentation",
+    "What should I focus on today?",
+]
+
+for prompt in test_prompts:
+    messages = [{"role": "user", "content": prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    outputs = model.generate(
+        input_ids=inputs,
+        max_new_tokens=150,
+        temperature=0.7,
+        do_sample=True,
+    )
+
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Extract assistant response
+    if "assistant" in response:
+        assistant_response = response.split("assistant")[-1].strip()
+    else:
+        assistant_response = response
+
+    print(f"\nUser: {prompt}")
+    print(f"TaskMaster: {assistant_response[:200]}")
+
+
+Output:
+
+User: Create a task called Review Q4 budget
+TaskMaster: Great choice! I've created 'Review Q4 budget' for you. Financial reviews are exactly the kind of proactive work that keeps projects on track. When would you like to tackle this?
+
+User: I just finished the presentation
+TaskMaster: Nice work! Presentation complete—that's a big one checked off. You're making solid progress today. Ready for your next focus item?
+
+User: What should I focus on today?
+TaskMaster: Let's take a look at your priorities. Based on your task list, I'd recommend starting with your high-priority items. What's the most important deadline you're working toward?
+
+
+Look for:
+
+TaskMaster vocabulary: "Great choice!", "Nice work!", "You're on track"
+Structure: Acknowledge → Deliver → Propel
+Tone: Encouraging, productivity-focused, action-oriented
+
+If responses seem generic or don't match the persona, training may need more epochs or data refinement.
+
+Update Your Skill​
+
+Add the training configuration to your skill:
+
+## Persona Training Configuration
+
+### Recommended Settings
+```python
+# For 200-500 example persona dataset
+training_args = TrainingArguments(
+    num_train_epochs=3,           # 3-5 for persona
+    learning_rate=2e-4,           # Standard LoRA
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4, # Effective batch 8
+    lr_scheduler_type="cosine",
+    warmup_steps=10,
+)
+
+Healthy Training Signals​
+Loss decreases steadily from ~1.3 to ~0.2-0.4
+No sudden spikes or plateaus
+Final loss 0.2-0.4 indicates good persona absorption
+Troubleshooting​
+Issue	Symptom	Fix
+Underfitting	Loss stays > 0.8	Increase epochs, check data
+Overfitting	Loss → 0, generic output	Reduce epochs, add dropout
+Memory error	OOM during training	Reduce batch size
+Slow training	> 30 min for 200 examples	Check GPU allocation
+
+## Try With AI
+
+### Prompt 1: Analyze Your Training Logs
+
+
+
+Here are my persona training logs:
+
+[Paste your training output]
+
+Help me interpret:
+
+Is the loss curve healthy for persona training?
+Should I train for more epochs?
+Are there any warning signs?
+What final loss should I expect for good persona consistency?
+
+**What you're learning**: Training log interpretation. Understanding what healthy training looks like helps you know when to stop and when to continue.
+
+### Prompt 2: Troubleshoot Training Issues
+
+
+
+My persona training isn't working as expected:
+
+Issue: [describe—loss too high, persona not appearing, OOM, etc.]
+
+My configuration:
+
+Model: [base model]
+Dataset size: [number of examples]
+Epochs: [number]
+Learning rate: [rate]
+Batch size: [effective batch]
+
+Help me diagnose and fix this issue.
+
+
+**What you're learning**: Debugging methodology. Fine-tuning involves troubleshooting. You're building the ability to identify and fix training problems.
+
+### Prompt 3: Optimize for Your Hardware
+
+
+
+I want to run persona training on [describe your hardware: Colab T4 / RTX 3080 / etc.].
+
+My constraints:
+
+VRAM: [available GB]
+Training time budget: [max hours]
+Dataset size: [examples]
+
+Help me configure training to maximize quality within these constraints:
+
+Batch size and gradient accumulation
+Model precision settings
+Whether to use QLoRA or LoRA
+Any memory optimization techniques
+
+**What you're learning**: Resource optimization. Different hardware requires different configurations. You're learning to adapt training to your specific constraints.
+
+### Safety Note
+
+Training on free Colab has runtime limits (typically 12 hours with potential disconnections). Save checkpoints frequently (save_strategy="epoch") and consider downloading adapters as soon as training completes. For production persona training, consider Colab Pro or dedicated GPU resources to ensure training completes without interruption.

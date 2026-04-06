@@ -1,0 +1,603 @@
+Testing FastAPI Endpoints
+
+You built the Task API in Chapter 70. Now you test it.
+
+When you developed your Task API, you probably tested it manually—clicking through API docs, sending curl requests, checking responses. That works for exploration, but it doesn't scale. Every time you change the code, you'd need to repeat those manual tests. And you won't. Nobody does.
+
+Automated tests solve this. They run in milliseconds, execute on every commit, and catch regressions before they reach production. For FastAPI applications, the standard approach is httpx with ASGITransport—this lets you test your app without starting a server, making tests fast and reliable.
+
+This lesson teaches you to test FastAPI endpoints using httpx AsyncClient. You'll learn the dependency override pattern for mocking database sessions and authentication, and you'll write tests for all HTTP methods. By the end, you'll have a complete test suite for your Task API.
+
+Why httpx Instead of TestClient​
+
+FastAPI's documentation shows TestClient from Starlette. So why httpx?
+
+TestClient is synchronous. It wraps your async code in a synchronous interface. This works for simple cases but creates problems when:
+
+Your tests need to set up async fixtures
+You want to test websockets or streaming responses
+Your test code needs to await other operations
+
+httpx is natively async. It matches your async FastAPI code naturally:
+
+# With TestClient (synchronous wrapper)
+def test_endpoint():
+    response = client.get("/tasks")  # Sync, even though FastAPI is async
+
+# With httpx AsyncClient (native async)
+async def test_endpoint():
+    response = await client.get("/tasks")  # Async, matching FastAPI
+
+
+For agent applications where everything is async—database queries, LLM calls, external APIs—httpx is the right tool.
+
+The httpx AsyncClient Pattern​
+
+Here's the core pattern for testing FastAPI with httpx:
+
+from httpx import ASGITransport, AsyncClient
+from app.main import app
+
+@pytest.fixture
+async def client():
+    """Create async test client."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        yield ac
+
+
+Output:
+
+# When you run pytest with this fixture, each test gets a fresh client
+# The client talks directly to your app—no HTTP server needed
+
+
+Let's break this down:
+
+Component	Purpose
+ASGITransport(app=app)	Routes requests directly to your FastAPI app
+base_url="http://test"	Required by httpx, but no server runs here
+async with ... as ac	Context manager handles client lifecycle
+yield ac	Provides client to test, cleans up after
+
+The ASGITransport is the key. It takes your FastAPI app and routes requests directly to it, bypassing the network entirely. Tests run fast—typically under 100ms even for complex endpoints.
+
+Dependency Overrides for Testing​
+
+Real FastAPI applications have dependencies: database sessions, authentication, configuration. Tests shouldn't use production resources. Instead, you override dependencies with test implementations.
+
+The Pattern​
+from app.main import app
+from app.database import get_session
+from app.auth import get_current_user
+
+# Test implementations
+async def get_test_session():
+    async with TestAsyncSession() as session:
+        yield session
+
+def get_test_user():
+    return {"sub": "test-user-123", "email": "test@example.com"}
+
+@pytest.fixture
+async def client():
+    # Override dependencies
+    app.dependency_overrides[get_session] = get_test_session
+    app.dependency_overrides[get_current_user] = get_test_user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        yield ac
+
+    # Clean up overrides
+    app.dependency_overrides.clear()
+
+
+Output:
+
+# When tests run:
+# - get_session returns test database session (in-memory SQLite)
+# - get_current_user returns mock user (no real auth needed)
+# - Original dependencies are restored after each test
+
+
+Why this matters:
+
+Dependency	Production	Test
+get_session	PostgreSQL connection	In-memory SQLite
+get_current_user	JWT validation	Hard-coded test user
+get_settings	Environment variables	Test configuration
+
+Tests run in complete isolation. No database server. No auth service. Just your code.
+
+Complete conftest.py Template​
+
+Here's the full conftest.py you need for testing a Task API:
+
+# tests/conftest.py
+import os
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+# Set environment BEFORE imports
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("OPENAI_API_KEY", "test-key-not-used")
+
+from app.main import app
+from app.database import get_session
+from app.auth import get_current_user
+
+# Test database configuration
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    poolclass=StaticPool,
+    connect_args={"check_same_thread": False},
+)
+
+TestAsyncSession = async_sessionmaker(
+    test_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+# Mock user for authenticated endpoints
+TEST_USER = {
+    "sub": "test-user-123",
+    "email": "test@example.com",
+    "role": "user",
+}
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create event loop for session-scoped fixtures."""
+    import asyncio
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture(autouse=True)
+async def setup_database():
+    """Create tables before each test, drop after."""
+    async with test_engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    yield
+    async with test_engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all)
+
+
+async def get_test_session():
+    """Override for database session dependency."""
+    async with TestAsyncSession() as session:
+        yield session
+
+
+def get_test_user():
+    """Override for authentication dependency."""
+    return TEST_USER
+
+
+@pytest.fixture
+async def client():
+    """Async test client with mocked dependencies."""
+    app.dependency_overrides[get_session] = get_test_session
+    app.dependency_overrides[get_current_user] = get_test_user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        yield ac
+
+    app.dependency_overrides.clear()
+
+
+Output:
+
+# This conftest.py provides:
+# - Fresh in-memory database for each test
+# - Mocked authentication (no JWT needed)
+# - Async test client ready to use
+# - Automatic cleanup after each test
+
+
+Key features:
+
+Environment variables set first - Before any imports, preventing production config from loading
+StaticPool for SQLite - Required for in-memory database to persist across transactions
+autouse fixture - Creates fresh tables for every test automatically
+Dependency overrides cleared - Prevents test pollution
+Testing HTTP Methods​
+
+Now let's test all HTTP methods for a /tasks endpoint.
+
+Testing GET (List)​
+# tests/test_tasks.py
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_empty(client: AsyncClient):
+    """Test GET /tasks returns empty list initially."""
+    response = await client.get("/api/tasks")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_list_tasks_empty
+
+Testing POST (Create)​
+@pytest.mark.asyncio
+async def test_create_task(client: AsyncClient):
+    """Test POST /tasks creates a new task."""
+    response = await client.post(
+        "/api/tasks",
+        json={"title": "Write tests", "priority": "high"},
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["title"] == "Write tests"
+    assert data["priority"] == "high"
+    assert data["status"] == "pending"
+    assert "id" in data
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_create_task
+
+Testing GET (Single Item)​
+@pytest.mark.asyncio
+async def test_get_task(client: AsyncClient):
+    """Test GET /tasks/{id} returns the task."""
+    # Create a task first
+    create_response = await client.post(
+        "/api/tasks",
+        json={"title": "Test task"},
+    )
+    task_id = create_response.json()["id"]
+
+    # Get the task
+    response = await client.get(f"/api/tasks/{task_id}")
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Test task"
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_get_task
+
+Testing PUT (Full Update)​
+
+PUT replaces the entire resource:
+
+@pytest.mark.asyncio
+async def test_update_task_put(client: AsyncClient):
+    """Test PUT /tasks/{id} replaces the task."""
+    # Create a task
+    create_response = await client.post(
+        "/api/tasks",
+        json={"title": "Original", "priority": "low", "status": "pending"},
+    )
+    task_id = create_response.json()["id"]
+
+    # Replace with PUT
+    response = await client.put(
+        f"/api/tasks/{task_id}",
+        json={"title": "Updated", "priority": "high", "status": "in_progress"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "Updated"
+    assert data["priority"] == "high"
+    assert data["status"] == "in_progress"
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_update_task_put
+
+Testing PATCH (Partial Update)​
+
+PATCH updates only specified fields:
+
+@pytest.mark.asyncio
+async def test_update_task_patch(client: AsyncClient):
+    """Test PATCH /tasks/{id} updates only specified fields."""
+    # Create a task
+    create_response = await client.post(
+        "/api/tasks",
+        json={"title": "Original", "priority": "low"},
+    )
+    task_id = create_response.json()["id"]
+
+    # Partial update with PATCH
+    response = await client.patch(
+        f"/api/tasks/{task_id}",
+        json={"priority": "high"},  # Only update priority
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "Original"  # Unchanged
+    assert data["priority"] == "high"   # Updated
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_update_task_patch
+
+Testing DELETE​
+@pytest.mark.asyncio
+async def test_delete_task(client: AsyncClient):
+    """Test DELETE /tasks/{id} removes the task."""
+    # Create a task
+    create_response = await client.post(
+        "/api/tasks",
+        json={"title": "To delete"},
+    )
+    task_id = create_response.json()["id"]
+
+    # Delete it
+    response = await client.delete(f"/api/tasks/{task_id}")
+    assert response.status_code == 200
+
+    # Verify it's gone
+    get_response = await client.get(f"/api/tasks/{task_id}")
+    assert get_response.status_code == 404
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_delete_task
+
+Testing Error Responses​
+
+Happy paths are easy. Error handling is where bugs hide.
+
+404 Not Found​
+@pytest.mark.asyncio
+async def test_get_task_not_found(client: AsyncClient):
+    """Test GET /tasks/{id} returns 404 for missing task."""
+    response = await client.get("/api/tasks/99999")
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_get_task_not_found
+
+422 Validation Error​
+@pytest.mark.asyncio
+async def test_create_task_invalid_data(client: AsyncClient):
+    """Test POST /tasks returns 422 for invalid data."""
+    response = await client.post(
+        "/api/tasks",
+        json={"title": ""},  # Empty title should fail validation
+    )
+
+    assert response.status_code == 422
+    # FastAPI includes validation details
+    assert "detail" in response.json()
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_create_task_invalid_data
+
+401 Unauthorized​
+
+For this test, we need to clear the auth override temporarily:
+
+@pytest.mark.asyncio
+async def test_endpoint_requires_auth(client: AsyncClient):
+    """Test endpoints require authentication."""
+    # Remove auth override to test real behavior
+    from app.main import app
+    from app.auth import get_current_user
+
+    # Clear just the auth override
+    if get_current_user in app.dependency_overrides:
+        del app.dependency_overrides[get_current_user]
+
+    try:
+        response = await client.get("/api/tasks")
+        assert response.status_code == 401
+    finally:
+        # Restore for other tests
+        app.dependency_overrides[get_current_user] = get_test_user
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_endpoint_requires_auth
+
+Query Parameter Testing​
+
+Test filtering, pagination, and search:
+
+@pytest.mark.asyncio
+async def test_list_tasks_with_filter(client: AsyncClient):
+    """Test GET /tasks with status filter."""
+    # Create tasks with different statuses
+    await client.post("/api/tasks", json={"title": "Pending", "status": "pending"})
+    await client.post("/api/tasks", json={"title": "Done", "status": "completed"})
+
+    # Filter by status
+    response = await client.get("/api/tasks", params={"status": "pending"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["title"] == "Pending"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_with_pagination(client: AsyncClient):
+    """Test GET /tasks with pagination."""
+    # Create multiple tasks
+    for i in range(15):
+        await client.post("/api/tasks", json={"title": f"Task {i}"})
+
+    # Get first page
+    response = await client.get("/api/tasks", params={"limit": 10, "offset": 0})
+
+    assert response.status_code == 200
+    assert len(response.json()) == 10
+
+    # Get second page
+    response = await client.get("/api/tasks", params={"limit": 10, "offset": 10})
+
+    assert response.status_code == 200
+    assert len(response.json()) == 5
+
+
+Output:
+
+PASSED tests/test_tasks.py::test_list_tasks_with_filter
+PASSED tests/test_tasks.py::test_list_tasks_with_pagination
+
+Hands-On Exercise​
+
+Build a complete test suite for your Task API.
+
+Step 1: Create conftest.py​
+
+Copy the complete conftest.py template from above into tests/conftest.py. Adjust the imports to match your project structure.
+
+Step 2: Create test_tasks.py​
+
+Create tests/test_tasks.py with tests for:
+
+test_list_tasks_empty - Empty list initially
+test_create_task - Create with valid data
+test_get_task - Get by ID
+test_update_task_put - Full update
+test_update_task_patch - Partial update
+test_delete_task - Delete and verify gone
+test_get_task_not_found - 404 for missing
+test_create_task_invalid - 422 for bad data
+Step 3: Run the Tests​
+pytest tests/test_tasks.py -v
+
+
+Expected Output:
+
+========================= test session starts ==========================
+platform darwin -- Python 3.12.0, pytest-8.3.4
+plugins: asyncio-0.24.0, cov-6.0.0
+asyncio: mode=auto, default_loop_scope=function
+collected 8 items
+
+tests/test_tasks.py::test_list_tasks_empty PASSED                  [ 12%]
+tests/test_tasks.py::test_create_task PASSED                       [ 25%]
+tests/test_tasks.py::test_get_task PASSED                          [ 37%]
+tests/test_tasks.py::test_update_task_put PASSED                   [ 50%]
+tests/test_tasks.py::test_update_task_patch PASSED                 [ 62%]
+tests/test_tasks.py::test_delete_task PASSED                       [ 75%]
+tests/test_tasks.py::test_get_task_not_found PASSED                [ 87%]
+tests/test_tasks.py::test_create_task_invalid PASSED               [100%]
+
+========================== 8 passed in 0.42s ===========================
+
+Try With AI​
+Prompt 1: Generate Test for New Endpoint​
+
+You've added a new endpoint to your Task API. Ask AI to generate a test:
+
+I added a new endpoint to my Task API:
+
+@app.get("/api/tasks/{task_id}/subtasks")
+async def list_subtasks(
+    task_id: int,
+    session: AsyncSession = Depends(get_session)
+):
+    # Returns subtasks for a task
+    ...
+
+Generate a test for this endpoint. Include:
+1. Happy path - task exists with subtasks
+2. Happy path - task exists with no subtasks (empty list)
+3. Error case - parent task doesn't exist (404)
+
+
+What you're learning: AI generates test boilerplate quickly. Your job is to verify the generated tests actually exercise the right behavior and handle edge cases correctly.
+
+Prompt 2: Simplify Generated Test​
+
+AI often generates overly complex fixtures. Refine them:
+
+Your generated test creates a complex fixture chain:
+- create_project fixture
+- create_task fixture that depends on project
+- create_subtasks fixture that depends on task
+
+I want simpler tests. The subtasks endpoint only needs a task_id.
+Rewrite the test to use a simple fixture that creates a task
+directly, without the project dependency.
+
+
+What you're learning: You teach AI your testing conventions and simplicity preferences. AI adapts when you provide clear feedback about what you need.
+
+Prompt 3: Iterate on Edge Cases​
+
+Collaborate on identifying what else to test:
+
+Let's identify edge cases for the subtasks endpoint together.
+I'm thinking:
+- Empty list when no subtasks exist
+- Pagination when many subtasks
+- Invalid parent task ID (404)
+
+What other edge cases should we test? Consider:
+- Authorization (can user A see user B's subtasks?)
+- Sorting and ordering
+- Maximum limits
+
+
+What you're learning: Collaborative test case discovery. Neither you nor AI alone thinks of everything. The conversation surfaces cases you'd miss solo.
+
+Reflect on Your Skill​
+Test Your Skill​
+Using my agent-tdd skill, generate a test for a FastAPI endpoint
+that requires authentication. Does my skill include:
+1. The httpx AsyncClient with ASGITransport pattern?
+2. The dependency override pattern for get_session and get_current_user?
+3. A complete conftest.py template I can copy?
+
+Identify Gaps​
+
+Review your skill's response:
+
+Does it handle ASGITransport correctly (not TestClient)?
+Does it show how to clear overrides after tests?
+Does it include error response testing (404, 422, 401)?
+Does it explain PUT vs PATCH testing differences?
+Improve Your Skill​
+My agent-tdd skill needs FastAPI testing patterns. Add:
+1. httpx AsyncClient with ASGITransport (not TestClient)
+2. Complete dependency override pattern with cleanup
+3. conftest.py template with in-memory SQLite and mock auth
+4. HTTP method testing patterns (GET, POST, PUT, PATCH, DELETE)
+5. Error response testing (404, 422, 401)

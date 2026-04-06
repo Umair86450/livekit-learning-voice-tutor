@@ -1,0 +1,376 @@
+Image Scanning and Supply Chain Security
+
+In December 2020, attackers compromised SolarWinds' build system and injected malicious code into a software update that was distributed to 18,000 organizations, including the U.S. Treasury and Department of Homeland Security. The attackers didn't hack into those agencies directly—they poisoned the software supply chain, trusting that victims would install the update themselves.
+
+Your Task API container image pulls from base images, installs packages, and bundles dependencies. Each layer introduces potential vulnerabilities. Without scanning, you deploy unknown risks into production. Without provenance verification, you trust that images are what they claim to be.
+
+In May 2024, the XZ Utils backdoor (CVE-2024-3094) demonstrated how attackers can compromise widely-used libraries through patient, multi-year social engineering. The malicious code was caught just days before making it into major Linux distributions. This lesson teaches you to build automated defenses against these supply chain attacks.
+
+Install Trivy​
+
+Trivy is an open-source vulnerability scanner that analyzes container images, filesystems, and IaC configurations. Aqua Security maintains it, and it's the most widely adopted scanner in the Kubernetes ecosystem.
+
+Install on macOS:
+
+brew install trivy
+
+
+Output:
+
+==> Downloading https://ghcr.io/v2/homebrew/core/trivy/manifests/0.50.1
+==> Installing trivy
+==> Pouring trivy--0.50.1.arm64_sonoma.bottle.tar.gz
+🍺  /opt/homebrew/Cellar/trivy/0.50.1: 11 files, 91.2MB
+
+
+Install on Linux:
+
+curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+
+Output:
+
+aquasecurity/trivy info checking GitHub for latest release
+aquasecurity/trivy info found version: 0.50.1
+aquasecurity/trivy info installed /usr/local/bin/trivy
+
+
+Verify installation:
+
+trivy --version
+
+
+Output:
+
+Version: 0.50.1
+
+Scan Your Task API Image​
+
+Run a basic vulnerability scan against your Task API image:
+
+trivy image task-api:latest
+
+
+Output:
+
+2024-05-15T10:23:45.123Z  INFO  Vulnerability scanning is enabled
+2024-05-15T10:23:45.123Z  INFO  Secret scanning is enabled
+2024-05-15T10:23:47.456Z  INFO  Detected OS: debian
+2024-05-15T10:23:47.456Z  INFO  Detecting Debian vulnerabilities...
+
+task-api:latest (debian 12.5)
+=============================
+Total: 142 (UNKNOWN: 0, LOW: 87, MEDIUM: 43, HIGH: 11, CRITICAL: 1)
+
+┌──────────────────────┬────────────────┬──────────┬─────────────────────┬───────────────┬─────────────────────────────────────────┐
+│       Library        │ Vulnerability  │ Severity │  Installed Version  │ Fixed Version │                  Title                  │
+├──────────────────────┼────────────────┼──────────┼─────────────────────┼───────────────┼─────────────────────────────────────────┤
+│ libssl3              │ CVE-2024-0727  │ CRITICAL │ 3.0.11-1~deb12u1    │ 3.0.13-1~deb12u1 │ openssl: denial of service via null... │
+│ libcurl4             │ CVE-2024-2398  │ HIGH     │ 7.88.1-10+deb12u4   │ 7.88.1-10+deb12u5 │ curl: HTTP/2 push headers memory leak │
+│ python3.11           │ CVE-2024-0450  │ HIGH     │ 3.11.2-6            │ 3.11.2-6+deb12u2 │ python: zipfile extracts outside dir.. │
+...
+
+
+Understanding the output:
+
+Column	Meaning
+Library	The vulnerable package or library
+Vulnerability	CVE identifier (lookup at nvd.nist.gov)
+Severity	CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN
+Installed Version	What's in your image
+Fixed Version	Patched version (if available)
+Title	Brief description of the vulnerability
+Severity Levels and Remediation Priority​
+
+Not all vulnerabilities require immediate action. Prioritize based on severity and context:
+
+Severity	CVSS Score	Action Required	Timeframe
+CRITICAL	9.0 - 10.0	Stop deployment, fix immediately	Same day
+HIGH	7.0 - 8.9	Schedule fix, monitor for exploits	Within 7 days
+MEDIUM	4.0 - 6.9	Plan fix in next release	Within 30 days
+LOW	0.1 - 3.9	Fix when convenient	Within 90 days
+
+Filter by severity:
+
+trivy image task-api:latest --severity HIGH,CRITICAL
+
+
+Output:
+
+task-api:latest (debian 12.5)
+=============================
+Total: 12 (HIGH: 11, CRITICAL: 1)
+
+┌──────────────────────┬────────────────┬──────────┬─────────────────────┬───────────────┐
+│       Library        │ Vulnerability  │ Severity │  Installed Version  │ Fixed Version │
+├──────────────────────┼────────────────┼──────────┼─────────────────────┼───────────────┤
+│ libssl3              │ CVE-2024-0727  │ CRITICAL │ 3.0.11-1~deb12u1    │ 3.0.13-1~deb12u1 │
+│ libcurl4             │ CVE-2024-2398  │ HIGH     │ 7.88.1-10+deb12u4   │ 7.88.1-10+deb12u5 │
+...
+
+
+Decision framework for CRITICAL vulnerabilities:
+
+Is there a fixed version? If yes, update base image or package
+Is the vulnerable code reachable? If the library is included but unused, risk is lower
+Is there a known exploit? Check Exploit Database or GitHub advisories
+Can you mitigate without patching? NetworkPolicies, WAF rules, input validation
+CI/CD Integration​
+
+Integrate Trivy into your GitHub Actions workflow to prevent vulnerable images from reaching production.
+
+Create .github/workflows/security-scan.yml:
+
+name: Container Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  trivy-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t task-api:${{ github.sha }} .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'task-api:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+
+      - name: Run Trivy scanner (full report)
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: 'task-api:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+
+What this workflow does:
+
+Step	Purpose
+Build image	Creates image tagged with commit SHA
+Run Trivy (exit-code: 1)	Fails the build if CRITICAL vulnerabilities found
+Run Trivy (full report)	Generates SARIF report for all severity levels
+Upload SARIF	Displays results in GitHub Security tab
+
+Output when CRITICAL vulnerability detected:
+
+Run aquasecurity/trivy-action@master
+2024-05-15T10:30:00Z  INFO  Number of vulnerabilities: 142
+2024-05-15T10:30:00Z  FATAL  1 CRITICAL vulnerability found
+Error: Process completed with exit code 1.
+
+
+The build fails, preventing deployment of the vulnerable image.
+
+Generate SBOM (Software Bill of Materials)​
+
+An SBOM lists every component in your container image—base OS packages, language dependencies, and application libraries. Compliance frameworks (SOC2, FedRAMP) increasingly require SBOMs for software audit trails.
+
+Generate SBOM in SPDX format:
+
+trivy image task-api:latest --format spdx-json --output sbom.json
+
+
+Output:
+
+2024-05-15T10:35:00Z  INFO  Generating SBOM in SPDX format
+2024-05-15T10:35:02Z  INFO  SBOM written to sbom.json
+
+
+Inspect the SBOM:
+
+cat sbom.json | jq '.packages | length'
+
+
+Output:
+
+247
+
+
+Your Task API image contains 247 distinct packages. When a new CVE is announced, you can search your SBOM to determine if you're affected:
+
+cat sbom.json | jq '.packages[] | select(.name | contains("openssl"))'
+
+
+Output:
+
+{
+  "SPDXID": "SPDXRef-Package-openssl-3.0.11",
+  "name": "openssl",
+  "versionInfo": "3.0.11-1~deb12u1",
+  "supplier": "Organization: Debian",
+  "downloadLocation": "https://packages.debian.org/openssl"
+}
+
+
+SBOM formats:
+
+Format	Use Case
+SPDX (JSON/TV)	Linux Foundation standard, wide adoption
+CycloneDX	OWASP project, good for application dependencies
+Syft	Anchore format, focused on container images
+
+For compliance, generate both SPDX and CycloneDX:
+
+trivy image task-api:latest --format cyclonedx --output sbom-cdx.json
+
+Image Signing with Cosign (Overview)​
+
+Trivy detects vulnerabilities, but doesn't verify that an image is authentic. Cosign, part of the Sigstore project, signs container images cryptographically so you can verify provenance before deployment.
+
+Why signing matters:
+
+Tampering detection: Unsigned images could be modified in transit
+Audit trail: Know exactly which pipeline built and approved an image
+Policy enforcement: Require signatures before deployment
+
+Sign an image (keyless with OIDC):
+
+cosign sign ghcr.io/myorg/task-api:v1.0.0
+
+
+Output:
+
+Generating ephemeral keys...
+Retrieving signed certificate...
+tlog entry created with index: 12345678
+Pushing signature to: ghcr.io/myorg/task-api:sha256-abc123.sig
+
+
+Cosign uses keyless signing by default, authenticating via OIDC (GitHub, Google, Microsoft). No private keys to manage.
+
+Verify before deployment:
+
+cosign verify ghcr.io/myorg/task-api:v1.0.0
+
+
+Output:
+
+Verification for ghcr.io/myorg/task-api:v1.0.0 --
+The following checks were performed:
+- The cosign claims were validated
+- The transparency log was verified
+- The signatures were verified
+
+
+Production recommendation: Use Kubernetes admission controllers (Kyverno, Gatekeeper) to enforce signature verification at deploy time. Without enforcement, signing is just documentation.
+
+Digest Pinning​
+
+Container tags are mutable—task-api:latest can point to different images over time. Attackers who compromise a registry can push malicious images using the same tag.
+
+The problem with tags:
+
+# VULNERABLE: tag can be changed after you verified the image
+image: ghcr.io/myorg/task-api:v1.0.0
+
+
+The solution: digest pinning:
+
+# SECURE: digest is immutable, tied to exact image content
+image: ghcr.io/myorg/task-api:v1.0.0@sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4
+
+
+Get the digest for your image:
+
+docker inspect --format='{{index .RepoDigests 0}}' task-api:latest
+
+
+Output:
+
+ghcr.io/myorg/task-api@sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4
+
+
+Best practice workflow:
+
+Build and scan image in CI
+Sign image with Cosign
+Push image with tag AND digest
+Deploy using digest-pinned reference
+Store digest in Git for audit trail
+Security Checklist for Task API​
+
+Before promoting your Task API image to production, verify:
+
+Check	Command	Expected Result
+No CRITICAL vulnerabilities	trivy image task-api:latest --severity CRITICAL --exit-code 1	Exit code 0
+SBOM generated	trivy image task-api:latest --format spdx-json -o sbom.json	File exists
+Image signed (optional)	cosign verify ghcr.io/myorg/task-api:v1.0.0	Verification succeeded
+Digest captured	docker inspect --format='{{index .RepoDigests 0}}'	SHA256 hash returned
+Reflect on Your Skill​
+
+Test your cloud-security skill against what you learned:
+
+Using my cloud-security skill, help me secure the CI/CD pipeline for
+a new microservice that:
+- Builds Docker images from a Python FastAPI application
+- Pushes to GitHub Container Registry
+- Deploys to Kubernetes via ArgoCD
+- Must comply with SOC2 requirements
+
+What scanning, signing, and SBOM generation should I implement?
+
+
+Evaluation questions:
+
+Does your skill recommend Trivy scanning with --exit-code 1 for CRITICAL severity?
+Does your skill suggest generating SBOMs for compliance audit trails?
+Does your skill mention Cosign signing for image provenance?
+Does your skill recommend digest pinning over tag-only references?
+Does your skill integrate security checks as pipeline gates (not just reports)?
+
+If any answers are "no," update your skill with the patterns from this lesson.
+
+Try With AI​
+
+Test your understanding of image scanning and supply chain security.
+
+Prompt 1:
+
+Create a GitHub Actions workflow that scans a container image with Trivy,
+fails on HIGH or CRITICAL vulnerabilities, and uploads results to GitHub
+Security tab. Use the official trivy-action.
+
+
+What you're learning: Whether you understand CI/CD integration with Trivy. Key elements: exit-code: '1', severity: 'CRITICAL,HIGH', SARIF format upload. The workflow should stop deployment on security issues, not just report them.
+
+Prompt 2:
+
+My Trivy scan shows 200+ vulnerabilities in my Python application image,
+but most are LOW severity from the Debian base image. How do I reduce
+noise to focus on what matters? What base image alternatives might help?
+
+
+What you're learning: Practical vulnerability management. Strategies include: Alpine/Distroless base images (fewer packages = fewer CVEs), multi-stage builds (dev dependencies excluded from final image), filtering by severity and fixability, ignoring vulnerabilities in packages your code doesn't use.
+
+Prompt 3:
+
+Explain to a non-technical stakeholder why we need both image scanning
+AND image signing. Use an analogy they would understand. How do these
+relate to compliance requirements like SOC2?
+
+
+What you're learning: How to communicate security concepts to business stakeholders. Scanning is like checking a package for damage before accepting delivery. Signing is like a tamper-evident seal proving the package wasn't opened in transit. SOC2 requires evidence of both vulnerability management (scanning) and change management (signing provides audit trail).
+
+SECURITY REMINDER
+
+Trivy and other scanners only detect known vulnerabilities with assigned CVEs. Zero-day vulnerabilities won't appear in scan results. Defense in depth—NetworkPolicies, Pod Security Standards, RBAC—provides protection even when vulnerabilities exist in your code or dependencies. Scanning is essential but not sufficient.

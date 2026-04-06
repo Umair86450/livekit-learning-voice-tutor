@@ -1,0 +1,385 @@
+Event-Driven Architecture Concepts
+
+Imagine you're at a restaurant. In a synchronous world, you'd place your order and the waiter would stand frozen at your table, unable to serve anyone else, until the kitchen finished cooking your meal. Every customer would wait in a single line. One slow dish would block the entire restaurant.
+
+Real restaurants don't work this way. You place your order (a command), the kitchen receives it, and you're free to chat with friends while your food is being prepared. When it's ready, a runner delivers it (an event has occurred). Multiple orders process in parallel. A slow steak doesn't stop someone else from getting their salad.
+
+Event-driven architecture applies this same principle to software. Instead of services waiting on each other in locked conversations, they communicate through events—facts about things that happened. This lesson explores the core concepts that make this work.
+
+Events vs Commands: The Fundamental Distinction​
+
+This is the single most important concept in event-driven architecture. Get this right, and everything else follows.
+
+What's an Event?​
+
+An event is an immutable fact about something that happened in the past. It's already occurred—you can't change it, reject it, or fail to process it in a way that un-does it.
+
+Event characteristics:
+
+Past tense naming: OrderCreated, PaymentProcessed, TaskCompleted
+Immutable: Once recorded, events never change
+Facts, not requests: "This happened" not "Please do this"
+Multiple consumers: Any number of services can react to the same event
+
+Example events:
+
+TaskCreated { task_id: "task-123", title: "Buy groceries", created_at: "2025-01-15T10:30:00Z" }
+UserRegistered { user_id: "user-456", email: "alice@example.com" }
+PaymentReceived { payment_id: "pay-789", amount: 99.99, currency: "USD" }
+
+What's a Command?​
+
+A command is a request to perform an action. It might succeed or fail. It's directed at a specific handler that decides what to do.
+
+Command characteristics:
+
+Imperative naming: CreateOrder, ProcessPayment, CompleteTask
+Can fail: The handler might reject the request
+Directed: Sent to a specific recipient who must respond
+Single handler: One service processes each command
+
+Example commands:
+
+CreateTask { title: "Buy groceries", owner_id: "user-456" }
+RegisterUser { email: "alice@example.com", password: "..." }
+ChargeCard { card_token: "tok_xxx", amount: 99.99 }
+
+The Critical Difference​
+Aspect	Event	Command
+Naming	Past tense (TaskCreated)	Imperative (CreateTask)
+Timing	Already happened	Requesting action
+Mutability	Immutable (fact)	Can be rejected
+Consumers	Multiple (broadcast)	Single (directed)
+Failure mode	Consumers may fail to react	Command may be rejected
+Coupling	Loose (producer doesn't know consumers)	Tight (sender knows receiver)
+Why This Matters​
+
+When you send a command, you're coupled to the receiver. You must know who handles CreateTask, wait for their response, and handle their errors.
+
+When you publish an event, you're decoupled. You announce "TaskCreated happened" and walk away. Zero, one, or fifty services might react. You don't know. You don't care.
+
+This decoupling is what enables systems to scale independently, fail gracefully, and evolve without coordination.
+
+Eventual Consistency: The Trade-off That Enables Scale​
+
+In synchronous systems, when you save data, it's immediately visible everywhere. This is strong consistency.
+
+In event-driven systems, changes propagate through events. There's a delay between when something happens and when all services have processed it. This is eventual consistency.
+
+The Bank Transfer Example​
+
+Consider transferring $100 from your checking account to your savings account:
+
+Strong consistency approach:
+
+Lock both accounts
+Debit checking: $500 → $400
+Credit savings: $200 → $300
+Unlock both accounts
+Both balances visible immediately
+
+This requires a distributed transaction across accounts. If either account is unavailable, the entire transfer fails.
+
+Eventual consistency approach:
+
+Debit checking: $500 → $400, emit FundsDebited event
+(milliseconds later) Savings receives event, credits: $200 → $300
+
+For a brief moment, the $100 exists in neither account (already debited, not yet credited). But:
+
+The system is designed to handle this
+The transfer will complete within milliseconds
+No distributed lock required
+Either service can operate independently
+Why Eventual Consistency Works​
+
+Humans already accept delays. Consider:
+
+Scenario	Delay you accept
+Direct deposit paycheck	Up to 3 days
+Credit card charge	24-48 hours to appear
+Stock trade settlement	T+1 (next business day)
+International wire transfer	1-5 business days
+Package delivery status	Hours between updates
+
+Most business processes don't require instant consistency. They require correct eventual state.
+
+When Strong Consistency IS Required​
+
+Some scenarios genuinely need immediate consistency:
+
+Scenario	Why
+Inventory for limited items	Selling 10 concert tickets to 15 buyers is unacceptable
+Financial trading	Milliseconds matter; stale data means wrong prices
+Reservation systems	Double-booking a hotel room creates real problems
+Real-time collaborative editing	Users see each other's cursors instantly
+
+For these, you either:
+
+Use synchronous APIs with locks
+Use specialized systems designed for strong consistency (CRDTs, consensus protocols)
+Accept the complexity cost and implement carefully
+
+The key insight: Most systems don't need strong consistency, but developers default to it because it's simpler to reason about. Event-driven architecture makes you explicitly choose.
+
+Event Sourcing: The Audit Trail Pattern (Preview)​
+
+Event sourcing is an advanced pattern where you store events as the primary source of truth, not just current state.
+
+Traditional approach (state-based):
+
+Task table:
+| id      | title        | status    | updated_at          |
+|---------|--------------|-----------|---------------------|
+| task-1  | Buy groceries| completed | 2025-01-15T14:00:00Z|
+
+
+You only know the current state. History is lost.
+
+Event sourcing approach:
+
+Event log:
+| event_id | type           | data                                    | occurred_at          |
+|----------|----------------|-----------------------------------------|----------------------|
+| evt-1    | TaskCreated    | { id: "task-1", title: "Buy groceries" }| 2025-01-15T10:00:00Z |
+| evt-2    | TaskUpdated    | { id: "task-1", title: "Buy milk" }     | 2025-01-15T11:00:00Z |
+| evt-3    | TaskCompleted  | { id: "task-1" }                        | 2025-01-15T14:00:00Z |
+
+
+You have complete history. You can:
+
+Rebuild current state by replaying events
+Answer questions about past states ("What was the title at 11:30?")
+Debug issues by examining the exact sequence of events
+Satisfy compliance requirements with perfect audit trails
+
+When to consider event sourcing:
+
+Regulatory audit requirements (finance, healthcare)
+Debugging complex workflows
+Business analytics on state transitions
+Undo/redo functionality
+
+When to avoid:
+
+Simple CRUD applications
+When history has no business value
+When event volume is extremely high and storage costs matter
+
+We won't implement event sourcing in this chapter, but understanding it helps you see why events (not just state changes) are valuable.
+
+CQRS: Separating Reads and Writes (Preview)​
+
+CQRS (Command Query Responsibility Segregation) separates the models for reading and writing data.
+
+Traditional approach:
+
+TaskService
+├── createTask()      → writes to Task table
+├── updateTask()      → writes to Task table
+├── getTask()         → reads from Task table
+└── listTasksByUser() → reads from Task table
+
+
+Same model for everything.
+
+CQRS approach:
+
+Command Side (writes)
+├── CreateTaskHandler → writes events to event store
+├── UpdateTaskHandler → writes events to event store
+└── CompleteTaskHandler → writes events to event store
+
+Query Side (reads)
+├── TaskDetailView    → optimized for single task lookup
+├── TaskListView      → optimized for listing user's tasks
+└── TaskStatsView     → optimized for dashboard analytics
+
+
+Write side focuses on business logic and event generation. Read side has specialized views optimized for each query pattern.
+
+Why separate?
+
+Reads and writes have different scaling needs
+Read views can be denormalized for performance
+Write side can validate business rules without read complexity
+Each side can use appropriate storage technology
+
+This chapter doesn't implement CQRS, but knowing the concept helps you understand why Kafka (which excels at event distribution) pairs well with read-optimized databases for complex systems.
+
+When to Use EDA vs Synchronous APIs​
+
+Not everything should be event-driven. Here's a decision framework:
+
+Use Event-Driven Architecture When:​
+Scenario	Why EDA Fits
+Multiple consumers need the same data	Event fanout is natural; sync would require multiple calls
+Producer shouldn't wait for consumers	Fire-and-forget enables responsiveness
+Services should scale independently	Decoupling allows independent deployment and scaling
+Audit trail is required	Events naturally create history
+Processing can be delayed	Async allows buffering during load spikes
+Order of operations matters	Event logs preserve ordering
+
+Example: Task creation When a task is created, you need to:
+
+Send email notification
+Log to audit system
+Update analytics dashboard
+Trigger reminder scheduling
+
+With sync APIs, you'd call 4 services sequentially. Slow analytics blocks notification. EDA: publish TaskCreated, all services consume independently.
+
+Use Synchronous APIs When:​
+Scenario	Why Sync Fits
+Immediate response required	User needs result NOW
+Simple request-response	No fanout, one consumer
+Strong consistency required	Can't tolerate delay
+Low latency is critical	Event routing adds overhead
+Operation is idempotent check	"Does this user exist?" needs immediate answer
+
+Example: Login validation When a user logs in, you need to:
+
+Validate credentials
+Return success/failure immediately
+
+This is inherently synchronous. The user can't proceed until validated. Event-driven login would be awkward: "We'll email you when you're logged in."
+
+The Decision Matrix​
+Characteristic	Lean Toward EDA	Lean Toward Sync
+Consumer count	Multiple	Single
+Response time requirement	Seconds acceptable	Milliseconds required
+Failure tolerance	Retry later is OK	Must succeed now
+Consumer coupling	Unknown/changing	Known/stable
+Audit requirements	Required	Optional
+Load pattern	Spiky/bursty	Steady
+Hybrid Is Normal​
+
+Most real systems use both patterns:
+
+User submits order (sync API)
+    ↓
+Order service validates and saves (sync)
+    ↓
+Publishes OrderCreated event (async)
+    ↓
+├── Inventory service reserves stock (async)
+├── Payment service charges card (async)
+├── Notification service sends email (async)
+└── Analytics service records metrics (async)
+
+
+The initial request is synchronous (user needs confirmation). Downstream processing is event-driven (services work independently).
+
+Common EDA Anti-Patterns​
+
+As you design event-driven systems, avoid these mistakes:
+
+Anti-Pattern 1: Events That Are Really Commands​
+❌ Bad: "Please process this order" as an event
+✅ Good: "Order was placed" as an event, with consumers deciding how to react
+
+
+If you're expecting a specific receiver to do something specific, that's a command—even if you publish it to a queue.
+
+Anti-Pattern 2: Synchronous Semantics Over Events​
+❌ Bad: Publisher waits for consumer acknowledgment before proceeding
+✅ Good: Publisher fires event and continues; consumer handles asynchronously
+
+
+If you're blocking until the event is processed, you've lost the decoupling benefits.
+
+Anti-Pattern 3: Event Schema Coupled to Consumer Needs​
+❌ Bad: TaskCreated event includes notification template because email service needs it
+✅ Good: TaskCreated event includes task data; email service looks up templates
+
+
+Events should represent what happened in the producer's domain, not what consumers need.
+
+Anti-Pattern 4: Using Events for Queries​
+❌ Bad: Publish "GetUserDetails" event and wait for response
+✅ Good: Call user service API directly for queries
+
+
+Events are for facts and commands, not request-response queries.
+
+Reflect on Your Skill​
+
+You built a kafka-events skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kafka-events skill, design an event-driven architecture for an e-commerce checkout flow.
+Does my skill identify which components are producers, which are consumers, and how eventual consistency applies?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain the difference between producers, consumers, and brokers?
+Did it address eventual consistency and how to handle it in event-driven systems?
+Improve Your Skill​
+
+If you found gaps:
+
+My kafka-events skill is missing guidance on EDA fundamentals (producers, consumers, eventual consistency).
+Update it to include when to use event-driven architecture and how eventual consistency affects system design.
+
+Try With AI​
+
+You now understand the core concepts. Use AI to explore their application to your own systems.
+
+Setup​
+
+Open your AI assistant with context about event-driven architecture. These prompts help you apply concepts to real scenarios.
+
+Prompt 1: Classify Events and Commands​
+Here are 10 things that happen in an e-commerce system. For each one,
+tell me whether it should be modeled as an event or a command, explain
+why, and suggest the proper name following naming conventions:
+
+1. Customer adds item to cart
+2. System calculates shipping cost
+3. Customer submits order
+4. Payment is charged successfully
+5. Warehouse picks items
+6. Tracking number is generated
+7. Customer requests refund
+8. Refund is processed
+9. Product price is updated
+10. Inventory falls below threshold
+
+
+What you're learning: The distinction between events and commands is subtle but crucial. This exercise forces you to think about who initiates the action, whether it can fail, and how many consumers need to react. Notice how some items could be modeled either way depending on your system's needs.
+
+Prompt 2: Evaluate Consistency Requirements​
+I'm building a ticket booking system for concerts. When someone books
+a ticket, I need to:
+- Reserve the seat
+- Charge their credit card
+- Send confirmation email
+- Update the venue's available seat count
+
+Which of these require strong consistency? Which can be eventually
+consistent? Design the flow showing which are synchronous and which
+use events.
+
+
+What you're learning: Real systems mix consistency models. You'll discover that seat reservation might need synchronous locking (to prevent overselling), while email and analytics can be async. This is the judgment call you'll make repeatedly in distributed systems.
+
+Prompt 3: Design Event Schemas​
+I have a task management API. When a user creates a task, multiple
+services need to react:
+- Notification service sends email
+- Audit service logs the action
+- Analytics service tracks metrics
+- Reminder service schedules alerts
+
+Design the TaskCreated event schema. What fields should it include?
+What should it NOT include? How do you ensure the event is useful
+to all consumers without being coupled to any specific consumer's needs?
+
+
+What you're learning: Event design is about finding the right level of abstraction. Include too little and consumers can't do their job. Include too much and you're coupling to consumer needs. This exercise helps you find the balance by thinking about what genuinely represents "task was created" versus "what notification service needs."
+
+Safety Note​
+
+When designing event schemas, remember that events become contracts. Once consumers depend on a field, removing or changing it breaks them. Start with minimal events and add fields carefully. Schema evolution (covered in Lesson 10) provides patterns for safe changes, but prevention is better than migration.

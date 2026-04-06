@@ -1,0 +1,562 @@
+Delivery Semantics Deep Dive
+
+Your Task API publishes a task.created event. The notification service consumes it and sends an email. But what happens if the consumer crashes after sending the email but before committing the offset? When it restarts, it re-reads the same event---and sends a second email. Your user receives duplicate notifications. Or worse: what if the consumer commits the offset before processing, crashes mid-processing, and the email never sends at all?
+
+These aren't edge cases. In production systems handling millions of events daily, they happen regularly. Network partitions, broker restarts, consumer crashes, and deployment rollouts all create situations where the relationship between message consumption and processing outcome becomes uncertain.
+
+This lesson examines the three delivery semantic guarantees Kafka can provide, the trade-offs each involves, and the practical patterns that make at-least-once---the most common choice---work reliably. By the end, you'll have a decision framework for choosing the right semantic for your use case and the implementation knowledge to build consumers that handle duplicates gracefully.
+
+The Three Delivery Semantics​
+
+Every distributed messaging system must answer: how many times will a consumer see each message? The answer depends on where failures can occur and how the system handles them.
+
+At-Most-Once: Fast, But Messages Can Be Lost​
+
+With at-most-once delivery, a message is delivered zero or one times. If anything fails, the message is lost rather than redelivered.
+
+How it works:
+
+1. Consumer receives message from Kafka
+2. Consumer commits offset BEFORE processing
+3. Consumer processes message
+4. If processing fails: message is lost (offset already committed)
+
+from confluent_kafka import Consumer
+
+consumer = Consumer({
+    'bootstrap.servers': 'localhost:30092',
+    'group.id': 'analytics-service',
+    'enable.auto.commit': True,  # Commits before processing completes
+    'auto.commit.interval.ms': 1000
+})
+
+consumer.subscribe(['task-events'])
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None:
+        continue
+    if msg.error():
+        continue
+
+    # Offset already committed automatically
+    # If we crash HERE, message is lost
+    process_analytics(msg.value())  # May never complete
+
+
+Output:
+
+>>> # Consumer starts, processes some messages
+Processing analytics for task-123
+Processing analytics for task-124
+>>> # Consumer crashes during task-125 processing
+>>> # Consumer restarts
+>>> # task-125 is SKIPPED (offset was already committed)
+Processing analytics for task-126
+
+
+When at-most-once is acceptable:
+
+Use Case	Why Loss Is Tolerable
+Real-time metrics	Individual data points don't affect aggregate accuracy
+Activity logging	Missing log entries don't break business logic
+Click tracking	Statistical sampling is acceptable
+Sensor readings	Redundant sensors provide coverage
+
+When at-most-once is dangerous:
+
+Payment processing (lost payment = revenue loss)
+Order fulfillment (lost order = angry customer)
+Audit logging (missing audit = compliance violation)
+Inventory updates (lost update = stock discrepancy)
+At-Least-Once: Safe, But Messages May Duplicate​
+
+With at-least-once delivery, every message is delivered one or more times. If anything fails, the message is redelivered rather than lost.
+
+How it works:
+
+1. Consumer receives message from Kafka
+2. Consumer processes message
+3. Consumer commits offset AFTER processing
+4. If crash before commit: message is redelivered (duplicate)
+
+from confluent_kafka import Consumer
+
+consumer = Consumer({
+    'bootstrap.servers': 'localhost:30092',
+    'group.id': 'notification-service',
+    'enable.auto.commit': False,  # Manual commit after processing
+    'auto.offset.reset': 'earliest'
+})
+
+consumer.subscribe(['task-events'])
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None:
+        continue
+    if msg.error():
+        continue
+
+    # Process FIRST
+    send_notification(msg.value())
+
+    # Commit AFTER processing succeeds
+    # If we crash before this line, message is redelivered
+    consumer.commit(message=msg)
+
+
+Output (normal operation):
+
+>>> # Normal processing
+Sending notification for task-123
+Committed offset 42
+Sending notification for task-124
+Committed offset 43
+
+
+Output (crash and recovery):
+
+>>> # Consumer processes task-125, sends notification
+Sending notification for task-125
+>>> # CRASH before commit
+>>> # Consumer restarts from last committed offset (43)
+Sending notification for task-125  # DUPLICATE
+Committed offset 44
+Sending notification for task-126
+Committed offset 45
+
+
+Why at-least-once is the most common choice:
+
+No data loss: Every message is guaranteed to be processed
+Simpler than exactly-once: No transaction coordination required
+Duplicates are manageable: Consumers can be made idempotent
+Lower latency: No transaction overhead
+Exactly-Once: Correct, But Complex and Expensive​
+
+With exactly-once delivery, every message is delivered exactly one time---no losses, no duplicates. This requires coordinating the consumer's processing with Kafka's offset commits atomically.
+
+How it works:
+
+1. Consumer receives message from Kafka
+2. Consumer begins transaction
+3. Consumer processes message (writing results to Kafka or transactional store)
+4. Consumer commits offset AND processing results atomically
+5. If anything fails: entire transaction rolls back, message is redelivered
+
+from confluent_kafka import Consumer, Producer
+
+consumer = Consumer({
+    'bootstrap.servers': 'localhost:30092',
+    'group.id': 'order-processor',
+    'enable.auto.commit': False,
+    'isolation.level': 'read_committed'  # Only read committed messages
+})
+
+producer = Producer({
+    'bootstrap.servers': 'localhost:30092',
+    'transactional.id': 'order-processor-1',
+    'enable.idempotence': True
+})
+
+producer.init_transactions()
+consumer.subscribe(['orders'])
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None:
+        continue
+
+    try:
+        producer.begin_transaction()
+
+        # Process order and produce result
+        result = process_order(msg.value())
+        producer.produce('order-results', key=msg.key(), value=result)
+
+        # Commit offset AND produced message atomically
+        producer.send_offsets_to_transaction(
+            consumer.position(consumer.assignment()),
+            consumer.consumer_group_metadata()
+        )
+        producer.commit_transaction()
+
+    except Exception as e:
+        producer.abort_transaction()
+        # Message will be redelivered, but no partial results
+
+
+Output:
+
+>>> # Exactly-once processing
+Processing order-789
+Transaction committed: order-789 processed, offset committed
+>>> # Even if crash occurs mid-transaction, no duplicates or losses
+
+
+The hidden costs of exactly-once:
+
+Cost	Impact
+Latency	Transaction coordination adds 10-50ms per message
+Throughput	Fewer messages per second due to coordination overhead
+Complexity	Transactional code is harder to write and debug
+Failure modes	Transaction timeouts, zombie fencing, coordinator failures
+Resource usage	More broker CPU and memory for transaction state
+The Decision Matrix​
+
+Which delivery semantic should you choose? The answer depends on your specific requirements:
+
+Factor	At-Most-Once	At-Least-Once	Exactly-Once
+Data loss acceptable?	Yes	No	No
+Duplicates acceptable?	N/A	Yes (with idempotency)	No
+Latency requirement	Lowest	Low	Higher
+Implementation complexity	Simple	Moderate	High
+Consumer can be idempotent?	N/A	Yes = use this	N/A
+Decision Framework​
+
+Ask these questions in order:
+
+1. Can you lose messages?
+
+Yes: Use at-most-once (simplest)
+No: Continue to question 2
+
+2. Can your consumer handle duplicates?
+
+Yes (consumer is idempotent): Use at-least-once
+No: Continue to question 3
+
+3. Can you make your consumer idempotent?
+
+Yes: Use at-least-once + idempotent consumer (recommended)
+No: Use exactly-once (last resort)
+
+Why idempotent consumers are usually better than exactly-once:
+
+Exactly-once in Kafka only works when:
+
+You're reading from Kafka AND writing to Kafka
+Or you're using a transactional external store that supports Kafka transactions
+
+Most real-world consumers write to databases, call APIs, send emails, or update caches. These operations don't participate in Kafka transactions. Making these consumers idempotent is simpler and more reliable than attempting exactly-once semantics.
+
+Implementing Idempotent Consumers​
+
+The key insight: if your consumer can safely process the same message multiple times with the same result, at-least-once becomes as good as exactly-once from a business logic perspective.
+
+Pattern 1: Deduplication with Idempotency Key​
+
+Store processed event IDs and check before processing:
+
+from confluent_kafka import Consumer
+import redis
+import json
+
+class IdempotentConsumer:
+    def __init__(self, consumer_config: dict, redis_client: redis.Redis):
+        self.consumer = Consumer(consumer_config)
+        self.redis = redis_client
+        self.ttl_seconds = 86400 * 7  # Keep IDs for 7 days
+
+    def is_duplicate(self, event_id: str) -> bool:
+        """Check if we've already processed this event."""
+        key = f"processed:{event_id}"
+        return self.redis.exists(key) > 0
+
+    def mark_processed(self, event_id: str) -> None:
+        """Mark event as processed with TTL."""
+        key = f"processed:{event_id}"
+        self.redis.setex(key, self.ttl_seconds, "1")
+
+    def process_with_deduplication(self, msg) -> bool:
+        """Process message if not already processed."""
+        event = json.loads(msg.value().decode())
+        event_id = event.get('event_id')
+
+        if not event_id:
+            print(f"Warning: Message missing event_id, processing anyway")
+            return self._do_process(event)
+
+        if self.is_duplicate(event_id):
+            print(f"Skipping duplicate: {event_id}")
+            return True  # Already processed successfully
+
+        # Process the event
+        success = self._do_process(event)
+
+        if success:
+            self.mark_processed(event_id)
+
+        return success
+
+    def _do_process(self, event: dict) -> bool:
+        """Actual processing logic."""
+        # Your business logic here
+        print(f"Processing: {event.get('event_id', 'unknown')}")
+        return True
+
+
+Output:
+
+>>> # First delivery
+Processing: evt-123
+>>> # Duplicate delivery (after crash/restart)
+Skipping duplicate: evt-123
+>>> # New message
+Processing: evt-124
+
+Pattern 2: Database Upsert with Natural Key​
+
+Use database constraints to prevent duplicates:
+
+from confluent_kafka import Consumer
+import psycopg2
+import json
+
+def process_task_event(msg, db_conn):
+    """Process task event with upsert for idempotency."""
+    event = json.loads(msg.value().decode())
+
+    with db_conn.cursor() as cur:
+        # Upsert: Insert or update based on task_id
+        # If task_id already exists, this updates instead of duplicating
+        cur.execute("""
+            INSERT INTO tasks (task_id, title, status, updated_at)
+            VALUES (%(task_id)s, %(title)s, %(status)s, NOW())
+            ON CONFLICT (task_id)
+            DO UPDATE SET
+                title = EXCLUDED.title,
+                status = EXCLUDED.status,
+                updated_at = NOW()
+        """, {
+            'task_id': event['data']['task_id'],
+            'title': event['data']['title'],
+            'status': event['data'].get('status', 'pending')
+        })
+        db_conn.commit()
+
+    print(f"Upserted task: {event['data']['task_id']}")
+    return True
+
+
+Output:
+
+>>> # First delivery
+Upserted task: task-456
+>>> # Duplicate delivery
+Upserted task: task-456  # Same result, no duplicate row
+>>> # Verify in database
+SELECT COUNT(*) FROM tasks WHERE task_id = 'task-456';
+count: 1
+
+Pattern 3: Conditional Processing with Version Check​
+
+For state changes, check current state before applying:
+
+from confluent_kafka import Consumer
+import json
+
+def process_task_completion(msg, db_conn):
+    """Only complete task if it's currently pending."""
+    event = json.loads(msg.value().decode())
+    task_id = event['data']['task_id']
+
+    with db_conn.cursor() as cur:
+        # Only update if task is still pending
+        cur.execute("""
+            UPDATE tasks
+            SET status = 'completed', completed_at = NOW()
+            WHERE task_id = %s AND status = 'pending'
+            RETURNING task_id
+        """, (task_id,))
+
+        result = cur.fetchone()
+        db_conn.commit()
+
+        if result:
+            print(f"Completed task: {task_id}")
+            return True
+        else:
+            print(f"Task already completed or not found: {task_id}")
+            return True  # Still success (idempotent)
+
+
+Output:
+
+>>> # First delivery
+Completed task: task-789
+>>> # Duplicate delivery
+Task already completed or not found: task-789
+>>> # Both commits succeed, no duplicate state change
+
+Choosing Your Idempotency Strategy​
+Strategy	Best For	Complexity	Storage Requirement
+Deduplication key	Any event type, external API calls	Low	Redis/cache for event IDs
+Database upsert	Create/update operations	Low	Natural key in database
+Version/state check	State transitions	Medium	State field in database
+Outbox pattern	Multi-system coordination	High	Outbox table + CDC
+When Each Strategy Fits​
+
+Deduplication key (Pattern 1):
+
+External API calls (send email, charge payment)
+Operations without natural idempotency
+High-volume events where storage is cheap
+
+Database upsert (Pattern 2):
+
+CRUD operations on entities with unique IDs
+Simple inserts or updates
+When the database is the source of truth
+
+Version/state check (Pattern 3):
+
+State machine transitions
+When duplicate transitions should be no-ops
+Audit-sensitive operations
+Collaborating on Delivery Strategy​
+
+When designing your event processing strategy, you might start with a simple question and discover the nuances through exploration.
+
+Your initial question:
+
+"My notification service sends emails when tasks are created. How do I prevent duplicate emails?"
+
+Exploring the problem:
+
+This is actually two separate concerns:
+
+Consumer reliability: Ensuring you don't miss events
+Idempotency: Ensuring you don't send duplicate emails
+
+For consumer reliability, use at-least-once (commit after processing). For idempotency, you need to track which emails you've already sent.
+
+Discovering the implementation:
+
+A simple approach uses Redis to track sent notifications:
+
+def send_notification_idempotently(event_id: str, email: str, message: str) -> bool:
+    """Send notification only if not already sent."""
+    key = f"notification:sent:{event_id}"
+
+    # Check if already sent
+    if redis_client.exists(key):
+        return True  # Already handled
+
+    # Send the email
+    success = email_service.send(email, message)
+
+    if success:
+        # Mark as sent with 7-day TTL
+        redis_client.setex(key, 86400 * 7, "sent")
+
+    return success
+
+
+Refining the approach:
+
+But what if sending the email succeeds and Redis fails? You'd send the email again on the next attempt. For truly idempotent email sending, you might need:
+
+Email service that accepts idempotency keys (like Stripe's API)
+Or database transaction that commits email ID before sending
+Or acceptance that rare duplicates are better than complex infrastructure
+
+What emerged from this exploration:
+
+At-least-once + idempotent consumer is the standard pattern
+Idempotency can be implemented at different layers
+Perfect idempotency requires careful thought about failure modes
+Sometimes "good enough" idempotency beats "perfect" complexity
+Reflect on Your Skill​
+
+You built a kafka-events skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kafka-events skill, configure a consumer for exactly-once delivery semantics in a payment processing scenario.
+Does my skill explain idempotent consumers, transactional reads, and deduplication strategies?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain the difference between at-least-once, at-most-once, and exactly-once?
+Did it show when each delivery semantic is appropriate?
+Improve Your Skill​
+
+If you found gaps:
+
+My kafka-events skill is missing delivery semantics (at-least-once, exactly-once, idempotent consumers).
+Update it to include how to achieve exactly-once processing and when the trade-offs are worth it.
+
+Try With AI​
+
+Apply these delivery semantics to your own event processing scenarios.
+
+Setup: Open Claude Code or your preferred AI assistant in your Kafka project directory.
+
+Prompt 1: Analyze Your Processing Requirements
+
+I'm building an order processing system with these events:
+- OrderCreated: Must create order in database
+- PaymentReceived: Must update order status and trigger fulfillment
+- OrderShipped: Must send shipping notification email
+
+For each event, help me determine:
+1. Can the consumer be made idempotent? How?
+2. What delivery semantic should I use?
+3. What's the deduplication strategy?
+4. What happens if processing fails halfway?
+
+Show me the consumer implementation for PaymentReceived with idempotency.
+
+
+What you're learning: Mapping real business requirements to delivery semantics and implementing appropriate idempotency patterns for each event type.
+
+Prompt 2: Design Idempotency for External API Calls
+
+My consumer calls an external payment API that doesn't support idempotency keys.
+The flow is:
+1. Receive payment.requested event
+2. Call external API to charge card
+3. Publish payment.completed event
+4. Commit offset
+
+If my consumer crashes after step 2 but before step 3, I'll charge the card
+twice when the message is redelivered. How do I make this idempotent?
+
+Consider:
+- I can't modify the external API
+- I have access to PostgreSQL and Redis
+- I need an audit trail of all payment attempts
+
+
+What you're learning: Handling idempotency for external systems that don't natively support it---a common real-world challenge.
+
+Prompt 3: Evaluate Exactly-Once vs Idempotent Consumer
+
+My team is debating whether to implement exactly-once semantics for our
+order processing pipeline. We currently use at-least-once with idempotent
+consumers.
+
+Our pipeline:
+1. Read from 'orders' topic
+2. Validate order
+3. Write to 'validated-orders' topic
+4. Write to 'inventory-reservations' topic
+
+Arguments for exactly-once:
+- "It's cleaner, no deduplication logic needed"
+- "Kafka supports it natively"
+
+Arguments against:
+- "More complexity"
+- "Higher latency"
+
+Help me analyze this decision. What questions should I ask? What are the
+hidden costs of each approach for THIS specific use case?
+
+
+What you're learning: Critical evaluation of exactly-once vs at-least-once trade-offs for a specific architecture, not just theoretical understanding.
+
+Safety Note: Test your idempotency logic by deliberately causing failures (kill consumer mid-processing, simulate network partitions). Idempotency bugs often only surface under failure conditions that are hard to reproduce in development.

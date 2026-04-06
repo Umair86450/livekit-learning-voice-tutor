@@ -1,0 +1,647 @@
+Memory-Augmented Agent Patterns
+
+You know how to store memories, retrieve them, and manage context windows. Now it's time to put it all together into production patterns that make agents genuinely intelligent.
+
+A memory-augmented agent isn't just an agent with a database attached. It's an agent that knows when to remember, what to surface, and how to handle the inevitable conflicts between past and present. This lesson covers four patterns that separate toy memory systems from production ones: pre-prompt injection, dynamic retrieval, conflict resolution, and testing strategies.
+
+Pattern 1: Pre-Prompt Memory Injection​
+
+The simplest pattern: retrieve relevant memories before the conversation starts and inject them into the system prompt.
+
+Architecture​
+┌─────────────────────────────────────────────────────────────┐
+│                     PRE-PROMPT INJECTION                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   User Message → Memory Search → Inject into Prompt → LLM   │
+│                                                              │
+│   ┌─────────────┐    ┌───────────────┐    ┌────────────┐   │
+│   │ "What's my  │ →  │ Search:       │ →  │ System:    │   │
+│   │  schedule?" │    │ "schedule"    │    │ "User      │   │
+│   └─────────────┘    │ + user_id     │    │  prefers   │   │
+│                      └───────────────┘    │  morning   │   │
+│                             │             │  meetings" │   │
+│                             ▼             └────────────┘   │
+│                      ┌───────────────┐          │          │
+│                      │ Memories:     │          │          │
+│                      │ - Preferences │          ▼          │
+│                      │ - Projects    │    ┌────────────┐   │
+│                      │ - History     │    │ LLM Call   │   │
+│                      └───────────────┘    └────────────┘   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Implementation​
+from mem0 import Memory
+from openai import OpenAI
+
+memory = Memory()
+client = OpenAI()
+
+class MemoryAugmentedAgent:
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+        self.base_system_prompt = """You are a helpful task management assistant.
+You help users organize their work and stay productive."""
+
+    def build_system_prompt(self, user_message: str) -> str:
+        """Inject relevant memories into system prompt."""
+        # 1. Retrieve memories relevant to this message
+        memories = memory.search(
+            query=user_message,
+            user_id=self.user_id,
+            limit=5
+        )
+
+        # 2. Format memories for injection
+        memory_context = self.format_memories(memories.get('results', []))
+
+        # 3. Combine base prompt with memory context
+        if memory_context:
+            return f"""{self.base_system_prompt}
+
+## Context About This User
+
+{memory_context}
+
+Use this context to personalize your responses."""
+
+        return self.base_system_prompt
+
+    def format_memories(self, memories: list) -> str:
+        """Format memories for prompt injection."""
+        if not memories:
+            return ""
+
+        lines = []
+        for mem in memories:
+            lines.append(f"- {mem['memory']}")
+
+        return "\n".join(lines)
+
+    def chat(self, user_message: str) -> str:
+        """Process a chat message with memory augmentation."""
+        # Build memory-augmented prompt
+        system_prompt = self.build_system_prompt(user_message)
+
+        # Call LLM
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ]
+        )
+
+        assistant_message = response.choices[0].message.content
+
+        # Store this interaction in memory
+        memory.add(
+            [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": assistant_message}
+            ],
+            user_id=self.user_id
+        )
+
+        return assistant_message
+
+Usage​
+agent = MemoryAugmentedAgent(user_id="alex")
+
+# First interaction
+response = agent.chat("I prefer working on tasks in the morning")
+# Agent responds and stores preference
+
+# Later interaction (different session)
+response = agent.chat("When should I schedule my important tasks?")
+# Agent retrieves morning preference and recommends accordingly
+
+When to Use​
+User preferences that should influence every response
+Background context that's always relevant
+Simple, predictable memory needs
+Limitations​
+Retrieves before knowing full context of conversation
+May inject irrelevant memories
+Token budget consumed before conversation starts
+Pattern 2: Dynamic Memory Retrieval​
+
+More sophisticated: give the agent a tool to retrieve memories on-demand during the conversation.
+
+Architecture​
+┌─────────────────────────────────────────────────────────────┐
+│                    DYNAMIC RETRIEVAL                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   User Message → LLM → Tool Call → Memory Search → Continue │
+│                                                              │
+│   ┌─────────────┐    ┌───────────────┐                      │
+│   │ "What did   │ →  │ Agent thinks: │                      │
+│   │  we discuss │    │ "Need to      │                      │
+│   │  about the  │    │  recall past  │                      │
+│   │  deadline?" │    │  discussions" │                      │
+│   └─────────────┘    └───────┬───────┘                      │
+│                              │                               │
+│                              ▼                               │
+│                      ┌───────────────┐                      │
+│                      │ Tool Call:    │                      │
+│                      │ recall_memory │                      │
+│                      │ ("deadline    │                      │
+│                      │  discussion") │                      │
+│                      └───────┬───────┘                      │
+│                              │                               │
+│                              ▼                               │
+│                      ┌───────────────┐    ┌────────────┐   │
+│                      │ Memory Result │ →  │ Continue   │   │
+│                      │ "Jan 15: Set  │    │ Response   │   │
+│                      │  deadline to  │    │ with       │   │
+│                      │  Feb 28"      │    │ Context    │   │
+│                      └───────────────┘    └────────────┘   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Implementation with OpenAI Agents SDK​
+from agents import Agent, Runner, function_tool
+from mem0 import Memory
+
+memory = Memory()
+
+def create_memory_agent(user_id: str) -> Agent:
+    """Create an agent with memory retrieval capabilities."""
+
+    @function_tool
+    def recall_memory(query: str) -> str:
+        """Search your memory for relevant past interactions and facts.
+
+        Args:
+            query: What to search for in memory (e.g., "user preferences",
+                   "project deadlines", "past decisions")
+        """
+        results = memory.search(
+            query=query,
+            user_id=user_id,
+            limit=5
+        )
+
+        memories = results.get('results', [])
+        if not memories:
+            return "No relevant memories found."
+
+        formatted = []
+        for mem in memories:
+            formatted.append(f"- {mem['memory']} (recorded: {mem.get('created_at', 'unknown')})")
+
+        return "Relevant memories:\n" + "\n".join(formatted)
+
+    @function_tool
+    def store_memory(content: str, category: str = "general") -> str:
+        """Store important information for future reference.
+
+        Args:
+            content: The information to remember
+            category: Category for organization (preferences, projects, decisions, facts)
+        """
+        memory.add(
+            [{"role": "system", "content": content}],
+            user_id=user_id,
+            metadata={"category": category}
+        )
+        return f"Stored: {content}"
+
+    return Agent(
+        name="MemoryAgent",
+        instructions="""You are a task management assistant with memory capabilities.
+
+You can:
+1. Recall past interactions using the recall_memory tool
+2. Store important information using the store_memory tool
+
+Use recall_memory when:
+- User asks about past discussions or decisions
+- You need context about user preferences
+- Answering requires historical information
+
+Use store_memory when:
+- User shares important preferences
+- Decisions are made that should be remembered
+- Facts are learned that will be useful later
+
+Always check memory before making assumptions about the user.""",
+        tools=[recall_memory, store_memory]
+    )
+
+# Usage
+async def main():
+    agent = create_memory_agent("alex")
+
+    # Agent decides when to recall
+    result = await Runner.run(
+        agent,
+        "What did we decide about the project deadline?"
+    )
+    print(result.final_output)
+
+When to Use​
+Complex conversations where relevant context isn't obvious upfront
+When the agent needs to decide what to remember
+Conversations that build on past interactions
+Advantages Over Pre-Prompt​
+Pre-Prompt	Dynamic
+Always injects memories	Only retrieves when needed
+May waste tokens on irrelevant context	Token-efficient
+Simple to implement	More complex
+Can't retrieve based on conversation flow	Adapts to conversation
+Pattern 3: Memory Conflict Resolution​
+
+When memories contradict each other, the agent needs a strategy.
+
+Conflict Types​
+Type 1: TEMPORAL CONFLICT
+├── Old: "User prefers morning meetings" (January)
+└── New: "User prefers afternoon meetings" (March)
+    Resolution: Newer wins (with acknowledgment)
+
+Type 2: AMBIGUOUS CONFLICT
+├── Memory A: "Project deadline is Jan 31"
+└── Memory B: "Project deadline is Feb 15"
+    Resolution: Ask user for clarification
+
+Type 3: PARTIAL CONFLICT
+├── Memory A: "User is vegetarian"
+└── Memory B: "User enjoyed the steak dinner"
+    Resolution: Check timestamps, may need clarification
+
+Implementation​
+from mem0 import Memory
+from openai import OpenAI
+
+memory = Memory()
+client = OpenAI()
+
+class ConflictAwareAgent:
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+    def detect_conflicts(self, memories: list) -> list:
+        """Detect potential conflicts between memories."""
+        if len(memories) < 2:
+            return []
+
+        # Use LLM to detect conflicts
+        memory_texts = [f"- {m['memory']} (created: {m.get('created_at', 'unknown')})"
+                       for m in memories]
+
+        prompt = f"""Analyze these memories for potential conflicts or contradictions:
+
+{chr(10).join(memory_texts)}
+
+For each conflict found, respond in this format:
+CONFLICT: [memory 1 summary] vs [memory 2 summary]
+TYPE: temporal | ambiguous | partial
+RESOLUTION: newer_wins | ask_user | needs_context
+
+If no conflicts, respond: NO_CONFLICTS"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        result = response.choices[0].message.content
+
+        if "NO_CONFLICTS" in result:
+            return []
+
+        # Parse conflicts (simplified)
+        conflicts = []
+        for line in result.split("\n"):
+            if line.startswith("CONFLICT:"):
+                conflicts.append({"description": line})
+
+        return conflicts
+
+    def resolve_conflict(self, conflict: dict, memories: list) -> str:
+        """Generate resolution strategy for a conflict."""
+        # For temporal conflicts: prefer newer
+        # For ambiguous: prepare clarification question
+        # For partial: gather more context
+
+        return f"I noticed some potentially outdated information. Let me clarify: {conflict['description']}"
+
+    def process_with_conflict_check(self, query: str) -> dict:
+        """Process query with conflict detection."""
+        # 1. Retrieve relevant memories
+        results = memory.search(query, user_id=self.user_id, limit=10)
+        memories = results.get('results', [])
+
+        # 2. Check for conflicts
+        conflicts = self.detect_conflicts(memories)
+
+        # 3. If conflicts, prepare resolution
+        if conflicts:
+            return {
+                "has_conflicts": True,
+                "conflicts": conflicts,
+                "memories": memories,
+                "suggestion": self.resolve_conflict(conflicts[0], memories)
+            }
+
+        return {
+            "has_conflicts": False,
+            "memories": memories
+        }
+
+Conflict Resolution Patterns​
+def handle_temporal_conflict(old_memory, new_memory):
+    """Newer information supersedes older."""
+    # Delete old memory
+    memory.delete(old_memory['id'])
+
+    # Log the change
+    memory.add(
+        [{"role": "system", "content": f"Updated: {old_memory['memory']} → {new_memory['memory']}"}],
+        user_id=user_id,
+        metadata={"type": "update_log"}
+    )
+
+    return new_memory
+
+def handle_ambiguous_conflict(memory_a, memory_b, user_id):
+    """Ask user for clarification."""
+    return {
+        "action": "clarify",
+        "question": f"I have conflicting information: '{memory_a['memory']}' and '{memory_b['memory']}'. Which is correct?",
+        "pending_memories": [memory_a['id'], memory_b['id']]
+    }
+
+def handle_partial_conflict(memories, user_id):
+    """Gather more context before resolving."""
+    return {
+        "action": "gather_context",
+        "memories": memories,
+        "note": "These memories may not actually conflict—need more context."
+    }
+
+Pattern 4: Memory Testing Strategies​
+
+Memory-augmented agents need specialized testing approaches.
+
+Test Categories​
+1. STORAGE TESTS
+├── Memory is stored correctly
+├── Metadata is preserved
+└── Duplicate detection works
+
+2. RETRIEVAL TESTS
+├── Relevant memories are retrieved
+├── Irrelevant memories are filtered
+└── Token budget is respected
+
+3. CONFLICT TESTS
+├── Conflicts are detected
+├── Resolution strategies work
+└── User is informed appropriately
+
+4. INTEGRATION TESTS
+├── Full conversation flow works
+├── Memory persists across sessions
+└── Agent behavior is personalized
+
+Test Implementation​
+import pytest
+from mem0 import Memory
+
+@pytest.fixture
+def memory_client():
+    """Fresh memory instance for each test."""
+    m = Memory()
+    yield m
+    # Cleanup after test (if needed)
+
+@pytest.fixture
+def test_user_id():
+    return "test_user_123"
+
+class TestMemoryStorage:
+    def test_add_memory_stores_content(self, memory_client, test_user_id):
+        """Verify memories are stored correctly."""
+        messages = [
+            {"role": "user", "content": "I prefer Python over JavaScript."}
+        ]
+
+        result = memory_client.add(messages, user_id=test_user_id)
+
+        assert 'results' in result
+        assert len(result['results']) > 0
+        assert 'memory' in result['results'][0]
+
+    def test_metadata_is_preserved(self, memory_client, test_user_id):
+        """Verify metadata is stored and retrievable."""
+        messages = [{"role": "user", "content": "My deadline is January 31st."}]
+        metadata = {"category": "deadlines", "project": "Phoenix"}
+
+        memory_client.add(messages, user_id=test_user_id, metadata=metadata)
+
+        results = memory_client.search(
+            "deadline",
+            user_id=test_user_id,
+            filters={"category": "deadlines"}
+        )
+
+        assert len(results['results']) > 0
+
+class TestMemoryRetrieval:
+    def test_relevant_memories_retrieved(self, memory_client, test_user_id):
+        """Verify semantic search returns relevant results."""
+        # Store some memories
+        memory_client.add(
+            [{"role": "user", "content": "I love basketball."}],
+            user_id=test_user_id
+        )
+        memory_client.add(
+            [{"role": "user", "content": "My favorite food is pizza."}],
+            user_id=test_user_id
+        )
+
+        # Search for sports
+        results = memory_client.search("sports hobbies", user_id=test_user_id)
+
+        # Basketball should rank higher than pizza
+        memories = results['results']
+        assert any('basketball' in m['memory'].lower() for m in memories)
+
+    def test_user_isolation(self, memory_client):
+        """Verify memories are isolated by user."""
+        # Store for user A
+        memory_client.add(
+            [{"role": "user", "content": "Secret information for user A."}],
+            user_id="user_a"
+        )
+
+        # Search as user B
+        results = memory_client.search("secret", user_id="user_b")
+
+        # User B should not see user A's memories
+        assert len(results['results']) == 0
+
+class TestMemoryAugmentedAgent:
+    def test_agent_uses_stored_preferences(self, memory_client, test_user_id):
+        """Verify agent personalizes based on stored preferences."""
+        # Store preference
+        memory_client.add(
+            [{"role": "user", "content": "I always want tasks scheduled for morning."}],
+            user_id=test_user_id,
+            metadata={"category": "preferences"}
+        )
+
+        # Create agent and ask about scheduling
+        agent = MemoryAugmentedAgent(test_user_id)
+        response = agent.chat("When should I schedule my important meeting?")
+
+        # Response should reference morning preference
+        assert 'morning' in response.lower()
+
+    def test_memory_persists_across_sessions(self, memory_client, test_user_id):
+        """Verify memory survives session restart."""
+        # Session 1: Store memory
+        memory_client.add(
+            [{"role": "user", "content": "My name is Alex."}],
+            user_id=test_user_id
+        )
+
+        # Simulate session restart (new Memory instance)
+        new_memory_client = Memory()
+
+        # Session 2: Retrieve memory
+        results = new_memory_client.search("user name", user_id=test_user_id)
+
+        assert any('alex' in m['memory'].lower() for m in results['results'])
+
+Testing Best Practices​
+Practice	Rationale
+Use isolated test users	Prevent test pollution
+Clean up after tests	Don't accumulate test data
+Test semantic relevance	Not just exact matches
+Test multi-session	Memory must persist
+Test edge cases	Empty results, conflicts
+Putting It All Together​
+
+A production memory-augmented agent combines all four patterns:
+
+class ProductionMemoryAgent:
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+        self.memory = Memory()
+
+        # Pre-load core user context
+        self.core_context = self.load_core_context()
+
+    def load_core_context(self) -> str:
+        """Pre-prompt: Load always-relevant context."""
+        results = self.memory.search(
+            "user preferences and key facts",
+            user_id=self.user_id,
+            filters={"category": "core"},
+            limit=5
+        )
+        return self.format_memories(results.get('results', []))
+
+    def dynamic_recall(self, query: str) -> str:
+        """Dynamic: Agent calls this during conversation."""
+        results = self.memory.search(query, user_id=self.user_id, limit=5)
+        return self.format_memories(results.get('results', []))
+
+    def check_and_resolve_conflicts(self, new_info: str) -> dict:
+        """Conflict: Check for and resolve contradictions."""
+        related = self.memory.search(new_info, user_id=self.user_id, limit=10)
+        conflicts = self.detect_conflicts(new_info, related.get('results', []))
+
+        if conflicts:
+            return self.resolve_conflicts(conflicts)
+        return {"status": "no_conflicts"}
+
+    def process(self, user_message: str) -> str:
+        """Main processing loop."""
+        # 1. Pre-prompt injection (always)
+        system_prompt = f"""You are a helpful assistant.
+
+Core user context:
+{self.core_context}
+
+You can use the recall_memory function for additional context."""
+
+        # 2. Process with potential dynamic retrieval
+        response = self.llm_with_tools(system_prompt, user_message)
+
+        # 3. Check for conflicts before storing
+        conflict_check = self.check_and_resolve_conflicts(user_message)
+
+        # 4. Store interaction
+        self.store_interaction(user_message, response)
+
+        return response
+
+Try With AI​
+
+Use these prompts to practice memory-augmented agent patterns with Claude or your preferred AI assistant.
+
+Prompt 1: Design Memory Injection Strategy​
+I'm building a customer support agent that handles order inquiries.
+
+Design a memory injection strategy that combines:
+1. Pre-prompt injection for customer profile (name, tier, preferences)
+2. Dynamic retrieval for order history and past issues
+
+For each pattern:
+- What memories should be pre-loaded vs. retrieved on-demand?
+- What's the token budget allocation?
+- How do you handle a customer with 500+ past orders?
+
+Show the system prompt structure and the dynamic retrieval tool definition.
+
+
+What you're learning: Memory injection isn't all-or-nothing. Strategic allocation between pre-prompt and dynamic retrieval optimizes both relevance and token efficiency.
+
+Prompt 2: Implement Conflict Resolution​
+A user has interacted with an agent over 6 months. Their memories include:
+
+January: "User is allergic to peanuts"
+March: "User enjoyed the Thai peanut salad at lunch"
+May: "User mentioned avoiding nuts at the company event"
+
+Design a conflict resolution system that:
+1. Detects the apparent contradiction
+2. Determines the most likely truth
+3. Decides whether to ask user or resolve automatically
+4. Updates memories appropriately
+
+Show the detection logic, resolution strategy, and example conversation where this plays out.
+
+
+What you're learning: Memory conflicts aren't always errors—sometimes context matters. The peanut salad might have been peanut-free, or the allergy might be new. Good systems gather context before assuming.
+
+Prompt 3: Build Test Suite for Memory Agent​
+Create a comprehensive test suite for a memory-augmented task management agent.
+
+The agent should:
+- Remember user preferences (work hours, priority styles)
+- Track project context across sessions
+- Provide personalized task suggestions
+- Handle conflicting scheduling preferences
+
+Design tests for:
+1. Memory storage correctness
+2. Retrieval relevance
+3. Personalization behavior
+4. Conflict detection
+5. Multi-session persistence
+
+For each test category, provide:
+- Test scenario description
+- Setup data
+- Expected behavior
+- Assertion criteria
+
+
+What you're learning: Testing memory agents requires testing not just functionality but behavior—does the agent actually use the memories it stores? Tests must verify end-to-end personalization, not just storage operations.

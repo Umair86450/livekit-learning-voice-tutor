@@ -1,0 +1,549 @@
+Jobs and CronJobs: Batch Workloads for AI Agents
+
+Deployments keep your AI agent running forever. But what about tasks that should run once and stop? Or tasks that run on a schedule?
+
+Refresh vector embeddings every night at 2 AM
+Clean up old conversation logs weekly
+Run a one-time data migration when you upgrade models
+Generate daily analytics reports from agent interactions
+
+These are batch workloads—finite tasks that complete and exit. Kubernetes provides two primitives for this: Jobs (run once) and CronJobs (run on a schedule).
+
+Long-Running vs. Finite Workloads​
+
+You've learned that Deployments manage Pods that should run continuously. But not all workloads are long-running:
+
+Deployment (Long-Running):
+┌──────────────────────────────────────────────────────────┐
+│  Pod runs forever → crashes → restarts → runs forever   │
+│  Example: FastAPI agent serving requests 24/7           │
+└──────────────────────────────────────────────────────────┘
+
+Job (Finite):
+┌──────────────────────────────────────────────────────────┐
+│  Pod starts → does work → completes → stops             │
+│  Example: Refresh embeddings, exit when done            │
+└──────────────────────────────────────────────────────────┘
+
+CronJob (Scheduled Finite):
+┌──────────────────────────────────────────────────────────┐
+│  Every night at 2 AM: create Job → does work → stops    │
+│  Example: Nightly log cleanup                           │
+└──────────────────────────────────────────────────────────┘
+
+
+Key insight: Deployments use restartPolicy: Always—Pods restart on completion. Jobs use restartPolicy: Never or OnFailure—Pods don't restart after successful completion.
+
+Your First Job: A One-Time Task​
+
+Create a Job that simulates an AI agent maintenance task—processing data and exiting:
+
+Job YAML Structure​
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: embedding-refresh
+spec:
+  template:
+    spec:
+      containers:
+      - name: refresh
+        image: python:3.11-slim
+        command: ["python", "-c"]
+        args:
+          - |
+            import time
+            print("Starting embedding refresh...")
+            for i in range(5):
+                print(f"Processing batch {i+1}/5...")
+                time.sleep(2)
+            print("Embedding refresh complete!")
+      restartPolicy: Never
+  backoffLimit: 4
+
+
+Output: (This is the manifest structure; we'll apply it next)
+
+Understanding Each Field​
+
+apiVersion: batch/v1 Jobs use the batch API group, not apps like Deployments.
+
+kind: Job Tells Kubernetes this is a finite workload.
+
+spec.template The Pod template—identical to what you'd put in a Deployment's template. The Job creates one or more Pods using this template.
+
+restartPolicy: Never Critical difference from Deployments. When the container exits with code 0 (success), the Pod stays Completed and doesn't restart.
+
+backoffLimit: 4 If the container fails (non-zero exit code), Kubernetes retries up to 4 times before marking the Job as failed.
+
+Running and Monitoring the Job​
+
+Save the manifest as embedding-refresh-job.yaml and apply it:
+
+kubectl apply -f embedding-refresh-job.yaml
+
+
+Output:
+
+job.batch/embedding-refresh created
+
+
+Watch the Job progress:
+
+kubectl get jobs -w
+
+
+Output:
+
+NAME                COMPLETIONS   DURATION   AGE
+embedding-refresh   0/1           3s         3s
+embedding-refresh   0/1           12s        12s
+embedding-refresh   1/1           12s        12s
+
+
+Check the Pod status:
+
+kubectl get pods
+
+
+Output:
+
+NAME                      READY   STATUS      RESTARTS   AGE
+embedding-refresh-7x9kq   0/1     Completed   0          45s
+
+
+Notice STATUS: Completed—the Pod finished successfully and stopped. Unlike a Deployment Pod (which would show Running), this Pod is done.
+
+View the logs to see what happened:
+
+kubectl logs embedding-refresh-7x9kq
+
+
+Output:
+
+Starting embedding refresh...
+Processing batch 1/5...
+Processing batch 2/5...
+Processing batch 3/5...
+Processing batch 4/5...
+Processing batch 5/5...
+Embedding refresh complete!
+
+
+The Job ran, completed its task, and stopped. The Pod remains in Completed state for inspection (logs, debugging) until you delete it.
+
+The Job → Pod Relationship​
+Job: embedding-refresh
+    ↓ creates and manages
+Pod: embedding-refresh-7x9kq (status: Completed)
+
+
+Unlike Deployments (which use ReplicaSets as intermediaries), Jobs directly manage their Pods. The naming follows the pattern: {job-name}-{random-suffix}.
+
+Delete the Job (this also deletes its Pods):
+
+kubectl delete job embedding-refresh
+
+
+Output:
+
+job.batch "embedding-refresh" deleted
+
+Parallel Jobs: Processing in Batches​
+
+What if you need to process 10,000 documents for embedding refresh? Running sequentially takes too long. Jobs support parallelism:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-processor
+spec:
+  completions: 5      # Total tasks to complete
+  parallelism: 2      # Run 2 Pods at a time
+  template:
+    spec:
+      containers:
+      - name: processor
+        image: busybox:1.36
+        command: ["sh", "-c"]
+        args:
+          - |
+            echo "Processing task on $(hostname)..."
+            sleep 5
+            echo "Task complete!"
+      restartPolicy: Never
+
+
+Key parameters:
+
+Parameter	Value	Meaning
+completions	5	The Job needs 5 successful Pod completions
+parallelism	2	Run up to 2 Pods simultaneously
+
+Apply and watch:
+
+kubectl apply -f batch-processor.yaml
+kubectl get pods -w
+
+
+Output:
+
+NAME                    READY   STATUS    RESTARTS   AGE
+batch-processor-abc12   1/1     Running   0          2s
+batch-processor-def34   1/1     Running   0          2s
+batch-processor-abc12   0/1     Completed 0          7s
+batch-processor-ghi56   1/1     Running   0          1s
+batch-processor-def34   0/1     Completed 0          8s
+batch-processor-jkl78   1/1     Running   0          1s
+...
+
+
+Kubernetes maintains 2 Pods running at any time until 5 completions are achieved.
+
+Check Job status:
+
+kubectl get jobs batch-processor
+
+
+Output:
+
+NAME              COMPLETIONS   DURATION   AGE
+batch-processor   5/5           18s        25s
+
+Job Operation Types Summary​
+Type	completions	parallelism	Behavior
+Non-parallel	1 (default)	1 (default)	Single Pod, single completion
+Parallel with fixed count	N	M	Run M Pods at a time until N completions
+Work queue	unset	M	Run M Pods, complete when any Pod succeeds and all terminate
+
+For AI workloads, parallel with fixed count is most common—split a large dataset into chunks and process in parallel.
+
+CronJobs: Scheduled Batch Work​
+
+CronJobs create Jobs on a schedule. Every execution creates a new Job, which creates new Pod(s).
+
+CronJob: nightly-cleanup (schedule: "0 2 * * *")
+    ↓ creates at 2:00 AM
+Job: nightly-cleanup-28473049
+    ↓ creates
+Pod: nightly-cleanup-28473049-abc12 (status: Completed)
+
+Cron Expression Syntax​
+┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-6, Sunday=0)
+│ │ │ │ │
+* * * * *
+
+
+Common patterns:
+
+Expression	Meaning
+0 2 * * *	Every day at 2:00 AM
+*/15 * * * *	Every 15 minutes
+0 0 * * 0	Every Sunday at midnight
+0 6 1 * *	First day of each month at 6:00 AM
+Creating a CronJob​
+
+Create a CronJob that cleans up old agent logs every minute (for demonstration—in production, use a longer schedule):
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: log-cleanup
+spec:
+  schedule: "* * * * *"    # Every minute (for demo)
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: busybox:1.36
+            command: ["sh", "-c"]
+            args:
+              - |
+                echo "Running log cleanup at $(date)"
+                echo "Removing logs older than 7 days..."
+                echo "Cleanup complete!"
+          restartPolicy: OnFailure
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+
+New fields:
+
+schedule Cron expression defining when to create Jobs.
+
+jobTemplate The Job template—notice it's the same structure as a Job spec, wrapped in jobTemplate.spec.
+
+successfulJobsHistoryLimit: 3 Keep the last 3 successful Jobs (and their Pods) for inspection. Older ones are auto-deleted.
+
+failedJobsHistoryLimit: 1 Keep only the last failed Job for debugging.
+
+Apply and watch:
+
+kubectl apply -f log-cleanup-cronjob.yaml
+kubectl get cronjobs
+
+
+Output:
+
+NAME          SCHEDULE    SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+log-cleanup   * * * * *   False     0        <none>          10s
+
+
+Wait a minute and check again:
+
+kubectl get cronjobs
+
+
+Output:
+
+NAME          SCHEDULE    SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+log-cleanup   * * * * *   False     0        45s             90s
+
+
+List Jobs created by the CronJob:
+
+kubectl get jobs
+
+
+Output:
+
+NAME                     COMPLETIONS   DURATION   AGE
+log-cleanup-28504821     1/1           3s         75s
+log-cleanup-28504822     1/1           2s         15s
+
+
+Each Job name includes a timestamp-based suffix (28504821, 28504822).
+
+CronJob Concurrency Policies​
+
+What if a Job is still running when the next schedule triggers? Configure with concurrencyPolicy:
+
+Policy	Behavior
+Allow (default)	Create new Job even if previous is running
+Forbid	Skip the new Job if previous is still running
+Replace	Cancel the running Job and start a new one
+
+For AI workloads (like embedding refresh), use Forbid to prevent overlapping:
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: embedding-refresh-nightly
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid    # Don't overlap runs
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: refresh
+            image: your-registry/embedding-refresher:v1
+            env:
+            - name: VECTOR_DB_URL
+              value: "http://qdrant:6333"
+          restartPolicy: OnFailure
+
+AI Agent Use Cases for Jobs and CronJobs​
+Use Case 1: Nightly Embedding Refresh​
+
+Your RAG agent needs fresh embeddings from updated knowledge base:
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: embedding-sync
+spec:
+  schedule: "0 3 * * *"    # 3 AM daily
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: sync
+            image: your-registry/embedding-sync:v1
+            env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-credentials
+                  key: api-key
+            - name: QDRANT_URL
+              value: "http://qdrant:6333"
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "500m"
+              limits:
+                memory: "1Gi"
+                cpu: "1"
+          restartPolicy: OnFailure
+
+Use Case 2: One-Time Model Migration​
+
+When upgrading your agent's model, run a migration Job:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-migration-v2
+spec:
+  template:
+    spec:
+      containers:
+      - name: migrate
+        image: your-registry/model-migrator:v2
+        env:
+        - name: SOURCE_MODEL
+          value: "gpt-3.5-turbo"
+        - name: TARGET_MODEL
+          value: "gpt-4o-mini"
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+      restartPolicy: Never
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600  # Auto-delete after 1 hour
+
+
+ttlSecondsAfterFinished: Automatically delete the Job and its Pods after the specified seconds. Useful for one-time migrations you don't need to keep.
+
+Use Case 3: Parallel Document Processing​
+
+Process 1000 documents for a new knowledge base:
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: document-ingest
+spec:
+  completions: 100    # 100 batches (10 docs each)
+  parallelism: 10     # Process 10 batches simultaneously
+  template:
+    spec:
+      containers:
+      - name: ingest
+        image: your-registry/doc-processor:v1
+        env:
+        - name: JOB_COMPLETION_INDEX
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+      restartPolicy: Never
+
+
+JOB_COMPLETION_INDEX: Kubernetes injects a unique index (0-99) into each Pod. Your code uses this to determine which batch of documents to process.
+
+Key Concepts Summary​
+
+Job: Kubernetes primitive for running a task to completion. Creates Pods that stop after successful execution.
+
+CronJob: Creates Jobs on a schedule using cron expressions. Manages Job history automatically.
+
+completions: Number of successful Pod completions required for the Job to finish.
+
+parallelism: Maximum number of Pods that can run simultaneously.
+
+restartPolicy: Must be Never or OnFailure for Jobs (not Always).
+
+backoffLimit: Number of retries before marking a Job as failed.
+
+concurrencyPolicy: How CronJobs handle overlapping executions (Allow, Forbid, Replace).
+
+ttlSecondsAfterFinished: Auto-cleanup of completed Jobs after a time period.
+
+Try With AI​
+
+Open a terminal and work through these scenarios:
+
+Scenario 1: Design a Backup Job​
+
+Your task: Create a Job that backs up your agent's conversation history to an S3 bucket.
+
+Ask AI: "Create a Kubernetes Job manifest that runs an S3 backup using the AWS CLI. It should copy files from /data/conversations to s3://my-bucket/backups/."
+
+Review AI's response:
+
+Is the image appropriate (e.g., amazon/aws-cli)?
+Are AWS credentials handled securely (via Secrets, not hardcoded)?
+Is restartPolicy set correctly?
+Is there a backoffLimit for retries?
+
+Tell AI: "The Job should mount a PersistentVolumeClaim named 'agent-data' to access the conversation files."
+
+Reflection:
+
+How does the Job access the PVC?
+What happens if the S3 upload fails mid-transfer?
+Would you use restartPolicy: Never or OnFailure here?
+Scenario 2: Debug a Failing CronJob​
+
+Your task: Your nightly CronJob hasn't run successfully in 3 days. Diagnose the issue.
+
+Ask AI: "My CronJob named 'nightly-sync' shows LAST SCHEDULE was 3 days ago but ACTIVE is 0. What commands should I run to diagnose this?"
+
+AI should suggest:
+
+kubectl describe cronjob nightly-sync
+kubectl get jobs (look for failed Jobs)
+kubectl describe job <failed-job-name>
+kubectl logs <pod-name>
+
+Ask: "The Job Pod shows ImagePullBackOff. What does this mean and how do I fix it?"
+
+Reflection:
+
+What's the difference between CronJob, Job, and Pod failures?
+Where do you look first when a CronJob stops working?
+How does failedJobsHistoryLimit affect debugging?
+Scenario 3: Optimize Parallel Processing​
+
+Your task: You have a Job processing 1000 items with completions: 1000 and parallelism: 50. It's consuming too many cluster resources.
+
+Ask AI: "How can I run a Kubernetes Job that processes 1000 items but limits resource consumption? Currently using parallelism: 50 but it's overwhelming the cluster."
+
+AI might suggest:
+
+Reduce parallelism to 10-20
+Add resource requests/limits to each Pod
+Use indexed Jobs with a work queue pattern
+Process multiple items per Pod (reduce total completions)
+
+Ask: "Show me how to use a work queue pattern instead of one Pod per item."
+
+Reflection:
+
+What's the trade-off between parallelism and completion time?
+When is the indexed Job pattern better than a work queue?
+How do resource limits on Job Pods affect scheduling?
+Reflect on Your Skill​
+
+You built a kubernetes-deployment skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kubernetes-deployment skill, create a Job for batch processing and a CronJob for scheduled tasks.
+Does my skill generate Job manifests with completions, parallelism, and proper restartPolicy?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include Job vs Deployment distinction (finite vs long-running workloads)?
+Did it explain parallelism and completions for batch processing?
+Did it cover CronJob scheduling with cron expressions and concurrency policies?
+Did it include AI agent use cases (embedding refresh, log cleanup, model migration)?
+Improve Your Skill​
+
+If you found gaps:
+
+My kubernetes-deployment skill is missing Job and CronJob patterns for batch workloads.
+Update it to include Job parallelism configuration, CronJob scheduling syntax, concurrency policies, and AI-specific batch processing patterns.

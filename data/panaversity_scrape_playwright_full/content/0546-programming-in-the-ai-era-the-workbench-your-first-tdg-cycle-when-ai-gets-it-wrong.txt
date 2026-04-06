@@ -1,0 +1,425 @@
+When AI Gets It Wrong
+
+James is two TDG cycles in. He has converted Celsius to Fahrenheit. He has converted Fahrenheit to Celsius. Both went green on the first prompt. He is starting to feel like the loop always works perfectly.
+
+Then he writes a specification for reading_time_minutes, a SmartNotes function that estimates how long it takes to read a note. He prompts Claude Code. He runs the tests.
+
+1 passed, 1 failed
+
+
+He stares at the screen. One passed. One failed. The function is not wrong for everything; it is wrong for one specific case.
+
+He walks over to Emma's desk. "It failed. I think the loop is broken."
+
+Emma does not look up from her screen. "Good."
+
+James frowns. "Good? One of my tests is red."
+
+"I shipped a bug like this once," she says, turning to face him. "A billing function. Integer division instead of float division. Rounded every invoice down."
+
+James raises an eyebrow. "How long before someone noticed?"
+
+"Three weeks. Four hundred incorrect invoices." She pauses. "Your tests found it in three seconds."
+
+James looks back at his terminal. "Okay, but I do not even know what went wrong yet. I just see the red."
+
+Emma turns her screen toward him. "What do the two lines after the > say?"
+
+He reads them. "It says the function returned 1 instead of 1.666... Oh. It dropped the decimal part. That is the // thing from Chapter 45. It chops off everything after the dot."
+
+Emma almost smiles. "You just diagnosed a bug faster than my entire team did in 2019."
+
+A Function That Trips Up AI​
+
+Here is a SmartNotes function: reading_time_minutes. It takes a word count and a reading speed (words per minute), and returns the estimated reading time in minutes.
+
+Step 1: Specify​
+# smartnotes/reading.py
+
+def reading_time_minutes(word_count: int, words_per_minute: int) -> float: ...
+
+TWO PARAMETERS: A SMALL STEP UP
+
+Every function so far has taken one input. This function takes two. The pattern is the same: each parameter gets a name and a type, separated by a comma. Read the signature aloud: "reading_time_minutes takes a word_count (int) and a words_per_minute (int) and returns a float."
+
+FINDING EXACT FLOAT VALUES FOR TESTS
+
+When a test expects a fractional result (like 500 / 300), you need Python's exact value, not a hand-rounded version. Run this in your terminal:
+
+uv run python -c "print(500 / 300)"
+
+
+The -c flag tells Python to run the quoted code directly without opening a file. It prints 1.6666666666666667. Copy this entire number exactly into your test assertion. Python handles the precision for you.
+
+On Windows PowerShell, use either single or double quotes: uv run python -c 'print(500 / 300)' or uv run python -c "print(500 / 300)". In the older Command Prompt (cmd.exe), use double quotes only.
+
+# tests/test_reading.py
+
+from smartnotes.reading import reading_time_minutes
+
+def test_exact_division():
+    assert reading_time_minutes(1000, 200) == 5.0
+
+def test_fractional_result():
+    assert reading_time_minutes(500, 300) == 1.6666666666666667
+
+
+Test 1: 1000 words at 200 words per minute = 5.0 minutes. Clean division.
+
+Test 2: 500 words at 300 words per minute = 1.666... minutes. The long decimal (1.6666666666666667) is just Python showing all its digits of precision; you do not need to memorize it. Copy the exact value from the terminal output into your test. The result is not a round number. The return type is float, so the function must return the full fractional value. That is the exact number you got from the tip box earlier in this section.
+
+Step 2: Check Types​
+$ uv run pyright
+0 errors, 0 warnings, 0 informations
+
+Step 3: Generate (First Attempt)​
+
+Prompt Claude Code:
+
+Implement reading_time_minutes in smartnotes/reading.py
+so that all tests in tests/test_reading.py pass.
+Do not modify the tests.
+
+
+AI might generate:
+
+def reading_time_minutes(word_count: int, words_per_minute: int) -> float:
+    return word_count // words_per_minute
+
+
+Notice the //. That is floor division, the operator you learned in Chapter 45, Lesson 1. It drops the decimal. 500 // 300 gives 1, not 1.666....
+
+IF AI USES / CORRECTLY ON THE FIRST TRY
+
+AI models improve over time. If the AI generates word_count / words_per_minute (with /) on the first attempt and both tests pass, congratulations: your tests verified a correct implementation. But you still need to practice reading failures, and this is a good time for a fire drill. Open smartnotes/reading.py in your editor, change the single / to //, save the file, and run uv run pytest tests/test_reading.py -v. Watch the failure appear. Then follow the re-prompt workflow below to practice fixing it. The goal is to build the muscle memory of diagnosing failures. You want this skill ready before you need it on a harder function.
+
+Step 4: Verify (FAIL)​
+$ uv run pytest tests/test_reading.py -v
+tests/test_reading.py::test_exact_division PASSED
+tests/test_reading.py::test_fractional_result FAILED
+
+    def test_fractional_result():
+>       assert reading_time_minutes(500, 300) == 1.6666666666666667
+E       assert 1 == 1.6666666666666667
+
+1 passed, 1 failed
+
+
+The first test passes: 1000 // 200 equals 5, which equals 5.0. The floor division did not matter because the result was already a whole number.
+
+The second test fails: 500 // 300 equals 1, but the test expects 1.6666666666666667. Floor division threw away the fractional part.
+
+Reading the Failure​
+
+The pytest output tells you everything you need to know. Focus on two lines:
+
+>       assert reading_time_minutes(500, 300) == 1.6666666666666667
+E       assert 1 == 1.6666666666666667
+
+The > line shows which assertion failed.
+The E line shows the mismatch: the function returned 1, but the test expected 1.6666666666666667.
+
+Error Taxonomy (from Chapter 43): Chapter 43 introduced five error categories: type, logic, specification, data/edge-case, and orchestration errors. This failure is a logic error: the function computes the wrong value. The types are correct (int inputs, float output), and the specification is correct (the test values are right). The implementation used the wrong operator: // (floor division) instead of / (true division).
+
+You already know the difference. In Chapter 45, Lesson 1, you predicted that 10 // 3 equals 3 (not 3.333...). The same concept appears here: // drops the decimal, / keeps it.
+
+Re-Prompting​
+
+Now you tell Claude Code what went wrong. A good re-prompt includes the failure:
+
+The test_fractional_result test fails. The function returns 1
+instead of 1.6666666666666667. The issue is integer division
+(// instead of /). Please use true division (/) so the
+fractional part is preserved. Do not modify the tests.
+
+
+You are not asking AI to figure out the problem. You are telling it what is wrong and what to fix. Your Chapter 45 reading skills let you diagnose the issue. The re-prompt is specific: it names the failing test, states the wrong value, identifies the cause, and requests the fix.
+
+Second Attempt​
+
+The AI generates:
+
+def reading_time_minutes(word_count: int, words_per_minute: int) -> float:
+    return word_count / words_per_minute
+
+
+One character changed: // became /. Run the tests:
+
+$ uv run pytest tests/test_reading.py -v
+tests/test_reading.py::test_exact_division PASSED
+tests/test_reading.py::test_fractional_result PASSED
+
+2 passed
+
+
+GREEN. Both tests pass. The fix was one character, but the reading (identifying why it failed and what to change) required your understanding of floor division vs true division.
+
+Step 5: Read the Fixed Code​
+
+Apply PRIMM to the corrected implementation: return word_count / words_per_minute.
+
+Predict: What does reading_time_minutes(750, 250) return?
+
+Work it out: 750 / 250 = 3.0. The function returns 3.0.
+
+Predict: What does reading_time_minutes(100, 300) return?
+
+Work it out: 100 / 300 = 0.3333333333333333. The function returns approximately 0.333. A 100-word note at 300 words per minute takes about 20 seconds.
+
+Does the logic make sense? Division is the right operation: total words divided by words per minute gives minutes. The formula is correct.
+
+FLOATING-POINT COMPARISON
+
+Computers store decimal numbers (floats) with tiny rounding errors. 0.1 + 0.2 equals 0.30000000000000004, not 0.3. When your tests compare float results, use pytest.approx() instead of ==:
+
+assert celsius_to_fahrenheit(100.0) == pytest.approx(212.0)
+
+
+This allows for the tiny rounding differences that are normal in floating-point arithmetic. In this chapter's exercises, the values divide evenly enough that == works fine. In later chapters, when calculations get more complex, pytest.approx() becomes essential.
+
+Iteration Is Normal​
+
+AI does not always get it right on the first attempt. This is not a flaw in TDG; it is a feature. The iteration loop is built into the method:
+
+Specify → Generate → Verify → [if FAIL] → Read failure → Re-prompt → Verify
+
+
+Your tests are the safety net. Without them, the floor division bug would have silently rounded every reading time down. With them, it was caught in three seconds and fixed in one re-prompt.
+
+IF YOU HAVE WORKED WITH PYTEST BEFORE
+
+The // vs / bug is a classic production incident in financial and billing systems, where silent rounding can go undetected for weeks (exactly Emma's story). Experienced developers catch this class of error with parameterized tests (@pytest.mark.parametrize), which run the same assertion across a table of inputs. You will see parameterized tests in later chapters. For now, two well-chosen assertions (one clean division, one fractional) are enough to expose the bug.
+
+EDGE CASES TO CONSIDER
+
+When writing tests, think about boundary conditions: What happens with zero? With negative numbers? With empty strings? These are the inputs that AI-generated code most often handles incorrectly. Adding one or two edge case tests to your specification catches bugs before they reach production.
+
+KEEP IT SIMPLE FOR NOW
+
+This lesson covers one re-prompt for one clear error. What happens when the second attempt also fails, or when the fix introduces a new bug? That is real debugging, and it requires skills you will build in Phase 4 (Debug and Master). For now, one re-prompt for one clear error is the right scope.
+
+Your Independent TDG Cycle​
+
+Pick one function from this menu and complete a full TDG cycle. Follow the same file pattern from Lesson 2: create a stub file in smartnotes/ and a test file in tests/ with the matching import line.
+
+Option A: page_count
+
+Takes word_count: int and words_per_page: int
+Returns the number of pages as a float
+Test cases: page_count(500, 250) == 2.0, page_count(300, 250) == 1.2
+
+Option B: discount_price
+
+Takes price: float and percent_off: int
+Returns the discounted price as a float
+Test cases: discount_price(100.0, 20) == 80.0, discount_price(50.0, 10) == 45.0
+
+Option C: seconds_to_minutes
+
+Takes seconds: int
+Returns the time in minutes as a float
+Test cases: seconds_to_minutes(120) == 2.0, seconds_to_minutes(90) == 1.5
+
+Follow the same TDG steps from Lesson 3: stub, tests, pyright, pytest (RED), prompt, pytest (GREEN), read with PRIMM. If the first attempt fails, read the failure and re-prompt. That is the iteration loop in action.
+
+IF YOU SEE AN ERROR NOT COVERED HERE
+
+Error messages can look intimidating, but most fall into three categories:
+
+NameError or ModuleNotFoundError: Python cannot find your function. Check your file names and import lines.
+AssertionError: the function returned the wrong value. Read the E line to see expected vs actual.
+SyntaxError: a typo in your code. Check for missing colons, wrong indentation, or unclosed quotes.
+
+If you see something else entirely, copy the full error message and paste it to Claude Code: "I got this error. What does it mean and how do I fix it?"
+
+Your Capstone TDG Cycle​
+
+You have walked through the TDG loop with temperature conversion and reading time. Now prove the method transfers to a completely different domain. This exercise is yours from start to finish.
+
+The problem: Write a function called word_frequency that counts how many times a specific word appears in a text. It takes two parameters: text (a string) and target_word (a string). It returns an int representing the count. The comparison should be case-insensitive, so "Python" and "python" count as the same word.
+
+Your task (follow the TDG loop):
+
+Specify: Create a file called tests/test_word_frequency.py. Write 4 tests that define correct behavior:
+from smartnotes.word_frequency import word_frequency
+
+def test_single_occurrence():
+    assert word_frequency("Python is great", "python") == 1
+
+def test_multiple_occurrences():
+    assert word_frequency("the cat sat on the mat", "the") == 2
+
+def test_case_insensitive():
+    assert word_frequency("Python python PYTHON", "python") == 3
+
+def test_word_not_found():
+    assert word_frequency("hello world", "missing") == 0
+
+Check types: Run uv run pyright and confirm it catches the missing function.
+Generate: Create smartnotes/word_frequency.py with a stub, then prompt Claude Code: "Implement the word_frequency function in smartnotes/word_frequency.py. Do not modify the tests."
+Verify: Run uv run pytest tests/test_word_frequency.py -v. If any test fails, read the error, classify it using the Error Taxonomy from Chapter 43, adjust your prompt, and regenerate.
+Read: Apply PRIMM to the generated code. Predict what each line does before reading the AI's implementation.
+WHAT TO DO IF ALL TESTS PASS ON THE FIRST TRY
+
+Add an edge case the AI might not handle well: What happens with the text "pineapple" when the target word is "apple"? Should that count as a match? Add a test for it and see if the AI's implementation treats "pineapple" as containing the word "apple" or correctly counts only whole words. This is the trust gap in action. A naive implementation using str.count() or str.lower().count() will match substrings, not whole words.
+
+Mastery gate: You have completed your capstone TDG cycle when all tests pass and you can explain, without looking at the code, what the function does and how it handles case sensitivity. If you also caught the substring edge case, you are already thinking like a specification writer who anticipates bugs before they ship.
+
+Try With AI​
+Prompt 1: Explain the Failure​
+A Python function returns 1 when I expected 1.6666666666666667.
+The implementation uses // (floor division) instead of /
+(true division). Explain the difference between // and /
+in Python with two examples.
+
+
+Compare AI's explanation to what you learned in Chapter 45. This reinforces the concept through a different angle.
+
+What you're learning: You are using AI to consolidate understanding after diagnosing a problem yourself, not as a shortcut to avoid reading the error.
+
+Prompt 2: Generate Edge Cases​
+I have a function reading_time_minutes(word_count: int,
+words_per_minute: int) -> float that divides word_count
+by words_per_minute. What edge cases should I test?
+What inputs might cause problems?
+
+
+Evaluate AI's suggestions. Does it mention zero (division by zero)? Negative values? Very large numbers? Which of these are realistic for a SmartNotes reading time function?
+
+What you're learning: You are thinking about specification completeness, whether your two tests cover enough cases. Edge case thinking becomes critical in later chapters.
+
+Prompt 3: Review Your Cycle​
+Review this TDG cycle for correctness:
+1. Stub: def seconds_to_minutes(seconds: int) -> float: ...
+2. Tests: assert seconds_to_minutes(120) == 2.0 and
+   assert seconds_to_minutes(90) == 1.5
+3. Implementation: return seconds / 60
+
+Is the implementation correct? Are the tests sufficient?
+What would you add?
+
+
+Read AI's review. Does it find any issues? Does it suggest improvements you had not considered?
+
+What you're learning: You are using AI as a code reviewer, a role it plays well when you give it specific code to evaluate.
+
+PRIMM-AI+ Practice: Diagnosing Failure​
+Predict [AI-FREE]​
+
+Read this implementation and test. Predict whether the test passes or fails:
+
+def percentage(part: int, whole: int) -> float:
+    return part // whole * 100
+
+def test_half():
+    assert percentage(50, 100) == 50.0
+
+
+Write your prediction and a confidence score from 1-5.
+
+Check your prediction
+Run​
+
+Create the stub and test. Run uv run pytest. Confirm the failure matches your prediction.
+
+Investigate​
+
+Read the pytest output. The E line should show assert 0 == 50.0. Write a one-sentence diagnosis: what operator is wrong, and what should it be?
+
+Error Taxonomy (from Chapter 43): Classify this as a logic error: the function uses the wrong operator. The types are correct. The specification (test) is correct. The implementation's arithmetic is wrong.
+
+Modify​
+
+Fix the implementation by changing // to /. Predict: will both percentage(50, 100) and percentage(1, 3) now return correct values? Calculate percentage(1, 3) by hand: 1 / 3 * 100 = 33.333.... Run it.
+
+Make [Mastery Gate]​
+
+Complete one full TDG cycle, from stub to GREEN, for a function of your choice. If AI gets it wrong on the first attempt, read the failure, classify the error, and re-prompt. Document your cycle:
+
+What function did you specify?
+Did AI get it right on the first attempt?
+If not, what was the error? How did you classify it?
+What was your re-prompt?
+Did the second attempt pass?
+
+If you can answer all five questions, you own the full TDG loop, including the iteration step.
+
+Chapter-End Rubric: Self-Assessment​
+
+You just completed four lessons and multiple TDG cycles. Before moving on, take two minutes to honestly assess where you are. This is not a test; nobody sees your score. It is a compass that shows which skills are solid and which need more practice. Score yourself on five dimensions:
+
+1. Specification Quality​
+
+Can you write a function stub with type annotations and two meaningful tests that define expected behavior?
+
+Developing	Competent	Fluent
+Struggled with stub syntax or wrote tests that do not match the function's purpose	Wrote correct stubs and tests for guided examples; needed help with independent specifications	Wrote correct stubs and tests independently for a function of your own choosing; tests cover distinct cases (not redundant)
+2. Tool Usage​
+
+Can you run uv run pyright and uv run pytest -v and interpret the results correctly?
+
+Developing	Competent	Fluent
+Confused pyright and pytest output; unsure which tool checks types vs behavior	Ran both tools correctly; understood that pyright checks types and pytest checks behavior	Ran both tools fluently; committed tests before prompting; used git diff to verify AI did not modify tests
+3. Reading Generated Code​
+
+Can you read AI-generated code with PRIMM: predict output, trace the logic, verify against domain knowledge?
+
+Developing	Competent	Fluent
+Accepted AI output without reading; relied on green tests as sufficient verification	Read generated code and predicted output for one new input; trace was mostly correct	Built trace tables for generated code; predicted output for multiple inputs including edge cases; verified against domain knowledge
+4. Failure Diagnosis​
+
+Can you read a pytest failure, identify the mismatch, classify the error, and explain what went wrong?
+
+Developing	Competent	Fluent
+Could not interpret the > and E lines in pytest output; needed AI to explain the failure	Read the failure message and identified the expected-vs-actual mismatch; classified the error type	Diagnosed the floor-division-vs-true-division error by reading the code; wrote a specific re-prompt without help
+5. Iteration​
+
+Can you re-prompt Claude Code after a failure with specific information about what went wrong?
+
+Developing	Competent	Fluent
+Re-prompted vaguely ("it's wrong, fix it"); AI did not improve on the second attempt	Re-prompted with the failing test name and expected-vs-actual values; AI fixed the issue	Re-prompted with diagnosis, root cause, and suggested fix; wrote the re-prompt faster than the original prompt
+
+Developing on any dimension? Repeat that lesson's exercises. Competent across all five? You are ready for the next chapter. Fluent? You are doing what professional developers do with AI coding tools.
+
+QUICK CHECK
+
+Before finishing the chapter, make sure you can answer these:
+
+What are the two lines in pytest output that tell you what went wrong?
+What should a good re-prompt include?
+Is needing a second prompt a sign that TDG failed?
+
+Answers: The > line (which assertion failed) and the E line (expected vs actual values); a good re-prompt names the failing test, states the wrong value, identifies the cause, and requests a specific fix; no, iteration is a normal step in the TDG loop, not a failure.
+
+Common Mistakes​
+Mistake	What Goes Wrong	How to Avoid It
+Re-prompting vaguely ("it's wrong, fix it")	AI has no specific information to work with and may repeat the same mistake	Name the failing test, state expected vs actual, identify the cause
+Giving up after one failure	You assume the loop is broken, but iteration is a normal TDG step	One re-prompt is expected. If the second attempt also fails, re-read the error more carefully
+Trusting GREEN without reading the code	Tests only check the cases you wrote; the function could be wrong for other inputs	Always apply PRIMM after GREEN: predict output for a new input, then verify
+Operational Takeaways​
+
+AI does not always get it right. Floor division instead of true division. Hardcoded values instead of formulas. Off-by-one errors. The first generation is a draft, not a finished product.
+
+Your tests catch the mistakes. Without tests, the floor division bug would have silently rounded every reading time down. With tests, it was caught in three seconds.
+
+Read the failure before re-prompting. The > and E lines in pytest output tell you exactly what went wrong. A specific re-prompt ("the issue is // instead of /") works better than a vague one ("it's wrong, fix it").
+
+Classify the error. The Error Taxonomy from Chapter 43 has five categories: type, logic, specification, data/edge-case, and orchestration errors. At the code level, the first three are most common. Classification helps you write better re-prompts and build pattern recognition.
+
+Iteration is a step in the loop, not a sign of failure. The TDG loop includes the feedback path: Verify, then if FAIL, Read, Re-prompt, Verify again. This is normal. Professional developers iterate. AI-assisted development iterates. The method accounts for it.
+
+Looking Ahead​
+
+You have completed your first TDG cycles. You can specify a function, prompt AI to implement it, verify the result, and iterate when it fails. The method stays the same from here forward. Every chapter in Part 4 applies this loop to new domains: strings, collections, control flow, classes. The functions get more complex. The tests get more interesting. The AI-generated code gets longer. But the loop never changes: Specify. Check types. Generate. Verify. Read.
+
+The method stays the same. The problems get bigger. And you are ready.
+
+James closes his laptop. Four TDG cycles today. Three green on the first prompt, one that needed a re-prompt. He caught the bug himself: read the failure, named the problem, told AI what to fix.
+
+He thinks about what Emma said. Four hundred invoices. Three weeks. His test caught it in three seconds.
+
+He is not writing code yet. He is writing specifications that catch bugs before they ship. Somehow, without noticing, he started thinking like the person who prevents the four-hundred-invoice disaster, not the person who discovers it three weeks late.
+
+When he gets home, his partner asks how the course is going. James surprises himself: "I wrote five lines of Python today and caught a bug that a professional team missed for three weeks."
+
+It is not the whole story. But it is the part that matters.

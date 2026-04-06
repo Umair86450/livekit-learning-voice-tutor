@@ -1,0 +1,645 @@
+Building a Memory-Augmented Agent
+
+You've learned the patterns. Now let's build a complete agent with persistent memory—one that remembers users across sessions and uses that memory to provide personalized assistance.
+
+In this lesson, you'll build a Task Manager Agent using OpenAI's Agents SDK with Mem0 for memory. By the end, you'll have a working agent that remembers user preferences, tracks task history, and provides context-aware suggestions.
+
+Project Setup​
+Project Structure​
+memory-agent/
+├── agent.py          # Agent definition with memory tools
+├── memory_tools.py   # Mem0-powered memory functions
+├── main.py           # Runner and conversation loop
+├── requirements.txt
+└── test_memory.py    # Multi-session memory tests
+
+Dependencies​
+# requirements.txt
+openai-agents>=0.1.0
+mem0ai>=0.1.0
+python-dotenv>=1.0.0
+
+Installation​
+pip install openai-agents mem0ai python-dotenv
+
+Environment Setup​
+# .env
+OPENAI_API_KEY=your-openai-api-key
+
+Building Memory Tools​
+
+First, let's create the memory tools that our agent will use.
+
+Create memory_tools.py:
+
+from mem0 import Memory
+from agents import function_tool
+from typing import Optional
+
+# Initialize Mem0 - uses OpenAI for embeddings by default
+memory = Memory()
+
+@function_tool
+def recall_memories(query: str, user_id: str, category: Optional[str] = None) -> str:
+    """
+    Search your memory for relevant past interactions and user information.
+
+    Args:
+        query: What to search for (e.g., "user preferences", "past tasks")
+        user_id: The user whose memories to search
+        category: Optional filter - "preferences", "tasks", "projects", or "general"
+
+    Returns:
+        Formatted string of relevant memories with dates
+    """
+    filters = {"user_id": user_id}
+    if category:
+        filters["category"] = category
+
+    results = memory.search(
+        query=query,
+        user_id=user_id,
+        filters=filters if category else None,
+        limit=5
+    )
+
+    memories = results.get('results', [])
+    if not memories:
+        return "No relevant memories found."
+
+    formatted = []
+    for mem in memories:
+        score = mem.get('score', 0)
+        text = mem.get('memory', '')
+        created = mem.get('created_at', 'unknown date')[:10]
+        formatted.append(f"• [{created}] {text} (relevance: {score:.2f})")
+
+    return "Relevant memories:\n" + "\n".join(formatted)
+
+
+@function_tool
+def store_memory(
+    content: str,
+    user_id: str,
+    category: str = "general"
+) -> str:
+    """
+    Store important information about the user for future reference.
+
+    Args:
+        content: The information to remember (user preference, task outcome, etc.)
+        user_id: The user this memory belongs to
+        category: One of "preferences", "tasks", "projects", or "general"
+
+    Returns:
+        Confirmation of what was stored
+    """
+    result = memory.add(
+        [{"role": "system", "content": content}],
+        user_id=user_id,
+        metadata={"category": category}
+    )
+
+    stored = result.get('results', [])
+    if stored:
+        return f"Stored: {stored[0].get('memory', content)}"
+    return f"Stored: {content}"
+
+
+@function_tool
+def list_user_memories(user_id: str, limit: int = 10) -> str:
+    """
+    List all memories for a user, organized by category.
+
+    Args:
+        user_id: The user whose memories to list
+        limit: Maximum number of memories to return
+
+    Returns:
+        Categorized list of user memories
+    """
+    # Search with empty query returns recent memories
+    results = memory.search(
+        query="",
+        user_id=user_id,
+        limit=limit
+    )
+
+    memories = results.get('results', [])
+    if not memories:
+        return "No memories stored for this user."
+
+    # Group by category
+    by_category = {}
+    for mem in memories:
+        cat = mem.get('metadata', {}).get('category', 'general')
+        if cat not in by_category:
+            by_category[cat] = []
+        by_category[cat].append(mem.get('memory', ''))
+
+    formatted = []
+    for cat, mems in by_category.items():
+        formatted.append(f"\n{cat.upper()}:")
+        for m in mems[:3]:  # Show top 3 per category
+            formatted.append(f"  • {m}")
+
+    return "User memories:" + "".join(formatted)
+
+
+@function_tool
+def forget_memory(memory_text: str, user_id: str) -> str:
+    """
+    Delete a specific memory (for privacy or corrections).
+
+    Args:
+        memory_text: Text to search for and delete
+        user_id: The user whose memory to delete
+
+    Returns:
+        Confirmation of deletion
+    """
+    # Find matching memory
+    results = memory.search(
+        query=memory_text,
+        user_id=user_id,
+        limit=1
+    )
+
+    memories = results.get('results', [])
+    if not memories:
+        return "No matching memory found to delete."
+
+    memory_id = memories[0].get('id')
+    memory.delete(memory_id=memory_id)
+
+    return f"Deleted memory: {memories[0].get('memory', memory_text)}"
+
+
+Output when testing recall_memories:
+
+Relevant memories:
+• [2025-01-20] Prefers tasks scheduled in morning (relevance: 0.89)
+• [2025-01-18] Currently working on Phoenix project (relevance: 0.76)
+• [2025-01-15] Uses pytest for testing (relevance: 0.65)
+
+Creating the Agent​
+
+Now let's create the Task Manager Agent with memory capabilities.
+
+Create agent.py:
+
+from agents import Agent
+from memory_tools import (
+    recall_memories,
+    store_memory,
+    list_user_memories,
+    forget_memory
+)
+
+TASK_MANAGER_INSTRUCTIONS = """You are a helpful Task Manager Agent with persistent memory.
+
+## Your Capabilities
+- Create, track, and manage tasks for users
+- Remember user preferences and apply them automatically
+- Recall past tasks and project context
+- Learn from user feedback over time
+
+## Memory Guidelines
+1. At conversation START: Always recall relevant memories about the user
+2. During conversation: Store important new information (preferences, decisions, outcomes)
+3. Use memories NATURALLY - reference them as context, don't just list them
+4. Ask before storing sensitive information
+
+## Task Management
+When users mention tasks:
+- Check for relevant project context in memory
+- Apply known preferences (timing, priority patterns)
+- Suggest based on past patterns
+
+## Example Memory Usage
+User: "Schedule a code review"
+You: [Recall memories about code reviews and preferences]
+Response: "I'll schedule that for morning since you prefer focused work then.
+Should I add it to the Phoenix project you've been working on?"
+
+## Privacy
+- Never store passwords, API keys, or sensitive credentials
+- If user says "don't remember this" - use forget_memory
+- Respect when users want things kept private
+
+Remember: You're building a relationship over time. Each conversation adds to shared context.
+"""
+
+def create_task_manager_agent() -> Agent:
+    """Create a Task Manager Agent with memory tools."""
+    return Agent(
+        name="TaskManager",
+        instructions=TASK_MANAGER_INSTRUCTIONS,
+        tools=[
+            recall_memories,
+            store_memory,
+            list_user_memories,
+            forget_memory
+        ],
+        model="gpt-4o-mini"  # Cost-effective for task management
+    )
+
+Running the Agent​
+
+Create the main conversation loop.
+
+Create main.py:
+
+import asyncio
+from dotenv import load_dotenv
+from agents import Runner
+from agent import create_task_manager_agent
+
+load_dotenv()
+
+async def chat_session(user_id: str):
+    """Run an interactive chat session with the Task Manager."""
+    agent = create_task_manager_agent()
+    runner = Runner()
+
+    print(f"\n{'='*60}")
+    print(f"Task Manager Agent - Session for {user_id}")
+    print(f"{'='*60}")
+    print("Type 'quit' to exit, 'memories' to see stored memories\n")
+
+    # Initial context retrieval
+    initial_context = f"New session started for user {user_id}. " \
+                     f"Recall any relevant memories about this user."
+
+    result = await runner.run(agent, initial_context)
+    print(f"Agent: {result.final_output}\n")
+
+    while True:
+        user_input = input("You: ").strip()
+
+        if user_input.lower() == 'quit':
+            # Store session end
+            await runner.run(
+                agent,
+                f"User {user_id} is ending the session. "
+                f"Store any important information from this conversation."
+            )
+            print("Session ended. Memories saved.")
+            break
+
+        if user_input.lower() == 'memories':
+            result = await runner.run(
+                agent,
+                f"List all memories for user {user_id}"
+            )
+            print(f"Agent: {result.final_output}\n")
+            continue
+
+        # Include user_id in context for memory operations
+        context = f"User {user_id} says: {user_input}"
+        result = await runner.run(agent, context)
+        print(f"Agent: {result.final_output}\n")
+
+
+async def main():
+    user_id = input("Enter your user ID: ").strip() or "demo_user"
+    await chat_session(user_id)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+Example Conversation​
+
+Session 1: First Interaction
+
+Task Manager Agent - Session for alex
+============================================================
+Type 'quit' to exit, 'memories' to see stored memories
+
+Agent: Hello! I don't have any previous memories of you yet.
+I'm your Task Manager Agent - I can help you manage tasks and
+I'll remember your preferences for future sessions. What would
+you like to work on?
+
+You: I'm working on the Phoenix project. I prefer doing code
+reviews in the morning when I'm fresh.
+
+Agent: Got it! I've noted that you're working on the Phoenix
+project and prefer morning code reviews. I'll remember these
+for our future conversations.
+
+[Stored: Working on Phoenix project]
+[Stored: Prefers code reviews in morning when fresh]
+
+You: Create a task to review the authentication PR
+
+Agent: I'll create that code review task for the Phoenix project.
+Since you prefer mornings for reviews, I'm scheduling it for
+tomorrow morning.
+
+Task created:
+- Title: Review authentication PR
+- Project: Phoenix
+- Scheduled: Tomorrow morning
+- Priority: Normal
+
+Would you like me to remember anything specific about this PR?
+
+You: quit
+Session ended. Memories saved.
+
+
+Session 2: Memory in Action (after restart)
+
+Task Manager Agent - Session for alex
+============================================================
+Type 'quit' to exit, 'memories' to see stored memories
+
+Agent: Welcome back, Alex! I remember you're working on the
+Phoenix project and prefer code reviews in the morning. Last
+time you created a task to review the authentication PR.
+How can I help today?
+
+You: How did the auth review go?
+
+Agent: I don't have a record of the outcome yet. How did it go?
+I can store the result for future reference.
+
+You: It went well. Found two small issues that were easy fixes.
+
+Agent: Great to hear! I'll remember that the auth PR review was
+successful with minor issues found. This helps me understand
+your project's progress.
+
+[Stored: Auth PR review completed - found 2 small issues, easy fixes]
+
+You: memories
+Agent: Here are your stored memories:
+
+PROJECTS:
+  • Working on Phoenix project
+  • Auth PR review completed - found 2 small issues, easy fixes
+
+PREFERENCES:
+  • Prefers code reviews in morning when fresh
+
+TASKS:
+  • Created task to review authentication PR
+
+Testing Memory Persistence​
+
+Verify that memory works across completely independent sessions.
+
+Create test_memory.py:
+
+import asyncio
+from dotenv import load_dotenv
+from agents import Runner
+from agent import create_task_manager_agent
+from mem0 import Memory
+
+load_dotenv()
+
+async def test_memory_persistence():
+    """Test that memories persist across agent sessions."""
+    user_id = "test_user_persistence"
+
+    print("=" * 60)
+    print("Testing Memory Persistence")
+    print("=" * 60)
+
+    # Clean start
+    memory = Memory()
+
+    # === Session 1: Store information ===
+    print("\n[Session 1] Storing information...")
+    agent1 = create_task_manager_agent()
+    runner1 = Runner()
+
+    result = await runner1.run(
+        agent1,
+        f"User {user_id} says: I'm a Python developer who loves FastAPI. "
+        f"Remember this preference."
+    )
+    print(f"Agent: {result.final_output}")
+
+    # Verify storage
+    stored = memory.search("Python FastAPI", user_id=user_id)
+    assert len(stored.get('results', [])) > 0, "Memory not stored!"
+    print("✓ Memory stored successfully")
+
+    # === Session 2: Retrieve in NEW agent instance ===
+    print("\n[Session 2] New agent instance - retrieving...")
+
+    # Create completely new agent and runner
+    agent2 = create_task_manager_agent()
+    runner2 = Runner()
+
+    result = await runner2.run(
+        agent2,
+        f"User {user_id} is starting a new session. "
+        f"What do you remember about them?"
+    )
+    print(f"Agent: {result.final_output}")
+
+    # Check that response includes stored preference
+    assert "Python" in result.final_output or "FastAPI" in result.final_output, \
+        "Agent didn't recall stored memory!"
+    print("✓ Memory retrieved in new session")
+
+    # === Cleanup ===
+    print("\n[Cleanup] Removing test memories...")
+    all_mems = memory.search("", user_id=user_id, limit=100)
+    for mem in all_mems.get('results', []):
+        memory.delete(memory_id=mem['id'])
+    print("✓ Test memories cleaned up")
+
+    print("\n" + "=" * 60)
+    print("All memory persistence tests passed!")
+    print("=" * 60)
+
+
+async def test_memory_categories():
+    """Test that memory categories work correctly."""
+    user_id = "test_user_categories"
+    memory = Memory()
+
+    print("\n[Testing Categories]")
+
+    agent = create_task_manager_agent()
+    runner = Runner()
+
+    # Store different categories
+    await runner.run(
+        agent,
+        f"User {user_id} says: Store these - "
+        f"Preference: I like TypeScript. "
+        f"Project: Working on EcommerceApp. "
+        f"Task: Need to fix the payment bug."
+    )
+
+    # Query specific category
+    result = await runner.run(
+        agent,
+        f"What projects is user {user_id} working on? "
+        f"Only check project memories."
+    )
+    print(f"Projects: {result.final_output}")
+
+    # Cleanup
+    all_mems = memory.search("", user_id=user_id, limit=100)
+    for mem in all_mems.get('results', []):
+        memory.delete(memory_id=mem['id'])
+
+    print("✓ Category filtering works")
+
+
+if __name__ == "__main__":
+    asyncio.run(test_memory_persistence())
+    asyncio.run(test_memory_categories())
+
+
+Output:
+
+============================================================
+Testing Memory Persistence
+============================================================
+
+[Session 1] Storing information...
+Agent: I've noted that you're a Python developer who loves FastAPI.
+I'll remember this for our future conversations!
+✓ Memory stored successfully
+
+[Session 2] New agent instance - retrieving...
+Agent: Welcome back! I remember you're a Python developer who loves
+FastAPI. How can I help with your development work today?
+✓ Memory retrieved in new session
+
+[Cleanup] Removing test memories...
+✓ Test memories cleaned up
+
+============================================================
+All memory persistence tests passed!
+============================================================
+
+Architecture Summary​
+┌─────────────────────────────────────────────────────────────┐
+│                    MEMORY-AUGMENTED AGENT                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │                  OpenAI Agents SDK                   │   │
+│   │                                                      │   │
+│   │   Agent                                              │   │
+│   │   ├── Instructions (memory-aware prompts)           │   │
+│   │   └── Tools                                         │   │
+│   │       ├── recall_memories (Mem0 search)             │   │
+│   │       ├── store_memory (Mem0 add)                   │   │
+│   │       ├── list_user_memories (Mem0 list)            │   │
+│   │       └── forget_memory (Mem0 delete)               │   │
+│   │                                                      │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                           │                                  │
+│                           ▼                                  │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │                      Mem0 SDK                        │   │
+│   │                                                      │   │
+│   │   Memory()                                          │   │
+│   │   ├── add() → Extract facts, embed, store          │   │
+│   │   ├── search() → Semantic retrieval                │   │
+│   │   ├── delete() → Remove memories                   │   │
+│   │   └── update() → Modify memories                   │   │
+│   │                                                      │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                           │                                  │
+│                           ▼                                  │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │                   Storage Layer                      │   │
+│   │                                                      │   │
+│   │   Embeddings (OpenAI) → Vector Store (Qdrant)       │   │
+│   │                                                      │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Key Patterns Demonstrated​
+Pattern	Implementation
+Memory as Tools	@function_tool decorators expose Mem0 to agent
+User Scoping	Every operation includes user_id parameter
+Category Filtering	Metadata enables targeted retrieval
+Session Persistence	Mem0's disk storage survives restarts
+Natural Integration	Instructions guide memory usage in conversation
+Privacy Controls	forget_memory tool for user control
+Try With AI​
+
+Use these prompts to extend your memory-augmented agent.
+
+Prompt 1: Add Memory Summarization​
+I have a memory-augmented agent using OpenAI Agents SDK and Mem0.
+When a user has many memories (>20), retrieval becomes noisy.
+
+Design a memory summarization strategy:
+1. When to trigger summarization (memory count threshold)
+2. How to group related memories for summarization
+3. How to preserve important details while reducing volume
+4. How to handle the summarize → delete old → store summary flow
+
+Show the implementation as a new tool: summarize_memories(user_id, category)
+
+
+What you're learning: Memory systems need maintenance. Summarization prevents context overload while preserving valuable information—a key pattern for long-running agents.
+
+Prompt 2: Entity-Based Memory​
+My task manager agent stores unstructured memories. I want to add
+entity extraction so memories are linked to specific entities
+(projects, people, deadlines).
+
+Design an entity memory system:
+1. Extract entities from conversation (Project: Phoenix, Person: Alex)
+2. Link memories to entities in metadata
+3. Enable queries like "What do I know about the Phoenix project?"
+4. Handle entity relationships (Alex works on Phoenix)
+
+Show how to modify store_memory and add a new query_entity tool.
+
+
+What you're learning: Entity linking transforms flat memories into a knowledge graph. This enables more precise retrieval and relationship-based reasoning.
+
+Prompt 3: Memory Confidence Scoring​
+My agent sometimes retrieves irrelevant memories that confuse responses.
+I want to add confidence scoring that considers:
+- Semantic similarity (from Mem0)
+- Recency (newer = more relevant for tasks)
+- Frequency (oft-referenced memories = important)
+- User feedback (memories the user corrected = lower confidence)
+
+Design a confidence scoring system:
+1. How to track these signals in metadata
+2. How to compute combined confidence score
+3. How to filter low-confidence memories from retrieval
+4. How to let users boost/demote memory confidence
+
+Show the updated recall_memories implementation with confidence filtering.
+
+
+What you're learning: Raw semantic similarity isn't enough for production memory systems. Multi-factor confidence scoring improves retrieval precision and user trust.
+
+What You've Built​
+
+In this lesson, you created a complete memory-augmented agent:
+
+Component	Purpose
+memory_tools.py	Mem0-powered tools for recall, store, list, forget
+agent.py	Task Manager Agent with memory-aware instructions
+main.py	Interactive conversation loop
+test_memory.py	Multi-session persistence verification
+
+This agent demonstrates the full memory lifecycle:
+
+Retrieval at session start (what do I know about this user?)
+Storage during conversation (user shared something important)
+Application in responses (use past context naturally)
+Persistence across sessions (memory survives restarts)
+
+Next, you'll experience memory from the other side—as a user of a memory-augmented AI assistant.

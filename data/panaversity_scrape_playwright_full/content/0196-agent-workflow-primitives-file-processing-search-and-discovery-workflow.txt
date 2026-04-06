@@ -1,0 +1,271 @@
+Search & Discovery Workflow
+
+You downloaded it. You know you did. It was a PDF, something about taxes, from your bank. It's been 20 minutes of clicking through folders. Downloads? Not there. Documents? Nothing. Desktop? You're starting to wonder if you imagined it.
+
+This is the most common file problem in existence, and you've been solving it wrong your whole life. You've been searching by where you put things. "Was it in the Finance folder or the 2023 folder?" But you don't remember where you put it. You remember what it was: a tax document, about dividends, from Chase.
+
+That's the inversion this lesson teaches. Stop searching by location. Start searching by description. You know WHAT you're looking for. The agent knows HOW to find it. That's the ideal split.
+
+The Conversation​
+
+Open Claude Code. Describe the problem.
+
+You: I'm looking for a tax document from 2023. It was a PDF, something
+about dividends or 1099. I think I downloaded it from my bank. Can you
+help me find it?
+
+
+Watch what Claude Code does.
+
+Claude Code: I'll search for that tax document. Let me check common
+locations for downloaded PDFs related to taxes.
+
+[Runs: find ~/Downloads ~/Documents -name "*.pdf" -newermt "2023-01-01"
+  ! -newermt "2024-01-01" 2>/dev/null]
+[Runs: find ~/Downloads ~/Documents -iname "*1099*" -o -iname "*tax*"
+  -o -iname "*dividend*" 2>/dev/null]
+
+I found several candidates:
+
+| File                           | Location            | Modified   |
+|--------------------------------|---------------------|------------|
+| 1099-DIV-2023-Fidelity.pdf     | ~/Downloads         | 2023-02-14 |
+| 1099-INT-2023-Chase.pdf        | ~/Downloads         | 2023-01-28 |
+| Tax-Summary-2023.pdf           | ~/Documents/Taxes   | 2023-04-12 |
+| dividend-statement-Q4-2023.pdf | ~/Downloads         | 2023-10-15 |
+| W2-2023-Employer.pdf           | ~/Documents/Taxes   | 2023-02-01 |
+
+The most likely match for "dividends or 1099" is:
+  ~/Downloads/1099-DIV-2023-Fidelity.pdf
+
+Is this the one you're looking for?
+
+
+That's a lot of results. Let's narrow it down.
+
+You: It was from my bank, not Fidelity. I think it was Chase or
+Bank of America.
+
+Claude Code: Let me narrow the search to bank-related documents.
+
+[Runs: find ~/Downloads ~/Documents -iname "*chase*" -o
+  -iname "*bofa*" -o -iname "*bankofamerica*" 2>/dev/null |
+  xargs grep -l -i "1099\|dividend" 2>/dev/null]
+
+Found these bank-related tax documents:
+
+| File                          | Location    | Content Match       |
+|-------------------------------|-------------|---------------------|
+| 1099-INT-2023-Chase.pdf       | ~/Downloads | Contains "1099-INT" |
+| Chase-Tax-Statements-2023.pdf | ~/Documents | Contains "dividend" |
+
+The Chase 1099-INT document looks like your best match.
+Want me to open it so you can verify?
+
+
+That's the one.
+
+You: That's it! Actually, can you find all my Chase tax documents?
+I want to see what else I have from them.
+
+Claude Code: I'll find all Chase-related tax documents.
+
+[Runs: find ~ -iname "*chase*" -type f \( -iname "*.pdf" -o
+  -iname "*.PDF" \) 2>/dev/null]
+[Runs: grep -r -l -i "chase.*1099\|chase.*tax\|chase.*statement"
+  ~/Documents ~/Downloads 2>/dev/null]
+
+Here's everything I found from Chase:
+
+TAX DOCUMENTS:
+  ~/Downloads/1099-INT-2023-Chase.pdf         (2023)
+  ~/Downloads/1099-INT-2022-Chase.pdf         (2022)
+  ~/Documents/Taxes/Chase-Year-End-2023.pdf   (2023)
+  ~/Documents/Taxes/Chase-Year-End-2022.pdf   (2022)
+
+OTHER CHASE FILES:
+  ~/Downloads/Chase-Statement-Dec-2023.pdf    (statement)
+  ~/Downloads/Chase-Statement-Nov-2023.pdf    (statement)
+
+You have 4 tax documents and 2 regular statements from Chase.
+Would you like me to organize these into a Chase-Taxes folder?
+
+
+You went from "I can't find that tax document" to "here's everything from Chase" in three exchanges.
+
+The Invisible Skill​
+
+You're learning something you might not realize. "Descriptive search": describing what you're looking for instead of knowing where it is: is a transferable skill that goes far beyond files. Every database query, every research task, every time you ask an AI to find information in a large corpus, you're doing the same thing: describing what you need and letting a system figure out how to find it.
+
+The agent used find, grep, and xargs behind the scenes. You didn't need to know those commands. But notice the skill you did use: you described the file in progressively more specific terms. "Tax document from 2023" → "about dividends" → "from Chase, not Fidelity." Each refinement narrowed the search. That's the skill, not bash syntax, but the ability to describe what you need in terms a search can use.
+
+Traditional Search	Agent-Directed Search
+Type exact filename	Describe what you're looking for
+One folder at a time	Search multiple locations simultaneously
+Match filename only	Match content inside files
+Get list, you filter	Agent filters and explains why
+You refine with new search	Agent refines through conversation
+The Level-Up: Searching Inside Files​
+
+Everything above searched by filename. But what about files whose names tell you nothing?
+
+Your Downloads folder has 40 PDFs named document.pdf, download.pdf, file(1).pdf. The filename is useless. The information you need is inside the file.
+
+You: I have a bunch of PDFs with generic names. One of them is an
+invoice from December for more than $500. Can you search INSIDE
+the PDFs to find it?
+
+Claude Code: I'll search the content of your PDF files.
+
+[Runs: find ~/Downloads -name "*.pdf" -newermt "2025-12-01"
+  ! -newermt "2026-01-01" -exec pdftotext {} - 2>/dev/null \;
+  | grep -l -i "invoice"]
+
+Actually, let me take a better approach — I'll check each PDF
+individually so I can tell you which file matches.
+
+[Runs: for f in ~/Downloads/*.pdf; do
+  if pdftotext "$f" - 2>/dev/null | grep -qi "invoice"; then
+    echo "$f: $(pdftotext "$f" - 2>/dev/null | grep -i 'total\|amount\|$'
+      | head -3)"
+  fi
+done]
+
+Found 6 PDFs containing "invoice":
+
+| File                | Key Content                    |
+|---------------------|--------------------------------|
+| download(3).pdf     | Invoice #4521, Total: $847.00  |
+| document.pdf        | Invoice #3892, Total: $125.50  |
+| file(1).pdf         | Invoice #4103, Total: $2,340   |
+| scan_20251215.pdf   | Invoice #4287, Total: $599.99  |
+| unnamed.pdf         | Invoice #3901, Total: $89.00   |
+| receipt_dec.pdf     | Invoice #4455, Total: $312.00  |
+
+The ones over $500 are: download(3).pdf ($847), file(1).pdf ($2,340),
+and scan_20251215.pdf ($599.99).
+
+Want me to rename these with meaningful names based on their content?
+
+
+This is the jump from searching by metadata (filename, date, size) to searching by content (what's actually in the file). The agent used pdftotext to read inside the PDFs, then grep to find matches. You couldn't do this by browsing folders: the filenames told you nothing.
+
+The progression through this chapter:
+
+Lesson 1: See your files (metadata)
+Lesson 3: Organize by extension (surface attributes)
+Lesson 6: Search by content (deep attributes)
+
+Each level gives you access to information the previous level couldn't reach.
+
+The Pattern​
+
+Here's what made this work:
+
+"Find files that match [description] from [time period]"
+
+
+This pattern tells the agent:
+
+What characteristics to look for (description)
+When the file was created or modified (time period)
+That you don't know the exact location
+
+The agent will search broadly and then narrow based on your criteria.
+
+The second key pattern:
+
+"Find all similar files to this one"
+
+
+Once you find one example, this request triggers a pattern-based search. The agent identifies characteristics of the found file and looks for others that match.
+
+Together, these patterns turn "I can't find it" into "here's everything related."
+
+Why Description Beats Commands​
+
+Consider the mental load difference:
+
+Approach	What You Need to Know
+Manual find	Exact syntax, flags, regex
+Manual grep	Pattern matching, file piping
+Combined tools	How to chain commands with xargs
+Agent-directed	What you're looking for
+
+The agent knows find -iname "*pattern*" -newermt "date". The agent knows grep -l -i "content". You know "it was a tax document from 2023 about dividends."
+
+Your knowledge is valuable. The agent's command syntax knowledge is mechanical. The combination is powerful.
+
+Protecting Your Session From Too Many Results​
+
+One thing to watch for: broad searches can return thousands of results. If you ask the agent to search your entire home directory, the output might flood the conversation and degrade the agent's performance. When you expect many results, ask the agent to save them:
+
+Save the full list to search-results.txt and just show me the first 10 matches.
+
+
+This keeps your session clean and creates a persistent record you can reference later.
+
+The Key Requests​
+
+Remember these phrases for search tasks:
+
+What You Want	What to Say
+Find by description	"Find files that match [description]"
+Add time constraint	"...from [time period]"
+Search inside files	"...that contain [text]"
+Find similar files	"Find all similar files to this one"
+See search process	"Show me where you're searching and what you find"
+Narrow results	"It was specifically from [source/context]"
+
+You're not learning find -mtime -30 -name "*.pdf" | xargs grep -l "pattern". You're learning how to describe what you need.
+
+What You're Building​
+
+By now in this chapter, you've learned:
+
+Lesson	Pattern
+1. First Workflow	"Help me understand"
+2. Safety First	"Back up before changing"
+3. Categorize with Rules	"Write rules first"
+4. Batch Operations	"Show me first, create a script"
+5. Error Recovery	"Restore from backup, compare"
+6. Search & Discovery	"Find files that match [desc]"
+
+Each pattern expands your capability. You understand your files. You protect them with backups. You document your rules. You automate repetitive tasks. You recover from mistakes. Now you find anything by describing it.
+
+You now have six distinct workflows. Survey, backup, organize, batch, recover, search. Each powerful on its own. But the real skill isn't knowing each workflow; it's knowing which one to reach for when your files are on fire and your boss is on the phone.
+
+Try With AI: Extended Practice​
+
+Prompt 1: Multi-Criteria Search
+
+I need to find a document that meets multiple criteria:
+- It's a PDF
+- It contains the word "invoice" somewhere in the file
+- It's from 2025
+- The amount was over $500 (if you can search for that)
+
+Show me your search strategy before running it.
+
+
+What you're practicing: Complex search specification. You're asking the agent to combine multiple filters: file type, content, date, and even numeric values. Watch how it approaches an ambitious search request.
+
+Prompt 2: Search Report Generation
+
+Create a report of all tax-related documents I have, organized by year.
+Include the filename, location, file size, and which year it's from.
+Save the report so I can reference it later.
+
+
+What you're practicing: Turning search into documentation. This request combines search (finding tax documents) with state persistence (saving a report). You're applying Principle 5 to search results.
+
+Prompt 3: Semantic Duplicate Detection
+
+I think I have duplicate files with DIFFERENT names — the same document saved
+as "Budget Final.xlsx" and "budget_v2_final.xlsx". Can you find files that
+might be duplicates based on file SIZE and CONTENT similarity, not just name?
+
+
+What you're practicing: Semantic deduplication. Finding duplicates that look different on the surface. This asks the agent to go beyond simple name matching and use file characteristics to identify copies that were renamed, versioned, or saved under different names.
+
+Flashcards Study Aid​

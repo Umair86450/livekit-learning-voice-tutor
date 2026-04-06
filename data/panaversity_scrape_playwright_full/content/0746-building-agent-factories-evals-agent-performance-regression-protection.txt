@@ -1,0 +1,483 @@
+Regression Protection
+
+You've spent three hours improving your Task API agent's routing logic. The agent now correctly routes "What should I work on?" to the priority view instead of the task list. You run a quick test, it works, and you push to production.
+
+Two days later, users complain: the agent's output formatting is broken. Tasks appear as raw JSON instead of friendly messages. While you were improving routing, you accidentally changed how results are presented.
+
+This is the regression trap. Improvements in one area often cause regressions in another. Without systematic checking, you only discover problems when users report them.
+
+Regression protection solves this by running your full eval suite on every change. Before any code ships, you know whether it improved things, broke things, or left quality unchanged. The eval suite becomes your safety net—not perfect, but far better than hope.
+
+The Regression Problem​
+
+Agent development has a hidden cost: improvements often cause regressions elsewhere.
+
+Why this happens:
+
+Change Type	Common Regression
+Improve routing	Break output formatting
+Add new tool	Interfere with existing tools
+Update prompt	Change tone or verbosity
+Fix edge case	Break common case
+Add guardrails	Reduce helpfulness
+
+Traditional code testing catches some of these—if the function returns wrong types or throws exceptions. But agent regressions are often behavioral: the output is valid JSON but no longer helpful. The response is formatted correctly but addresses the wrong question. Tests pass, users complain.
+
+The core insight: You need quality measurement that runs on every change, not just correctness checks. That's what regression protection provides.
+
+Eval-on-Every-Change Workflow​
+
+The workflow is straightforward: run your eval suite before and after every change, then compare scores.
+
+Change code --> Run eval suite --> Compare to baseline
+    |
+    v
+If pass rate drops --> Investigate before shipping
+    |
+    v
+If pass rate stable/improved --> Safe to deploy
+
+
+The workflow in practice:
+
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass
+class EvalRun:
+    """Results from running eval suite."""
+    passed: int
+    total: int
+    pass_rate: float
+    by_criterion: dict[str, float]
+
+
+def run_eval_suite(
+    agent: Any,
+    test_cases: list[dict],
+    graders: list
+) -> EvalRun:
+    """
+    Run full eval suite and return results.
+
+    Args:
+        agent: Your agent instance
+        test_cases: List of test inputs with expected behaviors
+        graders: List of grading functions/LLM judges
+
+    Returns:
+        EvalRun with pass counts and per-criterion breakdown
+    """
+    passed = 0
+    total = 0
+    criterion_scores = {}
+
+    for case in test_cases:
+        # Get agent response
+        response = agent.run(case["input"])
+
+        # Apply each grader
+        for grader in graders:
+            result = grader(response, case)
+            total += 1
+            if result["passed"]:
+                passed += 1
+
+            # Track per-criterion
+            criterion = grader.__name__
+            if criterion not in criterion_scores:
+                criterion_scores[criterion] = {"passed": 0, "total": 0}
+            criterion_scores[criterion]["total"] += 1
+            if result["passed"]:
+                criterion_scores[criterion]["passed"] += 1
+
+    # Calculate rates
+    pass_rate = passed / total if total > 0 else 0
+    by_criterion = {
+        k: v["passed"] / v["total"]
+        for k, v in criterion_scores.items()
+    }
+
+    return EvalRun(
+        passed=passed,
+        total=total,
+        pass_rate=pass_rate,
+        by_criterion=by_criterion
+    )
+
+
+Output:
+
+# Example eval run output
+eval_result = run_eval_suite(my_agent, test_cases, graders)
+print(f"Pass rate: {eval_result.pass_rate:.1%}")
+print(f"By criterion: {eval_result.by_criterion}")
+
+Pass rate: 85.0%
+By criterion: {'routing_correct': 0.9, 'output_format_valid': 0.95, 'helpful_response': 0.7}
+
+Before/After Comparison​
+
+Every change needs a baseline for comparison. The baseline is your eval score before making changes.
+
+def compare_versions(
+    baseline: EvalRun,
+    current: EvalRun
+) -> dict:
+    """
+    Compare current eval results against baseline.
+
+    Returns:
+        Comparison with overall delta and per-criterion changes
+    """
+    overall_delta = current.pass_rate - baseline.pass_rate
+
+    criterion_deltas = {}
+    all_criteria = set(baseline.by_criterion) | set(current.by_criterion)
+
+    for criterion in all_criteria:
+        before = baseline.by_criterion.get(criterion, 0)
+        after = current.by_criterion.get(criterion, 0)
+        criterion_deltas[criterion] = {
+            "before": before,
+            "after": after,
+            "delta": after - before
+        }
+
+    return {
+        "overall": {
+            "before": baseline.pass_rate,
+            "after": current.pass_rate,
+            "delta": overall_delta,
+            "improved": overall_delta > 0,
+            "regressed": overall_delta < 0
+        },
+        "by_criterion": criterion_deltas,
+        "regressions": [
+            k for k, v in criterion_deltas.items()
+            if v["delta"] < 0
+        ],
+        "improvements": [
+            k for k, v in criterion_deltas.items()
+            if v["delta"] > 0
+        ]
+    }
+
+
+Output:
+
+baseline = EvalRun(passed=17, total=20, pass_rate=0.85,
+                   by_criterion={"routing": 0.9, "format": 0.8, "helpful": 0.85})
+
+current = EvalRun(passed=18, total=20, pass_rate=0.90,
+                  by_criterion={"routing": 0.95, "format": 0.75, "helpful": 1.0})
+
+comparison = compare_versions(baseline, current)
+print(f"Overall: {comparison['overall']['before']:.0%} --> {comparison['overall']['after']:.0%}")
+print(f"Regressions: {comparison['regressions']}")
+print(f"Improvements: {comparison['improvements']}")
+
+Overall: 85% --> 90%
+Regressions: ['format']
+Improvements: ['routing', 'helpful']
+
+
+Notice the hidden regression: overall pass rate improved (85% to 90%), but format actually got worse. The improvements in routing and helpful masked the format regression. Without per-criterion tracking, you'd ship this thinking it was a pure improvement.
+
+Setting Pass Rate Thresholds​
+
+Not all score drops are equal. A 2% drop might be noise; a 10% drop is probably real. The threshold depends on your agent's criticality.
+
+Threshold	When to Use	Example Agent
+Any drop = investigate	High-stakes agents where errors have significant consequences	Medical advice, financial decisions, safety-critical
+5% drop = investigate	Normal agents with moderate error tolerance	Customer support, task management, content generation
+10% drop = investigate	Experimental agents during rapid development	Prototypes, internal tools, non-customer-facing
+
+Implementing threshold checks:
+
+@dataclass
+class RegressionConfig:
+    """Configuration for regression detection."""
+    overall_threshold: float  # e.g., 0.05 for 5%
+    criterion_threshold: float  # e.g., 0.10 for 10%
+    block_on_regression: bool  # Whether to prevent deployment
+
+
+def check_regression(
+    comparison: dict,
+    config: RegressionConfig
+) -> dict:
+    """
+    Check if changes pass regression thresholds.
+
+    Returns:
+        Dict with passed/blocked status and reasons
+    """
+    issues = []
+
+    # Check overall regression
+    if comparison["overall"]["delta"] < -config.overall_threshold:
+        issues.append(
+            f"Overall pass rate dropped {abs(comparison['overall']['delta']):.1%} "
+            f"(threshold: {config.overall_threshold:.1%})"
+        )
+
+    # Check per-criterion regressions
+    for criterion, data in comparison["by_criterion"].items():
+        if data["delta"] < -config.criterion_threshold:
+            issues.append(
+                f"'{criterion}' dropped {abs(data['delta']):.1%} "
+                f"(threshold: {config.criterion_threshold:.1%})"
+            )
+
+    passed = len(issues) == 0
+    should_block = not passed and config.block_on_regression
+
+    return {
+        "passed": passed,
+        "should_block": should_block,
+        "issues": issues,
+        "recommendation": "BLOCK" if should_block else "WARN" if issues else "SHIP"
+    }
+
+
+Output:
+
+# High-stakes configuration
+config = RegressionConfig(
+    overall_threshold=0.0,   # Any overall drop
+    criterion_threshold=0.05, # 5% on any criterion
+    block_on_regression=True
+)
+
+result = check_regression(comparison, config)
+print(f"Status: {result['recommendation']}")
+print(f"Issues: {result['issues']}")
+
+Status: BLOCK
+Issues: ["'format' dropped 5.0% (threshold: 5.0%)"]
+
+The Eval-Driven Iteration Loop​
+
+Regression protection isn't just about catching problems—it's about systematic improvement. The loop goes: eval, identify weakest area, fix, re-eval, verify.
+
+prompt v1 --> eval 70% --> error analysis --> fix routing --> eval 85%
+          --> error analysis --> fix output format --> eval 92%
+          --> ship
+
+
+Implementing the loop:
+
+def identify_improvement_target(eval_result: EvalRun) -> str:
+    """Find the criterion with lowest pass rate."""
+    if not eval_result.by_criterion:
+        return "overall"
+
+    return min(
+        eval_result.by_criterion.items(),
+        key=lambda x: x[1]
+    )[0]
+
+
+def iteration_step(
+    agent: Any,
+    test_cases: list[dict],
+    graders: list,
+    baseline: EvalRun
+) -> dict:
+    """
+    Run one iteration of the eval-driven improvement loop.
+
+    Returns:
+        Current status, improvement target, and comparison to baseline
+    """
+    current = run_eval_suite(agent, test_cases, graders)
+    comparison = compare_versions(baseline, current)
+    target = identify_improvement_target(current)
+
+    return {
+        "current_pass_rate": current.pass_rate,
+        "improvement_target": target,
+        "target_score": current.by_criterion.get(target, current.pass_rate),
+        "comparison": comparison,
+        "recommendation": (
+            "SHIP" if current.pass_rate >= 0.90
+            else f"FIX '{target}' ({current.by_criterion.get(target, current.pass_rate):.0%})"
+        )
+    }
+
+
+Output:
+
+# Running iteration loop
+status = iteration_step(agent, test_cases, graders, baseline)
+print(f"Pass rate: {status['current_pass_rate']:.0%}")
+print(f"Recommendation: {status['recommendation']}")
+
+Pass rate: 70%
+Recommendation: FIX 'helpful_response' (60%)
+
+
+The iteration log tracks your progress:
+
+Iteration	Pass Rate	Action Taken	Target Fixed
+1	70%	Initial eval	-
+2	78%	Fixed routing prompt	routing_correct: 65% -> 90%
+3	85%	Fixed output formatting	output_format: 70% -> 95%
+4	92%	Added context to helpful check	helpful: 80% -> 91%
+5	92%	Ready to ship	-
+Exercise: Implement Regression Protection Workflow​
+
+Your Task API agent currently scores 80% on your eval suite. You're about to add a new feature: priority filtering. Implement regression protection to ensure this change doesn't break existing functionality.
+
+Step 1: Establish baseline
+
+# Record current state before any changes
+baseline = run_eval_suite(task_agent, test_cases, graders)
+print(f"Baseline: {baseline.pass_rate:.0%}")
+print(f"By criterion: {baseline.by_criterion}")
+
+
+Step 2: Make your change and re-evaluate
+
+# After adding priority filtering feature
+task_agent.add_feature("priority_filtering")
+current = run_eval_suite(task_agent, test_cases, graders)
+
+
+Step 3: Compare and decide
+
+comparison = compare_versions(baseline, current)
+
+# Using 5% threshold for this normal-criticality agent
+config = RegressionConfig(
+    overall_threshold=0.05,
+    criterion_threshold=0.10,
+    block_on_regression=True
+)
+
+result = check_regression(comparison, config)
+print(f"Decision: {result['recommendation']}")
+if result['issues']:
+    print("Issues to fix:")
+    for issue in result['issues']:
+        print(f"  - {issue}")
+
+
+Step 4: Iterate if needed
+
+If regression detected:
+
+Identify which criterion regressed
+Analyze why the change caused this
+Fix while preserving the improvement
+Re-eval until all criteria pass thresholds
+
+Your task: Choose appropriate thresholds for three scenarios:
+
+Medical symptom checker: Users rely on it for health decisions
+Internal code review assistant: Helps developers but not customer-facing
+Experimental content generator: Rapid prototyping, not deployed
+
+What thresholds would you set for each? Why?
+
+Reflect on Your Skill​
+
+After implementing regression protection, consider adding these patterns to your agent-evals skill:
+
+Pattern: Baseline before change
+
+Before modifying any agent code:
+1. Run full eval suite
+2. Save results as baseline
+3. Record per-criterion scores
+4. Make changes only after baseline captured
+
+
+Pattern: Hidden regression detection
+
+When overall score improves:
+1. Still check per-criterion deltas
+2. Improvements can mask regressions
+3. A +5% overall with -10% on one criterion is still concerning
+4. Use per-criterion thresholds, not just overall
+
+
+Pattern: Threshold selection
+
+Choose threshold based on agent criticality:
+- High-stakes (medical, financial, safety): Any drop = block
+- Normal (support, productivity): 5% drop = investigate
+- Experimental (prototypes, internal): 10% drop = investigate
+Set block_on_regression=True only for production-critical agents
+
+
+Pattern: Iteration loop discipline
+
+When pass rate is below target:
+1. Identify lowest-scoring criterion
+2. Focus effort there (highest leverage)
+3. Fix one thing at a time
+4. Re-eval after each fix
+5. Verify no regressions before next fix
+
+
+Key insight to encode: Regression protection isn't about preventing all changes—it's about knowing what your changes do. A 3% regression might be acceptable for a major feature. A 3% regression for a minor tweak is suspicious. The eval suite gives you information; you make the decision.
+
+Try With AI​
+Prompt 1: Design Regression Protection for Your Agent​
+I have an agent that [describe your agent]. I want to set up regression
+protection before deploying changes.
+
+Help me design:
+1. What criteria should I track? (List 5-7 specific binary criteria)
+2. What thresholds make sense for this agent's criticality?
+3. What's my baseline workflow before making changes?
+4. How should I structure my iteration loop?
+
+Consider: [describe the stakes - who uses this, what happens if it fails]
+
+
+What you're learning: Regression protection is domain-specific. The criteria and thresholds for a medical agent differ from those for a task manager. AI helps you translate your context into a concrete workflow.
+
+Prompt 2: Debug a Masked Regression​
+My overall eval score improved from 78% to 82%, so I shipped. Now users report
+issues with [describe the problem].
+
+Looking at my per-criterion breakdown:
+Before: {routing: 85%, format: 80%, helpful: 70%}
+After: {routing: 95%, format: 65%, helpful: 85%}
+
+Help me understand:
+1. Why did the overall score hide this regression?
+2. What threshold configuration would have caught this?
+3. How should I fix this now that it's in production?
+4. What should I add to my eval suite to prevent this pattern?
+
+
+What you're learning: Masked regressions are common. Understanding how they happen helps you design better detection. AI helps you analyze the math and design preventive measures.
+
+Prompt 3: Build Iteration Loop for Target Pass Rate​
+My agent currently scores 72% on my eval suite. I need to reach 90% before
+launch in 2 weeks.
+
+Per-criterion scores:
+- routing_correct: 85%
+- output_format: 70%
+- helpful_response: 60%
+- tone_appropriate: 75%
+
+Help me:
+1. Prioritize which criteria to fix first (highest leverage)
+2. Estimate effort for each improvement
+3. Design a 2-week iteration plan
+4. Set checkpoints to ensure I'm on track
+
+What's realistic? Where should I focus first?
+
+
+What you're learning: The iteration loop requires prioritization. Not all criteria are equally easy to improve, and some improvements yield bigger gains. AI helps you plan the path from current state to target.
+
+Safety Note​
+
+Regression protection catches changes you make, not changes in the world. If user behavior shifts, external APIs change, or new edge cases emerge, your baseline becomes stale. Periodically update your test cases with fresh examples from production. The goal is a living eval suite, not a static gate.

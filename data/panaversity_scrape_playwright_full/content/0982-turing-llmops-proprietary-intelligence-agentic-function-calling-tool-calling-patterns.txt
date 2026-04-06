@@ -1,0 +1,481 @@
+Tool-Calling Patterns
+
+You understand why agentic tuning matters. Now you'll learn the exact patterns that make it work. This lesson covers the JSON schemas that define tools, the format models must output, and the conversation flow that enables multi-turn tool interactions.
+
+By the end, you'll be able to write complete tool definitions for Task API and construct the training examples that teach models to call them correctly.
+
+The Complete Tool Definition​
+
+Every tool requires a JSON schema that tells the model what it does and what arguments it accepts.
+
+Task API Tool: create_task​
+{
+  "type": "function",
+  "function": {
+    "name": "create_task",
+    "description": "Create a new task with specified title, optional due date, and priority level. Use this when the user wants to add a new item to their task list.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "The title or name of the task. Should be concise but descriptive."
+        },
+        "due_date": {
+          "type": "string",
+          "description": "Due date in ISO 8601 format (YYYY-MM-DD). Optional - omit if no due date specified."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Priority level. Defaults to 'medium' if not specified."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional longer description with details about the task."
+        }
+      },
+      "required": ["title"]
+    }
+  }
+}
+
+
+Key elements:
+
+Field	Purpose	Impact on Training
+name	Unique identifier	Model must output exactly this string
+description	Explains when to use	Helps model select correct tool
+parameters.properties	Argument definitions	Model extracts these from user input
+parameters.required	Mandatory arguments	Model must always include these
+enum	Constrained values	Model must output exact enum value
+Complete Task API Tool Set​
+
+Here are all four tools for Task API:
+
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "description": "Create a new task. Use when user wants to add a new item.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {"type": "string", "description": "Task title"},
+            "due_date": {"type": "string", "description": "YYYY-MM-DD format"},
+            "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+          },
+          "required": ["title"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "update_task",
+        "description": "Update an existing task. Use when user wants to modify task details.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "task_id": {"type": "string", "description": "ID of task to update"},
+            "title": {"type": "string", "description": "New title"},
+            "due_date": {"type": "string", "description": "New due date"},
+            "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+          },
+          "required": ["task_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "complete_task",
+        "description": "Mark a task as completed. Use when user indicates task is done.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "task_id": {"type": "string", "description": "ID of task to complete"}
+          },
+          "required": ["task_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_tasks",
+        "description": "List tasks with optional filters. Use when user wants to see their tasks.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "status": {"type": "string", "enum": ["pending", "completed", "all"]},
+            "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+            "due_before": {"type": "string", "description": "YYYY-MM-DD - filter tasks due before date"}
+          }
+        }
+      }
+    }
+  ]
+}
+
+The Tool Call Response Format​
+
+When a model decides to call a tool, it must output a specific structure:
+
+{
+  "role": "assistant",
+  "content": null,
+  "tool_calls": [
+    {
+      "id": "call_abc123",
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "arguments": "{\"title\": \"Review Q4 budget\", \"priority\": \"high\", \"due_date\": \"2024-01-19\"}"
+      }
+    }
+  ]
+}
+
+
+Critical details:
+
+Field	Requirement	Why It Matters
+content	Must be null	Signals this is a tool call, not text response
+tool_calls	Array	Allows multiple tool calls in one response
+id	Unique string	Links tool call to its result
+type	Always "function"	Distinguishes from other call types
+function.name	Exact tool name	Must match tool definition exactly
+function.arguments	JSON string	Stringified JSON of parameters
+
+Common mistake: arguments is a string containing JSON, not a JSON object:
+
+// WRONG - arguments as object
+"arguments": {"title": "Review budget"}
+
+// CORRECT - arguments as JSON string
+"arguments": "{\"title\": \"Review budget\"}"
+
+The Complete Conversation Flow​
+
+A tool-calling conversation has more message types than standard chat:
+
+Single-Turn Tool Call​
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are TaskMaster, a task management assistant. You have these tools:\n\n[tool definitions...]"
+    },
+    {
+      "role": "user",
+      "content": "Create a high priority task to call the client tomorrow"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {
+            "name": "create_task",
+            "arguments": "{\"title\": \"Call the client\", \"priority\": \"high\", \"due_date\": \"2024-01-16\"}"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+Multi-Turn with Tool Results​
+
+When training for realistic agent behavior, include tool results:
+
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are TaskMaster..."
+    },
+    {
+      "role": "user",
+      "content": "Create a task to review the budget"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {
+            "name": "create_task",
+            "arguments": "{\"title\": \"Review the budget\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_001",
+      "content": "{\"success\": true, \"task_id\": \"task_789\", \"message\": \"Task created\"}"
+    },
+    {
+      "role": "assistant",
+      "content": "Done! I've created 'Review the budget' as a new task. It's been assigned ID task_789. Would you like to set a due date or priority?"
+    }
+  ]
+}
+
+
+The flow:
+
+System: Sets context and provides tool definitions
+User: States intent in natural language
+Assistant: Outputs tool call (no content, just tool_calls)
+Tool: Returns execution result (linked by tool_call_id)
+Assistant: Synthesizes result into natural response
+Tool Choice Control​
+
+You can control whether the model must call tools:
+
+{
+  "tool_choice": "auto"    // Model decides (default)
+}
+
+{
+  "tool_choice": "required"  // Must call at least one tool
+}
+
+{
+  "tool_choice": "none"      // No tool calls allowed
+}
+
+{
+  "tool_choice": {
+    "type": "function",
+    "function": {"name": "create_task"}  // Must call this specific tool
+  }
+}
+
+
+For training data, "auto" is most realistic—the model learns when to call tools versus respond directly.
+
+Parallel Tool Calls​
+
+Sometimes a single user message requires multiple tools:
+
+User: "Create three tasks: call mom, buy groceries, and schedule dentist appointment"
+
+{
+  "role": "assistant",
+  "content": null,
+  "tool_calls": [
+    {
+      "id": "call_001",
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "arguments": "{\"title\": \"Call mom\"}"
+      }
+    },
+    {
+      "id": "call_002",
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "arguments": "{\"title\": \"Buy groceries\"}"
+      }
+    },
+    {
+      "id": "call_003",
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "arguments": "{\"title\": \"Schedule dentist appointment\"}"
+      }
+    }
+  ]
+}
+
+
+Include parallel call examples in training data to teach this capability.
+
+Schema Design Best Practices​
+
+Your tool schemas directly impact model accuracy:
+
+Good Descriptions​
+// WEAK - doesn't help model choose
+"description": "Creates a task"
+
+// STRONG - explains when to use
+"description": "Create a new task with title, optional due date, and priority. Use when user wants to add a new item to their task list. Do NOT use for updating existing tasks."
+
+Clear Parameter Names​
+// AMBIGUOUS
+"properties": {
+  "date": {"type": "string"}
+}
+
+// CLEAR
+"properties": {
+  "due_date": {
+    "type": "string",
+    "description": "Due date in YYYY-MM-DD format. Example: 2024-01-15"
+  }
+}
+
+Constrained Values with Enums​
+// UNCONSTRAINED - model might output "urgent" or "HIGH"
+"priority": {"type": "string"}
+
+// CONSTRAINED - model learns exact values
+"priority": {
+  "type": "string",
+  "enum": ["low", "medium", "high"],
+  "description": "Priority level. Defaults to medium if not specified."
+}
+
+Required vs Optional Fields​
+"parameters": {
+  "type": "object",
+  "properties": {
+    "task_id": {"type": "string"},  // Always needed for update
+    "title": {"type": "string"},     // Optional - only if changing
+    "priority": {"type": "string"}   // Optional - only if changing
+  },
+  "required": ["task_id"]  // Only task_id is mandatory
+}
+
+Building Training Examples​
+
+Now you can construct complete training examples:
+
+import json
+
+def create_training_example(user_message, tool_name, arguments):
+    """Generate a tool-calling training example."""
+
+    system_prompt = """You are TaskMaster, a task management assistant.
+
+Available tools:
+[Tool definitions would be included here]
+
+When the user wants to manage tasks, call the appropriate tool.
+Only respond with natural language when no tool is needed."""
+
+    return {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"call_{hash(user_message) % 10000:04d}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(arguments)
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+# Example usage
+example = create_training_example(
+    user_message="Add a high priority task to call the bank tomorrow",
+    tool_name="create_task",
+    arguments={
+        "title": "Call the bank",
+        "priority": "high",
+        "due_date": "2024-01-16"  # Would be calculated dynamically
+    }
+)
+
+
+Output:
+
+{
+  "messages": [
+    {"role": "system", "content": "You are TaskMaster..."},
+    {"role": "user", "content": "Add a high priority task to call the bank tomorrow"},
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_0234",
+          "type": "function",
+          "function": {
+            "name": "create_task",
+            "arguments": "{\"title\": \"Call the bank\", \"priority\": \"high\", \"due_date\": \"2024-01-16\"}"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+Reflect on Your Skill​
+
+Update your agentic-tuning skill:
+
+Add complete tool schemas: Include the four Task API tools as reference
+Add response format template: The exact structure for tool_calls
+Add multi-turn pattern: System -> User -> Assistant (tools) -> Tool result -> Assistant (natural)
+Try With AI​
+Prompt 1: Validate Your Schemas​
+I've written tool schemas for Task API. Here they are:
+
+[paste your tool definitions]
+
+Review them for:
+1. Are descriptions specific enough for tool selection?
+2. Are types correct (string vs integer vs boolean)?
+3. Are required fields correctly marked?
+4. Are there any missing edge cases?
+
+Then generate 3 test user messages and show me what the correct
+tool_calls output should be for each.
+
+
+What you're learning: Schema validation through testing—discovering gaps in your definitions before training.
+
+Prompt 2: Generate Training Variety​
+I need to create diverse training examples for the create_task tool.
+Generate 10 different user messages that should trigger create_task,
+varying:
+- Formality (casual vs professional)
+- Completeness (just title vs all fields)
+- Complexity (simple vs compound requests)
+- Phrasing (direct command vs polite request)
+
+For each, show the expected tool_calls output.
+
+
+What you're learning: Data diversity—understanding that training needs varied inputs to generalize well.
+
+Prompt 3: Build Multi-Turn Examples​
+Create a complete 3-turn conversation training example:
+
+Turn 1: User creates a task
+Turn 2: User updates the same task (needs reference from Turn 1)
+Turn 3: User completes the task
+
+Show the full message array including tool results.
+Explain how the model learns to reference previous context.
+
+
+What you're learning: Conversational continuity—training models to maintain context across tool interactions.
+
+Safety Note​
+
+When designing tool schemas, consider which operations are destructive. A delete_all_tasks tool should include confirmation parameters or be split into safer operations. Your schema design is your first line of defense against harmful actions.

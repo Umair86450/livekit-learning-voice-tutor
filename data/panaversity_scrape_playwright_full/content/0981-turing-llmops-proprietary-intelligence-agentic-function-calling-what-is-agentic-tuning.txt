@@ -1,0 +1,310 @@
+What is Agentic Tuning?
+
+You've fine-tuned models to follow instructions and maintain consistent personas. But when you connect a model to an agent framework—OpenAI Agents SDK, LangChain, or your custom orchestrator—something breaks. The model describes what it would do instead of actually doing it.
+
+This lesson explains why standard fine-tuning produces models that talk about actions rather than take them, and introduces the specialized training approach that creates reliable agent backends.
+
+The Agent Backend Problem​
+
+Consider this interaction with a standard instruction-tuned model:
+
+User: "Create a high-priority task to review the Q4 budget by Friday."
+
+Standard Model Response:
+
+I'd be happy to help you create that task! I'll set up a high-priority
+task called "Review Q4 budget" with a due date of Friday. Is there
+anything else you'd like me to add, like a description or subtasks?
+
+
+This response is helpful for a chatbot. But it's useless for an agent.
+
+Why it fails:
+
+No tool was called: The model described creating a task but didn't invoke create_task
+No structured output: An agent can't parse "Friday" into a date or extract the priority
+Asking for confirmation: Agents need decisive action, not conversation loops
+
+What an agent backend needs:
+
+{
+  "tool_calls": [
+    {
+      "id": "call_abc123",
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "arguments": "{\"title\": \"Review Q4 budget\", \"due_date\": \"2024-01-19\", \"priority\": \"high\"}"
+      }
+    }
+  ]
+}
+
+
+This is a parseable, executable action. The agent framework can call the actual create_task function with these exact arguments.
+
+What Makes Tuning "Agentic"?​
+
+Agentic tuning trains models to perform three capabilities that standard instruction-tuning doesn't:
+
+Capability	Standard Model	Agentic Model
+Tool Selection	Describes available actions	Outputs function.name for the right tool
+Argument Extraction	Mentions relevant details naturally	Extracts structured {"param": "value"}
+Output Formatting	Free-form natural language	Strict JSON matching tool schema
+Capability 1: Tool Selection​
+
+Given a user intent, the model must choose the correct tool from available options.
+
+User: "What tasks do I have due this week?"
+
+An agentic model recognizes this requires list_tasks, not create_task or update_task.
+
+{
+  "function": {
+    "name": "list_tasks",
+    "arguments": "{\"filter\": \"due_this_week\"}"
+  }
+}
+
+
+Tool selection accuracy above 95% is the first threshold for a usable agent backend.
+
+Capability 2: Argument Extraction​
+
+The model must extract structured parameters from natural language.
+
+User: "Make the budget review task high priority instead of medium."
+
+The model must:
+
+Identify this is an update_task operation
+Extract task identifier (likely needs context from conversation)
+Map "high priority instead of medium" to {"priority": "high"}
+{
+  "function": {
+    "name": "update_task",
+    "arguments": "{\"task_id\": \"task_123\", \"priority\": \"high\"}"
+  }
+}
+
+
+Argument extraction requires understanding implied references, resolving ambiguity, and producing exact types (strings, integers, enums).
+
+Capability 3: Structured Output Formatting​
+
+Every response must be valid JSON matching the tool's schema. One malformed output breaks the entire agent pipeline.
+
+Common failures:
+
+Missing quotes: {name: "value"} instead of {"name": "value"}
+Wrong types: "priority": high (unquoted) vs "priority": "high"
+Extra content: JSON followed by "I've created the task for you!"
+Incomplete JSON: Truncated output missing closing braces
+
+Agentic tuning trains for 99%+ JSON validity—not "usually works" but "reliably parseable."
+
+The Architecture of an Agent Backend​
+
+Understanding how agent frameworks use your model clarifies what agentic tuning must achieve:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        Agent Framework                          │
+│  (OpenAI Agents SDK / LangChain / Custom Orchestrator)          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      YOUR AGENTIC MODEL                          │
+│  Input: System prompt + tools + user message                     │
+│  Output: tool_calls with name + arguments (JSON)                 │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Tool Executor                               │
+│  Parses tool_calls → Invokes actual functions → Returns results  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Model (continued)                           │
+│  Receives tool results → Decides next action or final response   │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Your model sits at the center, transforming user intent into structured tool calls. The framework handles everything else—routing, execution, state management—but it depends entirely on your model producing parseable, correct output.
+
+If your model outputs natural language instead of JSON: The framework throws a parsing error.
+
+If your model selects the wrong tool: The wrong action executes.
+
+If your model extracts incorrect arguments: The action fails or produces wrong results.
+
+Why Standard Fine-Tuning Doesn't Work​
+
+Standard supervised fine-tuning optimizes for natural, helpful responses. This creates three problems for agent backends:
+
+Problem 1: Response Style Training​
+
+Standard SFT data looks like:
+
+{
+  "messages": [
+    {"role": "user", "content": "Create a task for budget review"},
+    {"role": "assistant", "content": "I'll create a task called 'Budget Review' for you. Would you like to add a due date?"}
+  ]
+}
+
+
+The model learns to respond conversationally, not to invoke tools.
+
+Problem 2: No Tool Schema Exposure​
+
+Standard training data doesn't include tool definitions. The model never learns:
+
+What tools are available
+What arguments each tool accepts
+How to format tool calls
+Problem 3: Loss on Wrong Tokens​
+
+Standard training applies loss to the entire response, optimizing for fluent natural language. Agentic training must apply loss to structured output tokens, optimizing for JSON accuracy.
+
+What Agentic Training Data Looks Like​
+
+Compare standard vs agentic training examples:
+
+Standard (won't work for agents):
+
+{
+  "messages": [
+    {"role": "user", "content": "Create a task to review budget"},
+    {"role": "assistant", "content": "Done! I've created 'Review budget' as a new task."}
+  ]
+}
+
+
+Agentic (correct format):
+
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a task assistant with these tools:\n[{\"type\": \"function\", \"function\": {\"name\": \"create_task\", \"parameters\": {...}}}]"
+    },
+    {"role": "user", "content": "Create a task to review budget"},
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {
+            "name": "create_task",
+            "arguments": "{\"title\": \"Review budget\"}"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+
+Key differences:
+
+Aspect	Standard	Agentic
+System prompt	General instructions	Full tool schemas
+Assistant content	Natural language	null (tools speak for it)
+Tool calls	Absent	Structured JSON array
+Training signal	Fluent response	Correct tool + arguments
+The Business Case for Agentic Tuning​
+
+Why invest in agentic fine-tuning instead of just using GPT-4's function calling?
+
+Cost Analysis​
+Scenario	GPT-4 API	Custom Agentic Model
+100K calls/month	$3,000-10,000	$300 (self-hosted)
+1M calls/month	$30,000-100,000	$1,000 (scaled infra)
+
+At scale, the ROI is massive.
+
+Latency Improvement​
+Metric	GPT-4 API	Local Agentic Model
+Network round-trip	200-500ms	0ms
+Model inference	500-1500ms	100-400ms
+Total p95 latency	1-2 seconds	300-500ms
+
+For real-time agents, this difference is critical.
+
+Control and Privacy​
+Data stays local: Sensitive task data never leaves your infrastructure
+Customization: Train on your specific tools, not generic function calling
+Reliability: No API outages, rate limits, or provider changes
+When Agentic Tuning Makes Sense​
+
+Fine-tune for tool-calling when:
+
+You have a defined set of tools (4-20 is typical)
+Usage volume justifies training investment
+Latency or cost requirements exceed API solutions
+Data privacy requires local inference
+
+Keep using API function calling when:
+
+Tool definitions change frequently
+Volume is low (<10K calls/month)
+You need GPT-4 level reasoning, not just tool execution
+You're still iterating on agent design
+Reflect on Your Skill​
+
+Update your agentic-tuning skill with these insights:
+
+Add to "When to Use": Include the cost/volume threshold for when agentic tuning makes sense
+
+Add to "Common Mistakes": "Training on natural language responses instead of tool_calls format"
+
+Add to "Core Patterns": The three capabilities (tool selection, argument extraction, structured formatting) with their accuracy targets
+
+Try With AI​
+
+Use your AI companion to deepen understanding.
+
+Prompt 1: Diagnose a Failure Case​
+Here's an interaction with my task assistant:
+
+User: "Mark the budget review task as done"
+Model: "Great choice! I'll mark 'Budget Review' as complete. This will
+update the status to done and move it to your completed list."
+
+This response would break an agent framework. Help me understand:
+1. Why can't an agent parse this?
+2. What should the model have output instead?
+3. What training data would teach correct behavior?
+
+
+What you're learning: Diagnosing format failures—understanding exactly why conversational responses break agent pipelines.
+
+Prompt 2: Compare Tool-Calling Formats​
+I'm building an agentic model compatible with OpenAI Agents SDK.
+Show me the exact tool_calls format my model must output. Then
+compare it to how Anthropic's Claude formats tool_use responses.
+What would I need to change if I wanted to support both?
+
+
+What you're learning: Format specifics—understanding that different frameworks have different expectations, and how to design for compatibility.
+
+Prompt 3: Estimate Your ROI​
+Help me calculate whether agentic fine-tuning makes sense for my use case:
+- Current GPT-4 usage: [X calls per month]
+- Average tokens per call: [input/output]
+- Latency requirements: [current vs target]
+
+Walk me through the cost comparison and help me decide if I should
+proceed with fine-tuning or optimize my prompts for GPT-4 first.
+
+
+What you're learning: Business decision-making—treating model training as an investment with quantifiable returns.
+
+Safety Note​
+
+When testing tool-calling models, always validate outputs before executing real actions. A model returning {"function": "delete_all_tasks"} should trigger safety checks, not automatic execution. Agent frameworks should include confirmation flows for destructive operations.

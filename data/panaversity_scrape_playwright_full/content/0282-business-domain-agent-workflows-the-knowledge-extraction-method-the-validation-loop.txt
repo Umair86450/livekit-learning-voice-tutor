@@ -1,0 +1,150 @@
+The Validation Loop: From Draft to Production
+
+Lesson 7 taught you how to build the scenario set and score the outputs. This lesson teaches what to do with the results: how to read the failure patterns, how to rewrite the SKILL.md without breaking what already works, how to enter shadow mode when the threshold is met, and how to manage the graduated transition from human-reviewed operation to autonomous deployment.
+
+The Validation Loop is the process that takes you from a first draft (which encodes the extraction material faithfully but has not been tested) to a production-ready SKILL.md that produces reliable outputs across the full range of queries it will encounter. The loop is iterative: test, interpret, rewrite, re-test, and repeat until the threshold is reached. Most first-draft SKILL.md files require two to three iterations before achieving the ninety-five percent pass rate.
+
+The skill this lesson develops is diagnostic. You are not just fixing individual failing scenarios. You are reading the pattern of failures to identify the systematic gap in the SKILL.md, fixing that gap, and confirming the fix does not introduce new problems. That diagnostic skill (tracing a failure to its root cause in the SKILL.md) is what makes the Validation Loop efficient rather than a cycle of trial and error.
+
+Interpreting Failure Patterns​
+
+The value of the scenario testing is not the overall score. It is the failure pattern. Most first-draft SKILL.md files fail in clusters: the same category of error appears across multiple scenarios, indicating a gap or ambiguity in a specific section of the SKILL.md.
+
+Failures concentrated in standard cases indicate a structural problem with the core Persona or Questions sections. The agent does not know what it is for clearly enough to perform its primary function reliably. If the credit analyst agent produces generic summaries rather than data-grounded analysis for multiple standard cases, the Persona likely lacks specificity about analytical standards, or the Questions section does not define the core function precisely enough.
+
+Failures concentrated in edge cases indicate a gap in the Out of Scope definition or an ambiguity in the boundary between in-scope and out-of-scope queries. If the agent attempts to answer lending decisions or market outlook queries rather than redirecting them, the Out of Scope section of the Questions is not clear enough: or the Persona does not establish the professional boundary firmly enough to govern behaviour at the edge.
+
+Failures concentrated in adversarial cases indicate a gap in the Principles section. A category of input exists that the agent encounters but has no explicit instruction for handling. If the agent accepts unverified user-provided figures without checking them against the attached data, the Principles section lacks a source verification instruction. If the agent relaxes its professional boundary when the request is framed informally, the Persona's identity constraint is not robust enough to hold under conversational pressure.
+
+Failures concentrated in high-stakes cases indicate a problem with the escalation logic. Either the escalation conditions are not specific enough to trigger reliably, or the routing mechanism has not been configured correctly. If the agent produces board presentation materials without flagging them for review, the escalation condition for board-facing outputs is missing or too vague to match the scenario.
+
+Failure Cluster	SKILL.md Section	Root Cause	Fix Approach
+Standard cases	Persona / Questions	Agent unclear on core function	Sharpen professional identity and capability definition
+Edge cases	Questions (Out of Scope)	Boundaries not precise enough	Add specific boundary conditions and redirect instructions
+Adversarial cases	Principles	Missing instructions for input category	Add specific Principles for the uncovered situation
+High-stakes cases	Principles (escalation)	Escalation conditions too vague	Make triggers specific and testable
+Targeted Rewriting​
+
+Treat each failure cluster as a rewriting task in the relevant SKILL.md section. The approach is targeted, not global: rewrite the two weakest instructions in the affected section, re-run the scenario set against those scenarios, and confirm that the rewrite resolves the failure without introducing new failures elsewhere.
+
+The targeted approach matters because of regression risk. The most common cause of regression after a targeted rewrite is over-specification: adding an instruction that handles the failed scenario perfectly but conflicts with an instruction elsewhere in the SKILL.md. A new Principle that says "always verify user-provided figures against attached data" resolves the adversarial scenario where the user provides an incorrect DSCR. But if the SKILL.md also has a Principle that says "when the user provides contextual information not in the attached data, incorporate it into the analysis": a legitimate instruction for situations where the user has information the attached data does not contain: the two Principles conflict.
+
+The prevention protocol is straightforward: read the full section after every targeted rewrite before re-running the scenario set. Check whether the new instruction conflicts with or contradicts any existing instruction. If it does, resolve the conflict explicitly: typically by adding a condition that distinguishes the two situations. "When the user provides a figure that can be verified against attached data, verify it and flag any discrepancy. When the user provides contextual information that is not in the attached data, incorporate it with a note that it has not been independently verified."
+
+The rewrite-and-retest cycle continues until the scenario set reaches the ninety-five percent threshold. Most first-draft SKILL.md files reach this threshold in two to three iterations. If the threshold is not reached after five iterations, the extraction material may be insufficient: return to the interview or document extraction to fill the gap before continuing the Validation Loop.
+
+Shadow Mode​
+
+When the scenario testing reaches ninety-five percent pass rate: and only then: the agent is ready for shadow mode deployment. Shadow mode runs the agent in production context with human review of every output before it is acted upon.
+
+Shadow mode serves a different purpose from scenario testing. Where scenario testing validates the SKILL.md against constructed inputs, shadow mode validates the agent against real production inputs that the scenario set could not fully anticipate. The distinction matters because production context is more varied, more ambiguous, and more combinatorially complex than any constructed scenario set, no matter how well designed.
+
+Shadow mode continues for a minimum of thirty days. During that period, every output is reviewed and scored by the domain expert using the same three-component rubric used in scenario testing: accuracy, calibration, and boundary compliance. The additional data from real production inputs typically surfaces two to three SKILL.md gaps that the scenario set did not reach: situations that arise naturally in production context but that even a well-designed adversarial scenario set will not reliably generate.
+
+The thirty-day minimum is not negotiable. It exists because production patterns are not uniform across shorter periods. Weekly cycles, monthly reporting cycles, and quarterly events produce different types of queries. A shadow mode period shorter than thirty days may miss an entire category of production input.
+
+When the shadow mode period is complete and the production accuracy rate is at or above ninety-five percent, the transition to autonomous operation can be considered. The decision requires three sign-offs.
+
+Sign-Off	Who	What They Confirm
+Governance	Cowork administrator	Governance conditions are met: permissions, audit trail, HITL gates configured
+Domain	Domain expert	The failure modes in the remaining five percent are acceptable given the review mechanisms for escalated outputs
+Operational	Deploying team	The agent's integration with production systems is stable and the escalation routing works correctly
+Graduated Autonomy​
+
+The transition to autonomous operation is not a switch that flips once. It is a gradient that moves gradually as the agent's track record accumulates.
+
+Most organisations begin with partial autonomy: autonomous operation for standard cases, human review retained for high-stakes cases. The credit analyst agent might operate autonomously for routine financial summaries and ratio calculations but continue to route board presentation materials, regulatory filing inputs, and credit decisions above a defined threshold for human review.
+
+The extension from partial to broader autonomy is evidence-based. As the agent's performance record during partial autonomy continues to support extension: the accuracy rate holds, the escalation triggers work correctly, the production gaps identified during shadow mode have been addressed: the scope of autonomous operation is expanded. Standard cases first, then edge cases as the boundary handling proves reliable, then selected adversarial-case types as the Principles prove robust.
+
+High-stakes cases are often the last to transition to autonomous operation, and in many domains: financial services, healthcare, legal: they remain under human review indefinitely. This is not a limitation of the technology. It is the correct governance response to situations where the consequences of failure exceed what any error rate, however low, can justify.
+
+The graduated model reflects a fundamental principle: trust is earned through demonstrated performance, not assumed from a successful validation exercise. A ninety-five percent pass rate on a scenario set and a successful thirty-day shadow mode period produce evidence that justifies partial autonomy. Sustained performance in partial autonomy produces evidence that justifies extending it. At no point does the agent earn blanket trust: it earns specific trust for specific types of queries, and that trust is always conditioned on continued performance.
+
+The Complete Methodology in Sequence​
+
+This lesson and the seven that preceded it form a complete methodology. The sequence from problem identification to production deployment is:
+
+Step	Lesson	What It Produces
+Identify the knowledge problem	L01	Understanding of why extraction is necessary
+Extract from expert heads	L02, L03	Interview notes, north star summary
+Extract from documents	L04	Candidate instructions, contradiction map, gap list
+Choose and combine methods	L05	Extraction plan with reconciliation decisions
+Write the SKILL.md	L06	First-draft SKILL.md (Persona, Questions, Principles)
+Build validation scenarios	L07	Twenty-scenario set across four categories
+Validate and deploy	L08	Production-ready SKILL.md, shadow mode, graduated autonomy
+
+The methodology is designed to be followed in sequence for a first SKILL.md and revisited selectively for revisions. When a production agent encounters a new failure mode, the fix path traces back through the methodology: is the failure a missing Principle (return to L06), an extraction gap (return to L02-L04), or a validation coverage issue (return to L07)? The methodology is not a one-time process: it is the maintenance framework for the life of the deployed agent.
+
+Try With AI​
+
+Use these prompts in Anthropic Cowork or your preferred AI assistant to practise the validation loop skills.
+
+Prompt 1: Failure Pattern Diagnosis​
+Here are the results from a 20-scenario validation run for a
+[DOMAIN] SKILL.md. Three scenarios failed:
+
+- S03 (standard): The agent produced a generic output rather than
+  grounding the analysis in the attached data
+- E02 (edge): The agent answered a forward-looking market opinion
+  question instead of redirecting
+- E04 (edge): The agent compared figures across currencies without
+  noting the comparability limitations
+
+Diagnose the failure pattern:
+1. Where do the failures cluster?
+2. Which SKILL.md section is most likely the root cause?
+3. What specific gap or ambiguity in that section would produce
+   these failures?
+4. Draft two targeted rewrites for the weakest instructions in
+   the affected section
+5. Identify one existing instruction that the rewrites might
+   conflict with, and resolve the potential conflict
+
+
+What you're learning: Failure pattern diagnosis is the core skill of the Validation Loop. Most failures are not random: they cluster in ways that point to specific SKILL.md sections. Practising the trace from failure to root cause to targeted rewrite builds the diagnostic efficiency that separates a productive validation cycle from trial-and-error editing.
+
+Prompt 2: Shadow Mode Design​
+I need to design a shadow mode protocol for a [DOMAIN] agent that
+has achieved 95% on scenario testing. Help me plan the 30-day
+shadow mode period:
+
+1. What types of production queries should I expect during the
+   30 days? (Weekly, monthly, quarterly patterns)
+2. How should I structure the human review process?
+   (Who reviews, what rubric, how are results recorded)
+3. What are the 2-3 most likely SKILL.md gaps that shadow mode
+   will surface but scenario testing missed?
+4. What are the criteria for transitioning to partial autonomy
+   after the shadow period?
+5. Which query types should remain under human review even after
+   partial autonomy is granted?
+
+
+What you're learning: Shadow mode is not passive observation: it is a structured validation protocol with specific outputs. Designing the protocol before entering shadow mode ensures that the thirty-day period produces the evidence needed for the autonomy transition decision. The query-type analysis also builds your understanding of what production context adds beyond scenario testing.
+
+Prompt 3: Graduated Autonomy Planning​
+A credit analyst agent has completed shadow mode successfully.
+The 30-day production accuracy rate is 96%. The domain expert and
+administrator are ready to discuss transition to partial autonomy.
+
+Help me design the graduated autonomy plan:
+
+1. Which query types should be autonomous first? (Standard cases
+   that proved reliable in shadow mode)
+2. What monitoring should remain in place during partial autonomy?
+3. What criteria trigger expansion from partial to broader autonomy?
+4. Which query types should remain under human review indefinitely
+   in this domain, and why?
+5. What is the rollback protocol if accuracy drops below 95%
+   during autonomous operation?
+
+Present the plan as a one-page governance document that could be
+shared with the compliance and risk functions.
+
+
+What you're learning: The transition from shadow to autonomous operation is a governance decision, not a technical one. Designing the graduated autonomy plan requires thinking about risk tolerance, monitoring requirements, and rollback protocols: the same considerations that compliance and risk functions will evaluate. Framing the plan as a governance document builds the communication skill needed to gain organisational approval for autonomous agent deployment.
+
+Flashcards Study Aid​
+
+Continue to Lesson 9: Hands-On Exercise: First Extraction and SKILL.md Draft →

@@ -1,0 +1,516 @@
+Evaluating RAG Quality
+
+Your semantic search endpoint works. Users can find tasks related to "Docker deployment" even when those exact words do not appear in task descriptions. But how do you know the answers are actually correct?
+
+A user asks: "How do I mark a task as complete?" Your RAG system retrieves three chunks and generates a response. The response sounds confident. The format looks professional. But is the information accurate? Does it actually come from the retrieved documents, or did the LLM hallucinate details that seem plausible but are wrong?
+
+This is the evaluation problem every RAG system faces. Without systematic measurement, you are flying blind. You might ship a system that confidently delivers incorrect information, damaging user trust and creating support burden.
+
+RAG evaluation is not optional polish. It is the discipline that separates production systems from demos.
+
+The Four Evaluation Dimensions​
+
+RAG systems fail in four distinct ways. Each requires a different measurement approach.
+
++---------------------------------------------------------------------+
+|                      RAG Evaluation Framework                        |
++---------------------------------------------------------------------+
+|                                                                      |
+|  1. RETRIEVAL QUALITY                2. GENERATION QUALITY           |
+|  +-- Context Precision               +-- Faithfulness                |
+|  +-- Context Recall                  +-- Answer Relevance            |
+|  +-- Retrieval Relevance             +-- Answer Correctness          |
+|                                                                      |
+|  3. END-TO-END                       4. SYSTEM PERFORMANCE           |
+|  +-- Groundedness                    +-- Latency                     |
+|  +-- Answer Similarity               +-- Token Usage                 |
+|  +-- Semantic Similarity             +-- Cost per Query              |
+|                                                                      |
++---------------------------------------------------------------------+
+
+Dimension 1: Correctness​
+
+Does the response match the expected answer? This requires reference answers to compare against.
+
+When a user asks "How do I create a new task?" and your ground truth says "Use POST /tasks with title and description," the system must generate something semantically equivalent. Not identical words necessarily, but the same actionable information.
+
+Dimension 2: Relevance​
+
+Does the response actually answer the question asked? A response might be factually accurate but completely irrelevant.
+
+User asks about creating tasks. System responds with accurate information about deleting tasks. Factually correct, but useless. Relevance evaluation catches this.
+
+Dimension 3: Groundedness​
+
+Is the response supported by the retrieved context? This catches hallucination, which is the RAG system's most dangerous failure mode.
+
+The LLM might generate confident-sounding details that appear nowhere in the retrieved documents. "The API also supports batch operations for creating multiple tasks simultaneously" sounds helpful, but if no retrieved document mentions batch operations, this is hallucination.
+
+Dimension 4: Retrieval Quality​
+
+Did the retriever find the right documents? Even a perfect generator cannot produce correct answers from irrelevant context.
+
+Context precision measures whether retrieved documents are relevant to the query. Context recall measures whether the retrieved documents contain the information needed to answer correctly.
+
+LLM-as-Judge Pattern​
+
+Manual evaluation does not scale. You cannot review every response from a production system. The solution is using LLMs to evaluate LLM outputs.
+
+This sounds circular, but it works. An evaluator LLM examines outputs against specific criteria and returns structured judgments. The key is designing prompts that enforce precise evaluation criteria.
+
+Correctness Evaluator​
+from typing import TypedDict
+from langchain_openai import ChatOpenAI
+
+class CorrectnessGrade(TypedDict):
+    explanation: str
+    is_correct: bool
+
+evaluator_llm = ChatOpenAI(
+    model="gpt-4o",
+    temperature=0
+).with_structured_output(
+    CorrectnessGrade,
+    method="json_schema",
+    strict=True
+)
+
+CORRECTNESS_PROMPT = """
+Compare the AI response to the reference answer.
+
+Reference: {reference}
+AI Response: {response}
+
+Is the AI response factually correct and complete?
+Provide explanation and boolean is_correct.
+"""
+
+def evaluate_correctness(
+    inputs: dict,
+    outputs: dict,
+    reference_outputs: dict
+) -> bool:
+    grade = evaluator_llm.invoke([
+        {"role": "system", "content": "You are a precise grading assistant."},
+        {"role": "user", "content": CORRECTNESS_PROMPT.format(
+            reference=reference_outputs.get("answer", ""),
+            response=outputs.get("answer", "")
+        )}
+    ])
+    return grade["is_correct"]
+
+
+Output:
+
+>>> evaluate_correctness(
+...     inputs={"question": "How do I create a task?"},
+...     outputs={"answer": "Send POST to /tasks with title field"},
+...     reference_outputs={"answer": "Use POST /tasks with title and description"}
+... )
+True
+
+
+The evaluator recognizes semantic equivalence even when wording differs. Both responses correctly identify POST /tasks as the endpoint.
+
+Groundedness Evaluator​
+
+This catches hallucination by verifying every claim against retrieved context.
+
+class GroundednessGrade(TypedDict):
+    explanation: str
+    is_grounded: bool
+
+GROUNDEDNESS_PROMPT = """
+Verify that the response is fully supported by the context.
+
+Context: {context}
+Response: {response}
+
+Is every claim in the response supported by the context?
+Mark as NOT grounded if the response includes information not in the context.
+"""
+
+def evaluate_groundedness(inputs: dict, outputs: dict) -> bool:
+    grade = evaluator_llm.invoke([
+        {"role": "system", "content": "You detect hallucinations."},
+        {"role": "user", "content": GROUNDEDNESS_PROMPT.format(
+            context=outputs.get("context", ""),
+            response=outputs.get("answer", "")
+        )}
+    ])
+    return grade["is_grounded"]
+
+
+Output:
+
+>>> evaluate_groundedness(
+...     inputs={"question": "How do I create a task?"},
+...     outputs={
+...         "context": "POST /tasks endpoint accepts title and description fields.",
+...         "answer": "Use POST /tasks with title. You can also use batch mode for multiple tasks."
+...     }
+... )
+False
+# Explanation: "batch mode" not mentioned in context - hallucination detected
+
+Relevance Evaluator​
+class RelevanceGrade(TypedDict):
+    explanation: str
+    is_relevant: bool
+
+RELEVANCE_PROMPT = """
+Does the response directly address the question?
+
+Question: {question}
+Response: {response}
+
+A relevant response:
+- Answers the specific question asked
+- Is helpful and actionable
+- Does not include unrelated information
+"""
+
+def evaluate_relevance(inputs: dict, outputs: dict) -> bool:
+    grade = evaluator_llm.invoke([
+        {"role": "system", "content": "You assess answer relevance."},
+        {"role": "user", "content": RELEVANCE_PROMPT.format(
+            question=inputs.get("question", ""),
+            response=outputs.get("answer", "")
+        )}
+    ])
+    return grade["is_relevant"]
+
+
+Output:
+
+>>> evaluate_relevance(
+...     inputs={"question": "How do I create a task?"},
+...     outputs={"answer": "DELETE /tasks/{id} removes a task permanently."}
+... )
+False
+# Explanation: Response about deletion does not answer creation question
+
+Retrieval Quality Evaluator​
+class RetrievalRelevanceGrade(TypedDict):
+    explanation: str
+    is_relevant: bool
+
+RETRIEVAL_PROMPT = """
+Are the retrieved documents relevant to answering this question?
+
+Question: {question}
+Retrieved Documents: {context}
+
+Relevant retrieval means the documents contain information needed to answer the question.
+"""
+
+def evaluate_retrieval_relevance(inputs: dict, outputs: dict) -> bool:
+    grade = evaluator_llm.invoke([
+        {"role": "system", "content": "You assess retrieval quality."},
+        {"role": "user", "content": RETRIEVAL_PROMPT.format(
+            question=inputs.get("question", ""),
+            context=outputs.get("context", "")
+        )}
+    ])
+    return grade["is_relevant"]
+
+
+Output:
+
+>>> evaluate_retrieval_relevance(
+...     inputs={"question": "How do I create a task?"},
+...     outputs={"context": "POST /tasks creates a new task. Required: title (string)."}
+... )
+True
+
+LangSmith Setup and Tracing​
+
+LangSmith provides observability for LLM applications. Every call through your RAG pipeline gets traced, allowing you to debug failures and run systematic evaluations.
+
+Environment Configuration​
+export LANGCHAIN_TRACING_V2=true
+export LANGCHAIN_ENDPOINT="https://api.smith.langchain.com"
+export LANGCHAIN_API_KEY="your-api-key"
+export LANGCHAIN_PROJECT="task-api-rag-eval"
+
+
+Security Note: Never commit API keys to version control. Use environment variables or secret management tools.
+
+Traceable RAG Pipeline​
+
+The @traceable decorator automatically captures inputs, outputs, and timing for each function call.
+
+from langsmith import traceable
+
+@traceable(name="rag_pipeline")
+def rag_pipeline(question: str) -> dict:
+    """RAG pipeline with automatic tracing."""
+    # Retrieve
+    docs = retriever.invoke(question)
+
+    # Generate
+    context = "\n\n".join(doc.page_content for doc in docs)
+    response = llm.invoke(
+        qa_prompt.format(context=context, question=question)
+    )
+
+    return {
+        "question": question,
+        "context": context,
+        "answer": response.content,
+        "sources": [doc.metadata.get("source") for doc in docs],
+    }
+
+
+Output:
+
+>>> result = rag_pipeline("How do I mark a task complete?")
+>>> print(result)
+{
+    'question': 'How do I mark a task complete?',
+    'context': 'PATCH /tasks/{id} updates task fields. Set status to completed...',
+    'answer': 'Use PATCH /tasks/{id} with status="completed" in the request body.',
+    'sources': ['api-reference.md', 'task-endpoints.md']
+}
+# Trace visible in LangSmith dashboard with timing, token counts, and full context
+
+Creating Evaluation Datasets​
+
+LangSmith datasets enable systematic testing across question sets.
+
+from langsmith import Client
+
+client = Client()
+
+# Create dataset
+dataset = client.create_dataset(
+    dataset_name="task-api-rag-eval",
+    description="Evaluation dataset for Task API RAG system"
+)
+
+# Add examples with expected outputs
+examples = [
+    {
+        "inputs": {"question": "How do I create a new task?"},
+        "outputs": {"answer": "Use POST /tasks with title and description."}
+    },
+    {
+        "inputs": {"question": "How do I mark a task complete?"},
+        "outputs": {"answer": "Use PATCH /tasks/{id} with status='completed'."}
+    },
+    {
+        "inputs": {"question": "What happens when I delete a task?"},
+        "outputs": {"answer": "DELETE /tasks/{id} removes the task permanently."}
+    },
+]
+
+for example in examples:
+    client.create_example(
+        inputs=example["inputs"],
+        outputs=example["outputs"],
+        dataset_id=dataset.id
+    )
+
+
+Output:
+
+>>> print(f"Created dataset with {len(examples)} examples")
+Created dataset with 3 examples
+
+Running Evaluations​
+experiment_results = client.evaluate(
+    rag_pipeline,
+    data="task-api-rag-eval",
+    evaluators=[
+        evaluate_correctness,
+        evaluate_groundedness,
+        evaluate_relevance,
+        evaluate_retrieval_relevance,
+    ],
+    experiment_prefix="rag-v1",
+    metadata={"model": "gpt-4o-mini", "retriever": "qdrant-hybrid"}
+)
+
+
+Output:
+
+Evaluating over 3 examples...
+
+Example 1/3: correctness=True, groundedness=True, relevance=True, retrieval=True
+Example 2/3: correctness=True, groundedness=True, relevance=True, retrieval=True
+Example 3/3: correctness=True, groundedness=False, relevance=True, retrieval=True
+
+Results:
+  correctness:  100% (3/3)
+  groundedness:  67% (2/3)
+  relevance:    100% (3/3)
+  retrieval:    100% (3/3)
+
+
+The evaluation reveals one groundedness failure. Investigating example 3 might show the response included extra information not present in retrieved context.
+
+RAGAS Metrics​
+
+RAGAS (Retrieval Augmented Generation Assessment) provides battle-tested metrics for RAG evaluation. It handles the complexity of comparing semantic similarity and measuring information coverage.
+
+Installation​
+pip install ragas
+
+Core RAGAS Metrics​
+Metric	What It Measures	Needs Reference?	Range
+Faithfulness	Is answer grounded in context?	No	0-1
+Answer Relevancy	Does answer address question?	No	0-1
+Context Precision	Are retrieved docs relevant?	No	0-1
+Context Recall	Do retrieved docs cover answer?	Yes	0-1
+Running RAGAS Evaluation​
+from ragas import evaluate
+from ragas.metrics import (
+    Faithfulness,
+    ResponseRelevancy,
+    ContextPrecision,
+    ContextRecall,
+)
+from datasets import Dataset
+
+# Prepare data in RAGAS format
+data = {
+    "question": ["How do I create a task?"],
+    "answer": ["Use POST /tasks endpoint with title field"],
+    "contexts": [["POST /tasks creates new task. Required fields: title (string)."]],
+    "ground_truth": ["Send POST request to /tasks with title and description"]
+}
+
+dataset = Dataset.from_dict(data)
+
+# Evaluate with metric instances
+results = evaluate(
+    dataset,
+    metrics=[
+        Faithfulness(),       # Is answer grounded in context?
+        ResponseRelevancy(),  # Does answer address question?
+        ContextPrecision(),   # Are retrieved docs relevant?
+        ContextRecall(),      # Do retrieved docs cover answer?
+    ]
+)
+
+print(results)
+
+
+Output:
+
+{'faithfulness': 0.95, 'response_relevancy': 0.88, 'context_precision': 0.92, 'context_recall': 0.85}
+
+
+Note: RAGAS uses class-based metrics (e.g., Faithfulness()) rather than lowercase function names. The output keys use snake_case names like response_relevancy.
+
+Interpreting RAGAS Scores​
+Score Range	Meaning	Action
+0.85+	Excellent	System working well
+0.70-0.84	Good	Minor improvements possible
+0.50-0.69	Needs Work	Investigate specific failures
+Below 0.50	Critical	Major system issues
+Debugging Poor Metrics​
+
+Each metric points to a different system component when low.
+
+Low Metric	Likely Cause	Fix
+Context Precision	Poor retrieval	Improve embeddings, add metadata filters
+Context Recall	Incomplete chunking	Reduce chunk size, add overlap
+Faithfulness	Hallucination	Stricter prompt, lower temperature
+Answer Relevancy	Off-topic response	Better prompt engineering
+Creating Evaluation Datasets​
+
+The quality of your evaluation depends on your test dataset. A good dataset covers different question types and includes edge cases.
+
+Dataset Design Principles​
+Minimum 20-30 examples for reliable metrics
+Diverse question types: factual, procedural, conceptual
+Include edge cases: ambiguous queries, multi-hop reasoning
+Ground truth required for correctness and recall metrics
+Example Dataset Structure​
+evaluation_examples = [
+    # Factual questions (direct lookup)
+    {
+        "question": "What HTTP method creates a new task?",
+        "answer": "POST",
+        "type": "factual"
+    },
+    # Procedural questions (how-to)
+    {
+        "question": "How do I update a task's priority?",
+        "answer": "Use PATCH /tasks/{id} with priority field in request body",
+        "type": "procedural"
+    },
+    # Conceptual questions (understanding)
+    {
+        "question": "Why might a task search return no results?",
+        "answer": "Search may fail if query terms don't match indexed content semantically",
+        "type": "conceptual"
+    },
+    # Edge cases
+    {
+        "question": "What happens if I create a task without a title?",
+        "answer": "API returns 422 Unprocessable Entity with validation error",
+        "type": "edge_case"
+    },
+]
+
+Reflect on Your Skill​
+
+You built a rag-deployment skill in Lesson 0. Now test it with evaluation concepts.
+
+Test Your Skill​
+
+Ask your skill:
+
+I have a RAG system with these metrics:
+- Faithfulness: 0.45
+- Answer Relevancy: 0.90
+- Context Precision: 0.50
+- Context Recall: 0.80
+
+What's wrong with my system and how do I fix it?
+
+Identify Gaps​
+Does your skill know about the four evaluation dimensions?
+Can it recommend specific fixes for low metrics?
+Does it suggest LangSmith or RAGAS integration?
+Improve Your Skill​
+
+If gaps exist, update your skill:
+
+Update my rag-deployment skill to include:
+1. RAG evaluation framework with four dimensions
+2. LLM-as-Judge evaluator patterns
+3. RAGAS metric interpretation guide
+4. Debugging strategies for each low-metric scenario
+
+Try With AI​
+Prompt 1: Design Your Evaluation Dataset​
+I'm building a RAG system for my Task API that answers questions about
+creating, updating, and searching tasks. Help me design an evaluation
+dataset with 10 questions. Ask me: What are the most common user questions?
+What edge cases should I test? What mistakes has the system made before?
+
+
+What you're learning: Evaluation dataset design requires understanding real usage patterns. Your AI partner helps you think systematically about coverage.
+
+Prompt 2: Debug a Failing Metric​
+My RAG system has faithfulness score of 0.55 but response_relevancy of 0.92.
+Walk me through diagnosis: What does this pattern tell us? What should I
+check first? Ask me about my prompt template, temperature settings, and
+what kind of hallucinations I'm seeing.
+
+
+What you're learning: Metric patterns reveal specific failure modes. Your AI partner guides diagnostic investigation through structured questioning.
+
+Prompt 3: Create Evaluators for Your Domain​
+I need to create a custom evaluator for [describe your domain: legal documents,
+medical FAQs, product documentation]. The standard evaluators don't capture
+what matters in my field. Ask me: What does "correct" mean in my domain?
+What are the dangerous failure modes? What compliance requirements apply?
+
+
+What you're learning: Domain-specific evaluation requires understanding context that generic metrics miss. Your AI partner helps identify what matters for your specific use case.
+
+Safety Note: When using LLM-as-Judge patterns in production, remember that evaluator LLMs can also make mistakes. For high-stakes applications, combine automated evaluation with periodic human review of edge cases.

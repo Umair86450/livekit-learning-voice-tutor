@@ -1,0 +1,478 @@
+OpenCost/Kubecost Visibility
+
+Your Kubernetes cluster runs three namespaces: production (customer-facing APIs), staging (testing), and data-science (ML training jobs). At month-end, your cloud bill shows $15,000. Your CFO asks: "Which team is responsible for what portion of that cost?"
+
+Without cost visibility, you're guessing. Maybe production is expensive because it runs 24/7. Maybe data-science is expensive because GPU nodes cost $3/hour. Maybe staging is wasting money running unused replicas. You could estimate based on node count, but that ignores the reality: pods share nodes, some pods are memory-heavy while others are CPU-heavy, and resource requests rarely match actual usage.
+
+OpenCost solves this. It watches your cluster, tracks resource consumption per pod, and calculates cost allocation with precision. When your CFO asks "where's the money going?", you query the API: "Show me cost breakdown by namespace for the last 30 days." Seconds later: production ($9,200), data-science ($4,800), staging ($1,000). Now you can have a real conversation about whether that data-science spend is generating value.
+
+This lesson teaches you to install OpenCost, understand its architecture, and query the allocation API to answer cost visibility questions.
+
+OpenCost vs Kubecost: CNCF Open Source vs Commercial​
+
+Before diving into implementation, understand the landscape. Two tools dominate Kubernetes cost visibility, and they share the same core engine.
+
+OpenCost: The CNCF incubating project (accepted October 2024 as incubating). Fully open-source under Apache 2.0 license. Developed by the same team that created Kubecost's allocation engine. OpenCost provides the core cost allocation capabilities that most teams need.
+
+Kubecost: The commercial product built on top of OpenCost. Adds enterprise features like discount reconciliation (reserved instances, spot pricing, credits), multi-cluster unified views, cost forecasting, anomaly detection, and integrations with Slack/PagerDuty.
+
+Aspect	OpenCost	Kubecost
+License	Apache 2.0 (fully open source)	Freemium with paid tiers
+CNCF Status	Incubating project	Commercial product
+Pricing Accuracy	On-demand list prices	Includes discounts, credits, spot pricing
+Multi-Cluster	Single cluster view	Unified multi-cluster view (paid)
+Cost Allocation	Full namespace/label/pod support	Same, plus forecasting and anomaly detection
+Best For	Learning, single clusters, budget-conscious teams	Enterprises needing discount reconciliation
+
+For this course: We use OpenCost because it's the CNCF standard, free to use, and teaches the core concepts. Everything you learn applies directly to Kubecost if your organization needs enterprise features.
+
+OpenCost Architecture​
+
+OpenCost runs as a deployment in your cluster. It integrates with Prometheus to collect resource metrics and calculate costs.
+
+┌─────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                    │
+│                                                          │
+│  ┌──────────────┐    metrics    ┌──────────────────┐    │
+│  │  Prometheus  │ ◄──────────── │   Node Exporter  │    │
+│  │              │               │   kube-state-    │    │
+│  │              │               │   metrics        │    │
+│  └──────┬───────┘               └──────────────────┘    │
+│         │                                                │
+│         │ PromQL queries                                 │
+│         ▼                                                │
+│  ┌──────────────┐    /allocation     ┌──────────────┐   │
+│  │   OpenCost   │ ◄──────────────────│  Your Query  │   │
+│  │              │    /assets         │  (curl, UI)  │   │
+│  │  Port 9003   │                    └──────────────┘   │
+│  └──────────────┘                                        │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+
+
+How it works:
+
+Metrics collection: Prometheus scrapes resource metrics from your cluster (CPU, memory, network, storage usage per pod)
+
+Cost calculation: OpenCost queries Prometheus and applies pricing:
+
+Cloud pricing from AWS/Azure/GCP billing APIs (or custom on-prem rates)
+Formula: max(request, usage) * hourly_rate
+
+Allocation API: You query OpenCost's HTTP API to retrieve cost data aggregated by namespace, label, controller, or pod
+
+Prometheus integration: OpenCost also exposes its own Prometheus metrics, enabling Grafana dashboards and alerting
+
+Installing OpenCost​
+
+OpenCost requires Prometheus. If you followed Chapter 85, you already have kube-prometheus-stack installed. OpenCost connects to your existing Prometheus.
+
+Prerequisites​
+
+Verify Prometheus is running:
+
+kubectl get pods -n monitoring | grep prometheus
+
+
+Output:
+
+prometheus-kube-prometheus-stack-prometheus-0   2/2     Running   0   5d
+
+Install OpenCost with Helm​
+# Add the OpenCost Helm repository
+helm repo add opencost https://opencost.github.io/opencost-helm-chart
+helm repo update
+
+# Install OpenCost pointing to your Prometheus
+helm install opencost opencost/opencost \
+  --namespace opencost \
+  --create-namespace \
+  --set prometheus.internal.serviceName=prometheus-kube-prometheus-stack-prometheus \
+  --set prometheus.internal.namespaceName=monitoring
+
+
+Output:
+
+NAME: opencost
+LAST DEPLOYED: Mon Dec 30 10:15:00 2025
+NAMESPACE: opencost
+STATUS: deployed
+REVISION: 1
+
+Verify Installation​
+
+Check that OpenCost is running:
+
+kubectl get pods -n opencost
+
+
+Output:
+
+NAME                        READY   STATUS    RESTARTS   AGE
+opencost-7d8f9c4b5f-xk2m9   1/1     Running   0          60s
+
+
+Port-forward to access the API:
+
+kubectl port-forward -n opencost svc/opencost 9003:9003
+
+
+Test the API is responding:
+
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=1h \
+  -d aggregate=namespace
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "default": {
+        "cpuCost": 0.0234,
+        "ramCost": 0.0156,
+        ...
+      }
+    }
+  ]
+}
+
+
+OpenCost is now collecting cost data from your cluster.
+
+Querying the Allocation API​
+
+The /allocation API is your primary interface for cost visibility. It answers: "How much did X cost during time window Y?"
+
+Query Structure​
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=<time-range> \
+  -d aggregate=<grouping> \
+  -d filter=<optional-filter>
+
+
+Parameters:
+
+Parameter	Description	Examples
+window	Time range to query	1h, 24h, 7d, 30d, lastweek
+aggregate	How to group costs	namespace, label:team, controller, pod
+filter	Limit to specific resources	namespace:production, label:app=task-api
+shareIdle	Include idle costs	true, false
+Query by Namespace​
+
+The most common query: "How much did each namespace cost?"
+
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=namespace \
+  -d shareIdle=true
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "production": {
+        "name": "production",
+        "cpuCost": 45.23,
+        "ramCost": 28.67,
+        "pvCost": 12.50,
+        "totalCost": 86.40
+      },
+      "data-science": {
+        "name": "data-science",
+        "cpuCost": 102.45,
+        "gpuCost": 234.00,
+        "ramCost": 45.12,
+        "totalCost": 381.57
+      },
+      "staging": {
+        "name": "staging",
+        "cpuCost": 8.90,
+        "ramCost": 5.23,
+        "totalCost": 14.13
+      }
+    }
+  ]
+}
+
+
+Now you can answer: "Data-science costs 79% of our cluster spend, mostly from GPU usage."
+
+Query by Team Label​
+
+When namespaces don't map cleanly to teams, use labels. If your pods have labels.team: product-team, query by that label:
+
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=label:team
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "product-team": {
+        "name": "product-team",
+        "totalCost": 156.78
+      },
+      "platform-team": {
+        "name": "platform-team",
+        "totalCost": 89.34
+      },
+      "ml-team": {
+        "name": "ml-team",
+        "totalCost": 312.45
+      }
+    }
+  ]
+}
+
+
+This works because OpenCost reads labels from your pods. If your pods don't have team labels, you can't query by team.
+
+Filter to Specific Resources​
+
+Query a single namespace or application:
+
+# Cost for production namespace only
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=pod \
+  -d filter=namespace:production
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "production/task-api-deployment-abc123": {
+        "name": "production/task-api-deployment-abc123",
+        "totalCost": 23.45
+      },
+      "production/inference-service-xyz789": {
+        "name": "production/inference-service-xyz789",
+        "totalCost": 62.90
+      }
+    }
+  ]
+}
+
+
+Now you see that inference-service costs nearly 3x what task-api costs. Worth investigating.
+
+Understanding Idle Cost​
+
+Idle cost is the money you're paying for resources that no one is using. It's the gap between what you're paying for (provisioned resources) and what workloads are actually consuming (allocated resources).
+
+Idle Cost = Provisioned Cost - Allocated Cost
+
+Why Idle Cost Matters​
+
+If you provision a node with 32 GB of memory but pods only request 16 GB, you're paying for 16 GB of idle memory. That idle capacity has a cost.
+
+Example scenario:
+
+Metric	Value	Cost Impact
+Node capacity	32 GB RAM	You pay for 32 GB
+Pod requests	16 GB RAM	Allocated to workloads
+Idle	16 GB RAM	Paying but not using
+
+If memory costs $0.01/GB/hour, you're spending $0.16/hour on idle memory alone. Over a month: $115 wasted.
+
+Querying Idle Cost​
+
+Use shareIdle=true to distribute idle costs across namespaces proportionally:
+
+# Without idle cost distribution
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=namespace \
+  -d shareIdle=false
+
+# With idle cost distribution
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=namespace \
+  -d shareIdle=true
+
+
+With shareIdle=true, each namespace's cost includes its proportional share of cluster-wide idle costs. This gives a more accurate picture of true cost.
+
+Reducing Idle Cost​
+
+High idle cost signals optimization opportunities:
+
+Right-size nodes: Use VPA recommendations (Lesson 2) to reduce over-provisioning
+Use autoscaling: KEDA and HPA can scale down during low-traffic periods
+Bin-packing: Cluster autoscaler removes underutilized nodes
+Review requests: If pods request 1 GB but use 200 MB, reduce the request
+Cost Attribution Labels​
+
+OpenCost can only report costs by dimensions it knows about. If your pods don't have team labels, you can't query costs by team. Labeling is essential for visibility.
+
+Recommended Labels​
+
+Add these labels to all workloads for comprehensive cost attribution:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  labels:
+    team: product-team          # Which team owns this?
+    app: task-api               # Which application is this?
+    environment: production     # Production, staging, development?
+    cost-center: engineering    # Budget allocation
+spec:
+  template:
+    metadata:
+      labels:
+        team: product-team
+        app: task-api
+        environment: production
+        cost-center: engineering
+
+
+Label strategy:
+
+Label	Purpose	Query Example
+team	Team responsibility	aggregate=label:team
+app	Application attribution	aggregate=label:app
+environment	Environment separation	filter=label:environment=production
+cost-center	Finance/billing	aggregate=label:cost-center
+Labeling Best Practices​
+
+Apply labels at deployment time: Include labels in your Helm charts or Kustomize bases
+
+Use consistent naming: team not owner or squad across all resources
+
+Label namespaces too: OpenCost can aggregate by namespace labels
+
+Enforce with admission controllers: Use OPA/Gatekeeper to require cost labels on all deployments
+
+From Visibility to Action: The FinOps Progression​
+
+OpenCost provides visibility. What you do with that visibility follows the FinOps progression:
+
+Stage 1: Showback (Where We Are Now)​
+
+Report costs to teams without charging them. Build trust that the data is accurate.
+
+Actions:
+
+Create weekly cost reports by team
+Share dashboards showing cost trends
+Let teams review and validate their costs
+Stage 2: Allocation​
+
+Map costs to business entities. Connect cost centers to budgets.
+
+Actions:
+
+Assign cost-center labels to all workloads
+Create namespace/team cost reports for finance
+Track costs against budget
+Stage 3: Chargeback​
+
+Formally bill internal teams for their usage. This is the mature state.
+
+Actions:
+
+Monthly invoices to cost centers
+Usage-based internal billing
+Accountability for over-budget spend
+
+Most teams never reach chargeback. Showback is often sufficient to drive cost-conscious behavior.
+
+Try With AI​
+
+These prompts help you apply cost visibility concepts to your own projects.
+
+Prompt 1: Cost Query Design
+
+I have a Kubernetes cluster with 5 namespaces and 3 teams.
+Pods have labels: team, app, environment.
+
+Design a set of OpenCost queries that answer:
+1. Monthly cost by team
+2. Cost breakdown for the 'ml-team' by application
+3. Idle cost percentage across the cluster
+
+Show the curl commands I would use.
+
+
+What you're learning: How to translate cost visibility questions into specific API queries. AI helps you construct the query parameters.
+
+Prompt 2: Label Strategy
+
+I'm setting up cost attribution for a new Kubernetes cluster.
+We have:
+- 4 teams (product, platform, data, infrastructure)
+- 3 environments (dev, staging, production)
+- 15 applications
+
+Design a labeling strategy:
+- What labels should every resource have?
+- How do I enforce these labels?
+- What queries will these labels enable?
+
+
+What you're learning: How to design a labeling strategy before deployment. Retrofitting labels is painful; planning ahead saves time.
+
+Prompt 3: Cost Report Generation
+
+I want to create a weekly cost report for my team leads.
+Each team should see:
+- Their total cost for the week
+- Cost breakdown by application
+- Comparison to previous week
+- Top 3 most expensive pods
+
+Using the OpenCost API, design a script that generates this report.
+
+
+What you're learning: How to automate cost reporting. AI helps you combine multiple API calls into a coherent report.
+
+Safety note: Cost data can reveal business information (which products get investment, team sizes, infrastructure scale). Restrict access to cost dashboards and APIs. In multi-tenant clusters, ensure teams only see their own cost data.
+
+Reflect on Your Skill​
+
+You built an operational-excellence skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my operational-excellence skill, explain how to query cost data by team using OpenCost.
+Does my skill describe the /allocation API parameters correctly?
+Does it include the cost attribution label strategy?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the idle cost concept (provisioned - allocated)?
+Did it explain the FinOps progression (showback -> allocation -> chargeback)?
+Did it include the recommended labels (team, app, environment, cost-center)?
+Improve Your Skill​
+
+If you found gaps:
+
+My operational-excellence skill is missing the OpenCost query patterns.
+Update it to include:
+- The /allocation API structure with window, aggregate, and filter parameters
+- Example queries for namespace and team-label cost allocation
+- The idle cost formula and why it matters

@@ -1,0 +1,442 @@
+Ollama Installation and Configuration
+
+Ollama transforms local LLM serving from a complex multi-step process into a single-command operation. It manages model downloads, GPU acceleration, memory allocation, and API serving automatically. This lesson walks you through installation, verification, and customization.
+
+Understanding Ollama Architecture​
+
+Before installing, understand what Ollama provides:
+
+┌─────────────────────────────────────────────────────────────┐
+│ Your Application                                             │
+│   └── HTTP requests to localhost:11434                       │
+├─────────────────────────────────────────────────────────────┤
+│ Ollama Server                                                │
+│   ├── REST API (/api/generate, /api/chat, /api/embeddings)  │
+│   ├── Model Manager (download, store, load)                 │
+│   ├── Memory Manager (automatic GPU/CPU allocation)         │
+│   └── Inference Engine (llama.cpp under the hood)           │
+├─────────────────────────────────────────────────────────────┤
+│ Model Storage (~/.ollama/models/)                            │
+│   ├── llama3.2:latest (3B)                                   │
+│   ├── mistral:latest (7B)                                    │
+│   └── task-api:latest (your custom model)                    │
+└─────────────────────────────────────────────────────────────┘
+
+
+Ollama runs as a background service. When you request a model that is not loaded, it automatically loads it into memory. When idle for a period, it unloads models to free resources.
+
+Installation by Platform​
+macOS (Recommended for Apple Silicon)​
+
+Download and install from the official website:
+
+# Download the installer
+curl -fsSL https://ollama.com/download/mac -o ollama-mac.zip
+
+# Or download directly from browser
+# https://ollama.com/download/darwin
+
+
+Alternatively, use Homebrew:
+
+# Install via Homebrew
+brew install ollama
+
+
+After installation, Ollama runs as a macOS app in your menu bar.
+
+Verify installation:
+
+ollama --version
+
+
+Output:
+
+ollama version is 0.5.4
+
+Linux (Recommended for Production Servers)​
+
+The one-liner installation script:
+
+curl -fsSL https://ollama.com/install.sh | sh
+
+
+This script:
+
+Detects your Linux distribution
+Downloads the appropriate binary
+Installs to /usr/local/bin
+Creates a systemd service
+Starts the service automatically
+
+Manual installation (if you prefer):
+
+# Download binary
+curl -L https://ollama.com/download/ollama-linux-amd64 -o ollama
+
+# Make executable
+chmod +x ollama
+
+# Move to PATH
+sudo mv ollama /usr/local/bin/
+
+# Start the server
+ollama serve &
+
+
+Verify installation:
+
+ollama --version
+systemctl status ollama  # Check service status
+
+
+Output:
+
+ollama version is 0.5.4
+
+● ollama.service - Ollama Service
+     Loaded: loaded (/etc/systemd/system/ollama.service; enabled)
+     Active: active (running)
+
+Windows​
+
+Download the installer from the official website:
+
+Navigate to https://ollama.com/download/windows
+Run OllamaSetup.exe
+Follow the installation wizard
+
+After installation, Ollama runs as a system tray application.
+
+Verify installation (PowerShell):
+
+ollama --version
+
+
+Output:
+
+ollama version is 0.5.4
+
+First Model Test​
+
+Verify Ollama works by pulling and running a small model:
+
+# Pull a small model for testing (3B parameters)
+ollama pull llama3.2:1b
+
+# Run interactive chat
+ollama run llama3.2:1b
+
+
+Output:
+
+pulling manifest
+downloading sha256:abc123...  [====================] 100%
+downloading sha256:def456...  [====================] 100%
+verifying sha256 digest
+writing manifest
+removing any unused layers
+success
+
+>>> Hello! Can you tell me what you are?
+I'm an AI assistant based on Meta's Llama model. I'm running locally on
+your machine through Ollama. How can I help you today?
+
+>>> /bye
+
+GPU Configuration​
+
+Ollama automatically detects and uses GPUs when available. Verify GPU detection:
+
+# Check GPU status
+ollama ps
+
+
+Output (with GPU):
+
+NAME              ID              SIZE   PROCESSOR    UNTIL
+llama3.2:1b       abc123          1.3GB  100% GPU    4 minutes from now
+
+
+Output (CPU only):
+
+NAME              ID              SIZE   PROCESSOR    UNTIL
+llama3.2:1b       abc123          1.3GB  100% CPU    4 minutes from now
+
+NVIDIA GPU Setup​
+
+If Ollama does not detect your NVIDIA GPU:
+
+# Verify CUDA is available
+nvidia-smi
+
+# Check CUDA version (Ollama requires CUDA 12.x)
+nvcc --version
+
+# If GPU not detected, restart Ollama
+systemctl restart ollama  # Linux
+# Or restart from system tray on Windows/macOS
+
+AMD GPU Setup (Linux)​
+
+AMD GPUs require ROCm:
+
+# Install ROCm (Ubuntu example)
+wget https://repo.radeon.com/amdgpu-install/latest/ubuntu/jammy/amdgpu-install_5.4.50400-1_all.deb
+sudo apt install ./amdgpu-install*.deb
+sudo amdgpu-install --usecase=rocm
+
+# Verify ROCm
+rocm-smi
+
+# Restart Ollama to detect GPU
+sudo systemctl restart ollama
+
+Apple Silicon (Automatic)​
+
+Apple Silicon Macs use Metal for GPU acceleration. No additional configuration needed. Ollama automatically uses the unified memory architecture.
+
+Creating Modelfiles​
+
+A Modelfile customizes how a model behaves. This is essential for deploying your fine-tuned models.
+
+Basic Modelfile Structure​
+# Modelfile for Task API model
+
+# Base model (your GGUF file)
+FROM ./task-api-q4_k_m.gguf
+
+# Model parameters
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER num_ctx 4096
+PARAMETER stop "<|end|>"
+
+# System prompt
+SYSTEM """
+You are a task management assistant. You respond with structured JSON
+for all task-related requests. Available actions:
+- create_task: Create a new task
+- list_tasks: List tasks with optional filters
+- update_task: Update an existing task
+- delete_task: Delete a task
+Always respond with valid JSON.
+"""
+
+# Template for prompt formatting
+TEMPLATE """{{ if .System }}<|system|>
+{{ .System }}<|end|>
+{{ end }}{{ if .Prompt }}<|user|>
+{{ .Prompt }}<|end|>
+{{ end }}<|assistant|>
+{{ .Response }}<|end|>"""
+
+Modelfile Parameters​
+Parameter	Default	Description
+temperature	0.8	Controls randomness (0.0 = deterministic)
+top_p	0.9	Nucleus sampling threshold
+top_k	40	Limits vocabulary for next token
+num_ctx	2048	Context window size
+num_predict	-1	Max tokens to generate (-1 = unlimited)
+stop	varies	Stop sequences
+repeat_penalty	1.1	Penalizes repetition
+Creating Your Custom Model​
+# Create the Modelfile
+cat > Modelfile << 'EOF'
+FROM ./task-api-q4_k_m.gguf
+
+PARAMETER temperature 0.3
+PARAMETER num_ctx 4096
+PARAMETER stop "<|end|>"
+PARAMETER stop "<|endoftext|>"
+
+SYSTEM """You are a task management API. Respond only with valid JSON."""
+EOF
+
+# Register the model with Ollama
+ollama create task-api -f Modelfile
+
+
+Output:
+
+transferring model data
+creating model layer
+creating template layer
+creating system layer
+creating parameters layer
+writing manifest
+success
+
+Verifying Your Model​
+# List all models
+ollama list
+
+# Test your custom model
+ollama run task-api "Create a task: Submit expense report by Monday"
+
+
+Output:
+
+NAME                    ID              SIZE      MODIFIED
+task-api:latest         abc123def       4.1 GB    10 seconds ago
+llama3.2:1b             xyz789abc       1.3 GB    5 minutes ago
+
+{"action": "create_task", "title": "Submit expense report", "due_date": "Monday", "priority": "normal"}
+
+Environment Configuration​
+
+Configure Ollama behavior with environment variables:
+
+Linux/macOS​
+# Set in your shell profile (~/.bashrc, ~/.zshrc)
+
+# Change model storage location
+export OLLAMA_MODELS="/data/ollama/models"
+
+# Change server port
+export OLLAMA_HOST="0.0.0.0:11434"
+
+# Enable debug logging
+export OLLAMA_DEBUG=1
+
+# Limit GPU memory usage (in MB)
+export OLLAMA_GPU_MEMORY=6144
+
+Windows (PowerShell)​
+# Set environment variables
+[Environment]::SetEnvironmentVariable("OLLAMA_MODELS", "D:\ollama\models", "User")
+[Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0:11434", "User")
+
+# Restart Ollama for changes to take effect
+
+Systemd Service Configuration (Linux)​
+
+For production servers, modify the service file:
+
+# Edit the service file
+sudo systemctl edit ollama.service
+
+# Add overrides
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_MODELS=/data/models"
+Environment="OLLAMA_GPU_MEMORY=8192"
+
+# Reload and restart
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+
+Common Configuration Patterns​
+Pattern 1: Memory-Constrained Laptop​
+
+For 8GB RAM MacBook or laptop:
+
+# Modelfile for low-memory deployment
+FROM ./task-api-q4_k_m.gguf
+
+PARAMETER num_ctx 2048        # Reduce context to save memory
+PARAMETER num_batch 256       # Smaller batch size
+PARAMETER num_gpu 0           # Force CPU only if GPU causes issues
+
+Pattern 2: Production Server​
+
+For dedicated GPU server:
+
+# Modelfile for production
+FROM ./task-api-q5_k_m.gguf   # Higher quality quantization
+
+PARAMETER num_ctx 8192        # Large context for complex requests
+PARAMETER num_batch 512       # Larger batches for throughput
+PARAMETER temperature 0.1     # Low temperature for consistency
+
+Pattern 3: Development/Testing​
+
+For rapid iteration:
+
+# Modelfile for development
+FROM ./task-api-q4_k_m.gguf
+
+PARAMETER temperature 0.7     # More variety for testing edge cases
+PARAMETER num_predict 256     # Limit output length for speed
+PARAMETER num_ctx 1024        # Minimum viable context
+
+Reflect on Your Skill​
+
+Update your model-serving skill with Ollama configuration patterns:
+
+## Ollama Configuration
+
+### Installation Commands
+
+macOS: brew install ollama
+Linux: curl -fsSL https://ollama.com/install.sh | sh
+Windows: Download from https://ollama.com/download/windows
+
+### Modelfile Template
+
+FROM ./model.gguf
+PARAMETER temperature 0.7
+PARAMETER num_ctx 4096
+SYSTEM "Your system prompt here"
+
+### Common Environment Variables
+
+OLLAMA_HOST: Server address (default: 127.0.0.1:11434)
+OLLAMA_MODELS: Model storage path
+OLLAMA_GPU_MEMORY: GPU memory limit in MB
+
+### Verification Commands
+
+ollama --version     # Check version
+ollama ps           # Check running models
+ollama list         # List installed models
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Customize Your Modelfile​
+I have a Task API model fine-tuned to output JSON for task management.
+Help me write a complete Modelfile that:
+1. Uses my q4_k_m.gguf file
+2. Sets a system prompt that enforces JSON output
+3. Configures parameters for consistent, deterministic responses
+4. Includes appropriate stop tokens for my chat template
+
+Here is an example of the expected output format:
+{"action": "create_task", "title": "...", "priority": "high|medium|low"}
+
+
+What you are learning: Modelfile authoring. The system prompt and parameters significantly affect model behavior.
+
+Prompt 2: Debug GPU Issues​
+I installed Ollama on Ubuntu with an NVIDIA RTX 3080, but models are
+running on CPU (I see "100% CPU" when running "ollama ps").
+
+My setup:
+- Ubuntu 22.04
+- NVIDIA driver 535
+- CUDA 12.2 installed
+- nvidia-smi shows the GPU
+
+What troubleshooting steps should I follow?
+
+
+What you are learning: GPU configuration debugging. GPU acceleration is critical for acceptable inference speed.
+
+Prompt 3: Production Configuration​
+I need to deploy Ollama on a production server with these requirements:
+- Accept connections from other machines on the network
+- Store models on a separate data volume (/data/models)
+- Limit GPU memory to 8GB (server has 12GB GPU)
+- Run as a systemd service that starts on boot
+- Log to a specific file for monitoring
+
+Help me write the configuration and systemd service file.
+
+
+What you are learning: Production deployment configuration. Development setups differ from production requirements.
+
+Safety Note​
+
+When exposing Ollama to the network (changing OLLAMA_HOST to 0.0.0.0), ensure you have appropriate firewall rules. By default, Ollama has no authentication. For production deployments accepting external connections, place Ollama behind a reverse proxy with authentication.

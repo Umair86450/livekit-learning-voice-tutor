@@ -1,0 +1,690 @@
+Capstone: Resilient, Cost-Aware Task API
+
+Your CFO asks why Kubernetes costs doubled last quarter. You open OpenCost and show exactly which team and application drove the increase. Finance schedules a meeting to discuss optimization.
+
+A junior developer accidentally deletes the production namespace. Instead of panic, you restore from yesterday's Velero backup. The database comes back with consistent state because your pre-backup hooks ran pg_dump before the snapshot. Production is back in 25 minutes.
+
+During a Game Day, you kill one Task API pod while monitoring latency. Kubernetes spawns a replacement in 4 seconds. No requests return 5xx errors. You document the RTO: 4 seconds. That's 26 seconds better than your 30-second target.
+
+This is operational excellence. Not a checklist of installed tools, but a system that answers real questions, recovers from real disasters, and proves itself under controlled failure.
+
+This capstone integrates everything from Chapter 89: VPA for right-sizing, cost allocation labels for visibility, Velero for backup, and Chaos Mesh for resilience validation. By the end, your Task API deployment demonstrates production-ready operational excellence.
+
+Phase 1: Write the Specification​
+
+Every production system needs explicit requirements. Before deploying anything, write a specification that defines success.
+
+Operational Excellence Spec Template​
+
+Create a file called task-api-opex-spec.md:
+
+# Task API Operational Excellence Specification
+
+## 1. Cost Visibility Requirements
+
+**Goal**: Answer "What does Task API cost, and who pays for it?"
+
+**Success Criteria**:
+- SC-001: All Task API pods carry four cost allocation labels
+  - team: product-team
+  - app: task-api
+  - environment: production
+  - cost-center: engineering
+- SC-002: OpenCost returns cost data when queried by team label
+- SC-003: VPA generates right-sizing recommendations within 24 hours
+
+## 2. Disaster Recovery Requirements
+
+**Goal**: Recover from namespace deletion within 30 minutes
+
+**RTO (Recovery Time Objective)**: 30 minutes
+**RPO (Recovery Point Objective)**: 24 hours (daily backups acceptable)
+
+**Success Criteria**:
+- SC-004: Velero Schedule runs daily at 2 AM UTC
+- SC-005: Backups retain for 30 days (720 hours)
+- SC-006: Pre-backup hook runs pg_dump for database consistency
+- SC-007: Restore completes within RTO (test in staging)
+
+## 3. Resilience Requirements
+
+**Goal**: Prove Task API survives pod failures
+
+**Success Criteria**:
+- SC-008: Pod kill recovery under 30 seconds
+- SC-009: No 5xx errors during single pod failure
+- SC-010: P95 latency stays under 500ms during recovery
+
+## 4. Constraints
+
+- VPA in Off mode only (recommendations, no automatic restarts)
+- Chaos experiments in staging only (not production)
+- Cost labels must not conflict with existing selectors
+
+Why Spec First?​
+
+Without a specification, you deploy components and hope they work. With a specification:
+
+You know what "done" looks like (10 success criteria)
+You can verify each requirement independently
+AI can implement components that meet specific criteria
+Post-implementation validation has clear targets
+Phase 2: Component Composition​
+
+Now implement each component from previous lessons, composed into a unified deployment.
+
+Complete Deployment with Cost Labels (from L04)​
+# task-api-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: production
+  labels:
+    team: product-team
+    app: task-api
+    environment: production
+    cost-center: engineering
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        team: product-team
+        app: task-api
+        environment: production
+        cost-center: engineering
+    spec:
+      containers:
+      - name: task-api
+        image: ghcr.io/panaversity/task-api:1.0.0
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  namespace: production
+  labels:
+    team: product-team
+    app: task-api
+    environment: production
+    cost-center: engineering
+spec:
+  selector:
+    app: task-api
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+
+
+Labels placement is critical: Labels appear in both metadata.labels (for Deployment) and spec.template.metadata.labels (for pods). OpenCost reads pod labels, not Deployment labels.
+
+VPA Configuration (from L02)​
+# task-api-vpa.yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: task-api-vpa
+  namespace: production
+  labels:
+    team: product-team
+    app: task-api
+    environment: production
+    cost-center: engineering
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  updatePolicy:
+    updateMode: "Off"  # SC-003: Recommendations only
+  resourcePolicy:
+    containerPolicies:
+    - containerName: task-api
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      maxAllowed:
+        cpu: 2000m
+        memory: 2Gi
+      controlledResources: ["cpu", "memory"]
+
+
+Why Off mode: Per the specification, we want recommendations without automatic restarts. After validating recommendations for 1-2 weeks, you can change to Initial or Recreate mode.
+
+Velero Backup Schedule (from L06)​
+# task-api-velero-schedule.yaml
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: task-api-production-daily
+  namespace: velero
+  labels:
+    team: product-team
+    app: task-api
+    environment: production
+spec:
+  schedule: "0 2 * * *"  # SC-004: 2 AM UTC daily
+  useOwnerReferencesInBackup: false
+  template:
+    includedNamespaces:
+      - production
+    includedResources:
+      - "*"
+    excludedResources:
+      - events
+      - pods
+      - replicasets
+    snapshotVolumes: true
+    storageLocation: default
+    ttl: 720h  # SC-005: 30-day retention
+    metadata:
+      labels:
+        team: product-team
+        app: task-api
+        backup-type: daily
+    hooks:
+      resources:
+        - name: postgres-consistency
+          includedNamespaces:
+            - production
+          labelSelector:
+            matchLabels:
+              app: postgres
+          pre:
+            - exec:
+                container: postgres
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    echo "Pre-backup hook started at $(date)"
+                    psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CHECKPOINT;"
+                    pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" > /var/lib/postgresql/data/backup.sql
+                    echo "Pre-backup hook completed at $(date)"
+                onError: Fail  # SC-006: Fail backup if hook fails
+                timeout: 120s
+          post:
+            - exec:
+                container: postgres
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    rm -f /var/lib/postgresql/data/backup.sql
+                    echo "Post-backup cleanup completed at $(date)"
+                onError: Continue
+                timeout: 30s
+
+
+Hook purpose: The pre-backup hook runs CHECKPOINT to flush PostgreSQL buffers and pg_dump for application-level recovery. This ensures SC-006: database consistency during backup.
+
+PodChaos Experiment (from L07)​
+# task-api-podchaos.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: task-api-pod-kill
+  namespace: chaos-mesh
+  labels:
+    team: product-team
+    app: task-api
+    experiment-type: resilience
+spec:
+  action: pod-kill
+  mode: one  # Kill exactly one pod
+  selector:
+    namespaces:
+      - staging  # Per spec: staging only
+    labelSelectors:
+      app: task-api
+  duration: "60s"
+
+
+Why staging only: The specification requires chaos experiments in staging, not production. After validating behavior in staging, you can create a production experiment for scheduled Game Days.
+
+Phase 3: AI Orchestration​
+
+You've written a specification and prepared individual components. Now use your operational-excellence skill to verify everything integrates correctly.
+
+Prompt for AI Implementation Verification​
+I have an Operational Excellence Specification for Task API with these
+success criteria:
+
+- SC-001 to SC-003: Cost visibility (labels, OpenCost query, VPA recommendations)
+- SC-004 to SC-007: Disaster recovery (Velero schedule, hooks, 30-min RTO)
+- SC-008 to SC-010: Resilience (pod kill recovery under 30s, no 5xx, latency)
+
+Using my operational-excellence skill, review these manifests and tell me:
+1. Do the cost labels appear in the correct places for OpenCost to read them?
+2. Is the VPA configuration safe for production (Off mode only)?
+3. Will the Velero hooks provide database consistency?
+4. Is the PodChaos experiment scoped correctly for safety?
+
+[Paste the manifests from Phase 2]
+
+What AI Verifies​
+
+AI reviews your manifests against the operational-excellence skill patterns:
+
+Cost Labels Check:
+
+Labels in spec.template.metadata.labels (where pods get them)
+All four required labels present: team, app, environment, cost-center
+Labels consistent between Deployment metadata and pod template
+
+VPA Safety Check:
+
+updateMode: "Off" confirms recommendations-only
+minAllowed and maxAllowed set reasonable bounds
+No conflict with HPA (none defined)
+
+Velero Completeness Check:
+
+Schedule cron matches requirement (2 AM daily)
+TTL matches requirement (720h = 30 days)
+Hooks include onError: Fail for data consistency
+Timeout appropriate for pg_dump (120s)
+
+Chaos Safety Check:
+
+Namespace targeting staging, not production
+Mode is one (not all)
+Duration limited (60s)
+Iterating with AI​
+
+If AI identifies issues, it suggests corrections:
+
+Your VPA is correctly in Off mode. However, I notice your Velero Schedule
+uses labelSelector on app: postgres, but your Deployment labels show app: task-api.
+
+If your PostgreSQL database has different labels than task-api, the hook is
+correct. But if your PostgreSQL is part of the task-api deployment with the
+same labels, the hook won't match any pods.
+
+Please verify: What labels does your PostgreSQL pod have?
+
+
+You provide context:
+
+PostgreSQL is a separate StatefulSet with labels:
+  app: postgres
+  team: product-team
+
+It's not part of the task-api Deployment.
+
+
+AI confirms:
+
+Good. Your Velero hook selector is correct then. The labelSelector:
+matchLabels: app: postgres will match the PostgreSQL StatefulSet pods.
+
+Your manifests look complete. Apply them in this order:
+1. Deployment and Service (task-api-deployment.yaml)
+2. VPA (task-api-vpa.yaml)
+3. Velero Schedule (task-api-velero-schedule.yaml)
+4. PodChaos experiment (task-api-podchaos.yaml) - in staging only
+
+Phase 4: Convergence and Validation​
+
+Deploy all components and verify each success criterion.
+
+Apply the Manifests​
+# Create production namespace if needed
+kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+
+# Deploy Task API with cost labels
+kubectl apply -f task-api-deployment.yaml
+
+# Apply VPA
+kubectl apply -f task-api-vpa.yaml
+
+# Apply Velero Schedule
+kubectl apply -f task-api-velero-schedule.yaml
+
+# Apply PodChaos (only in staging)
+kubectl annotate namespace staging chaos-mesh.org/inject=enabled --overwrite
+kubectl apply -f task-api-podchaos.yaml
+
+
+Output:
+
+namespace/production configured
+deployment.apps/task-api created
+service/task-api created
+verticalpodautoscaler.autoscaling.k8s.io/task-api-vpa created
+schedule.velero.io/task-api-production-daily created
+podchaos.chaos-mesh.org/task-api-pod-kill created
+
+Verification Checklist​
+
+Work through each success criterion systematically.
+
+SC-001: Cost Allocation Labels Present​
+kubectl get pods -n production -l app=task-api -o jsonpath='{.items[0].metadata.labels}' | jq
+
+
+Output:
+
+{
+  "app": "task-api",
+  "cost-center": "engineering",
+  "environment": "production",
+  "team": "product-team",
+  "pod-template-hash": "7d8f9c4b5f"
+}
+
+
+All four labels present on pods.
+
+SC-002: OpenCost Returns Cost Data by Team​
+kubectl port-forward -n monitoring svc/opencost 9003:9003 &
+curl -s "localhost:9003/allocation/compute?window=1d&aggregate=label:team" | jq '.data[0]'
+
+
+Output:
+
+{
+  "product-team": {
+    "name": "product-team",
+    "cpuCost": 0.0432,
+    "memoryCost": 0.0216,
+    "totalCost": 0.0648
+  }
+}
+
+
+OpenCost aggregates costs by team label.
+
+SC-003: VPA Generates Recommendations​
+kubectl describe vpa task-api-vpa -n production | grep -A 20 "Recommendation:"
+
+
+Output:
+
+Recommendation:
+  Container Recommendations:
+    Container Name:  task-api
+    Lower Bound:
+      Cpu:     100m
+      Memory:  200Mi
+    Target:
+      Cpu:     180m
+      Memory:  450Mi
+    Upper Bound:
+      Cpu:     500m
+      Memory:  900Mi
+
+
+VPA recommends 180m CPU and 450Mi memory (lower than your 250m/512Mi requests).
+
+SC-004 & SC-005: Velero Schedule Active with 30-Day Retention​
+velero schedule describe task-api-production-daily
+
+
+Output:
+
+Name:         task-api-production-daily
+Namespace:    velero
+Phase:        Enabled
+Schedule:     0 2 * * *
+TTL:          720h0m0s
+Last Backup:  2025-12-30 02:00:00 +0000 UTC
+
+
+Schedule is enabled with correct timing and retention.
+
+SC-006: Backup Hook Runs Successfully​
+
+Check the most recent backup for hook execution:
+
+velero backup describe $(velero backup get | grep task-api | head -1 | awk '{print $1}') --details | grep -A 10 "Hooks:"
+
+
+Output:
+
+Hooks:
+  Resources:
+    Name:              postgres-consistency
+    Pre Exec Hook:
+      Container:       postgres
+      Command:         /bin/bash -c echo "Pre-backup hook started..."
+      On Error:        Fail
+      Timeout:         2m0s
+      Execution:       Succeeded
+
+
+Hooks executed successfully.
+
+SC-007: Restore Completes Within RTO (Staging Test)​
+
+Test restore in staging (never test restores against production):
+
+# Create a test restore to staging namespace
+velero restore create test-restore-$(date +%s) \
+  --from-backup task-api-production-daily-$(date +%Y%m%d)020000 \
+  --namespace-mappings production:staging-restore-test \
+  --include-namespaces production
+
+# Time the restore
+time velero restore wait test-restore-*
+
+
+Output:
+
+Restore completed with status: Completed. Duration: 2m15s.
+
+real    2m15.234s
+
+
+Restore completed in 2 minutes 15 seconds. Well under the 30-minute RTO.
+
+SC-008: Pod Kill Recovery Under 30 Seconds​
+
+Run the PodChaos experiment and measure recovery:
+
+# Watch pods in staging
+kubectl get pods -n staging -l app=task-api -w &
+
+# Apply chaos experiment
+kubectl apply -f task-api-podchaos.yaml
+
+# Record timestamps
+echo "Experiment started at: $(date)"
+
+
+Output:
+
+NAME                        READY   STATUS    RESTARTS   AGE
+task-api-7d8f9c4b5f-abc12   1/1     Running   0          2h
+task-api-7d8f9c4b5f-def34   1/1     Running   0          2h
+task-api-7d8f9c4b5f-ghi56   1/1     Running   0          2h
+task-api-7d8f9c4b5f-abc12   1/1     Terminating   0       2h
+task-api-7d8f9c4b5f-jkl78   0/1     Pending       0       0s
+task-api-7d8f9c4b5f-jkl78   0/1     ContainerCreating   0  1s
+task-api-7d8f9c4b5f-jkl78   1/1     Running       0       4s
+
+Experiment started at: Mon Dec 30 10:45:00 UTC 2025
+
+
+Recovery time: 4 seconds. Well under the 30-second target.
+
+SC-009 & SC-010: No 5xx Errors, Latency Within Target​
+
+During the chaos experiment, check for errors:
+
+# Query Prometheus for error rate during experiment window
+curl -s "localhost:9090/api/v1/query?query=sum(rate(task_api_requests_total{status=~\"5..\"}[5m]))" | jq '.data.result[0].value[1]'
+
+
+Output:
+
+"0"
+
+
+Zero 5xx errors during pod kill.
+
+# Query P95 latency during experiment
+curl -s "localhost:9090/api/v1/query?query=histogram_quantile(0.95,sum(rate(task_api_request_duration_seconds_bucket[5m]))by(le))*1000" | jq '.data.result[0].value[1]'
+
+
+Output:
+
+"245.3"
+
+
+P95 latency: 245ms. Under the 500ms target.
+
+Complete Verification Summary​
+Success Criterion	Target	Actual	Status
+SC-001: Cost labels present	4 labels	4 labels	PASS
+SC-002: OpenCost query by team	Returns data	Returns data	PASS
+SC-003: VPA recommendations	Within 24h	Available	PASS
+SC-004: Velero schedule daily	2 AM UTC	2 AM UTC	PASS
+SC-005: 30-day retention	720h	720h	PASS
+SC-006: Pre-backup hook success	Runs	Succeeded	PASS
+SC-007: Restore within RTO	30 min	2m 15s	PASS
+SC-008: Pod recovery time	< 30s	4s	PASS
+SC-009: No 5xx during failure	0	0	PASS
+SC-010: P95 latency during failure	< 500ms	245ms	PASS
+
+All success criteria verified.
+
+Capstone Artifacts​
+
+By completing this capstone, you should have created:
+
+Artifact	Location	Purpose
+Operational Excellence Spec	task-api-opex-spec.md	Defines success criteria
+Deployment with labels	task-api-deployment.yaml	Task API with cost allocation
+VPA configuration	task-api-vpa.yaml	Right-sizing recommendations
+Velero Schedule	task-api-velero-schedule.yaml	Daily backup with hooks
+PodChaos experiment	task-api-podchaos.yaml	Resilience validation
+Verification results	(documented)	Proof of compliance
+Reflect on Your Skill (Final)​
+
+You built an operational-excellence skill in Lesson 0. Throughout this chapter, you've tested and improved it. Now finalize it for production use.
+
+Final Skill Test​
+Using my operational-excellence skill, generate a complete operational
+excellence implementation for a new service called "order-service" with:
+
+Requirements:
+- 99.9% availability SLO
+- RTO: 15 minutes, RPO: 4 hours
+- Cost allocation: team=commerce, cost-center=revenue
+- Must survive single pod failure without errors
+
+Generate all manifests and a verification checklist.
+
+Verify Complete Coverage​
+
+Your skill should produce:
+
+ Deployment with all four cost allocation labels
+ VPA in Off mode with appropriate bounds
+ Velero Schedule with 6-hour backup frequency (RPO: 4 hours)
+ Pre-backup hooks for database consistency
+ PodChaos experiment for staging
+ Verification commands for each requirement
+Identify and Fill Gaps​
+
+If your skill missed any component:
+
+My operational-excellence skill generated the Deployment and VPA but forgot
+the Velero hooks for database consistency. Update it to always include:
+
+1. Pre-backup hook with pg_dump (or equivalent for the database type)
+2. onError: Fail to ensure consistency
+3. Appropriate timeout based on database size
+
+Also add a decision tree: "Is this a stateful service with a database?"
+If yes, include hooks. If no, skip hooks.
+
+Skill Finalization Checklist​
+
+Before adding your skill to your portfolio:
+
+ Covers all four areas: cost (VPA + labels), backup (Velero), resilience (Chaos Mesh), and visibility (OpenCost)
+ Includes safety guardrails (Off mode for VPA, staging for chaos, onError: Fail for hooks)
+ Generates correct YAML syntax for all CRDs
+ Includes verification commands for each component
+ Decision tree helps select appropriate components based on requirements
+Add to Your Portfolio​
+
+Your operational-excellence skill is now a Digital FTE component. When you build AI agents or cloud-native applications:
+
+Invoke the skill with your service name and requirements
+Get production-ready manifests
+Apply and verify with the generated checklist
+Iterate if requirements change
+
+This is the Agent Factory model: build once, deploy everywhere. Your operational excellence patterns are encoded, tested, and ready to manufacture into any production deployment.
+
+Try With AI​
+Prompt 1: Extend to Multi-Service Architecture​
+I've completed the Task API capstone with full operational excellence.
+Now I need to extend this to a microservices architecture with:
+- task-api (FastAPI + PostgreSQL)
+- notification-service (stateless, sends emails)
+- inference-service (GPU workloads, high cost)
+
+How should I structure cost allocation labels, backup schedules, and
+chaos experiments differently for each service type?
+
+
+What you're learning: Adapting operational excellence patterns to different service characteristics. Stateless services need different backup strategies than databases. GPU workloads need different cost monitoring than CPU-bound services.
+
+Prompt 2: Automate Verification​
+The verification checklist from the capstone is manual. I want to automate it.
+Help me create a script that:
+1. Checks all pods have the four cost allocation labels
+2. Verifies VPA is in Off mode
+3. Confirms Velero Schedule is enabled
+4. Runs a chaos experiment and measures recovery time
+
+Output should be a pass/fail report suitable for CI/CD.
+
+
+What you're learning: Turning manual verification into automated compliance checks. Production systems need continuous validation, not just initial deployment testing.
+
+Prompt 3: Handle Failure Scenarios​
+During a Game Day, my Task API took 45 seconds to recover instead of the
+target 30 seconds. The pod was killed, but the new pod spent 40 seconds
+in ContainerCreating state.
+
+Help me diagnose:
+1. What could cause slow container creation?
+2. How do I identify the bottleneck (image pull, resource scheduling, init containers)?
+3. What changes would reduce recovery time to under 30 seconds?
+
+
+What you're learning: Debugging operational performance when targets are missed. Chaos engineering often reveals issues that weren't visible during normal operation. Your skill should help diagnose and fix these issues.
+
+Safety note: This capstone deploys real infrastructure that interacts with production systems. Always verify namespace targeting before applying Velero restores or Chaos Mesh experiments. The manifests in this lesson target specific namespaces, but a single typo in includedNamespaces can affect unintended resources. Review manifests carefully, and always test in staging before production.

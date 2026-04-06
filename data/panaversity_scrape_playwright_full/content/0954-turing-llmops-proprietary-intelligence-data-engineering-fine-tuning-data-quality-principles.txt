@@ -1,0 +1,307 @@
+Data Quality Principles
+
+You've built your data engineering skill. Now let's understand the principle that makes all fine-tuning efforts succeed or fail: the quality of your training data determines the quality of your fine-tuned model.
+
+This isn't just "garbage in, garbage out." It's worse. Fine-tuning amplifies your data's flaws, encoding mistakes into the model's weights permanently.
+
+The Amplification Problem​
+
+When you fine-tune a model, you're teaching it to behave like your training examples. Every pattern in your data becomes a pattern in your model:
+
+What's in Your Data	What's in Your Model
+Accurate task completions	Accurate task completions
+Typos and formatting errors	Typos and formatting errors
+Inconsistent output styles	Inconsistent output styles
+Missing edge case handling	Missing edge case handling
+Hallucinated information	Hallucinated information
+
+The model doesn't know which patterns are intentional and which are mistakes. It learns everything with equal confidence.
+
+Consider this example from a Task API training dataset:
+
+{
+  "instruction": "Create a task to call the doctor",
+  "output": "Created task: 'Call the doctor' with priority: high, due: tomorrow"
+}
+
+
+If your dataset has 50 examples where the model assumes "high" priority when none is specified, and 50 examples where it assumes "medium" priority, your fine-tuned model will randomly choose between them. You've trained inconsistency into the weights.
+
+The Four Quality Dimensions​
+
+Training data quality has four measurable dimensions. Each affects your fine-tuned model differently:
+
+Dimension 1: Accuracy​
+
+Definition: Outputs are factually correct and achieve the stated goal.
+
+Impact of Failures: Hallucinations. The model learns to produce wrong information with high confidence.
+
+Examples in Task API context:
+
+Accurate	Inaccurate
+"Created task 'Buy groceries' due Monday" (if user said Monday)	"Created task 'Buy groceries' due Tuesday" (user said Monday)
+"Task updated: priority changed to high" (task exists)	"Task updated: priority changed to high" (task doesn't exist)
+"Error: Cannot create task without a title" (correct validation)	"Created task with empty title" (invalid behavior)
+
+Detection method: Human review of outputs against inputs. Expensive but essential.
+
+# Accuracy check: Does output match what input requested?
+def check_accuracy(example):
+    """Returns True if output correctly fulfills input request."""
+    # This requires domain knowledge—no automated shortcut
+    input_text = example["instruction"]
+    output_text = example["output"]
+
+    # For Task API: extract what was requested vs what was done
+    requested = parse_task_request(input_text)
+    completed = parse_task_response(output_text)
+
+    return requested == completed  # Simplified; real check is nuanced
+
+Dimension 2: Consistency​
+
+Definition: Same format, style, and patterns across all examples.
+
+Impact of Failures: Unpredictable outputs. Sometimes the model uses one format, sometimes another.
+
+Examples in Task API context:
+
+Consistent	Inconsistent
+All outputs: "Created task: '[title]'"	Some: "Created task: '[title]'" Some: "I've created a task called [title]" Some: "Done! Task [title] is ready"
+All priorities: "low", "medium", "high"	Some: "low", "medium", "high" Some: "1", "2", "3" Some: "!", "!!", "!!!"
+All dates: "due: YYYY-MM-DD"	Some: "due: Monday" Some: "due: 2025-01-15" Some: "due: next week"
+
+Detection method: Schema validation and pattern matching.
+
+from pydantic import BaseModel, validator
+from typing import Literal
+
+class TaskResponse(BaseModel):
+    """Enforces consistent output format."""
+    action: Literal["created", "updated", "completed", "deleted"]
+    title: str
+    priority: Literal["low", "medium", "high"] | None
+    due_date: str | None  # YYYY-MM-DD format
+
+    @validator("due_date")
+    def validate_date_format(cls, v):
+        if v and not re.match(r"\d{4}-\d{2}-\d{2}", v):
+            raise ValueError("Date must be YYYY-MM-DD")
+        return v
+
+Dimension 3: Coverage​
+
+Definition: Dataset includes all scenarios the model will encounter in production.
+
+Impact of Failures: Gaps. The model doesn't know how to handle situations not in the training data.
+
+Examples in Task API context:
+
+Complete Coverage	Coverage Gaps
+Create, update, complete, delete operations	Only create and complete (update/delete missing)
+Low, medium, high priority variations	Only high priority examples
+Valid requests AND error cases	Only happy-path examples
+Different phrasing styles	Only formal phrasing
+
+Detection method: Gap analysis against requirements.
+
+# Coverage check: Do we have examples for all required scenarios?
+REQUIRED_SCENARIOS = {
+    "operations": ["create", "update", "complete", "delete", "list"],
+    "priorities": ["low", "medium", "high", None],  # None = unspecified
+    "error_cases": ["missing_title", "invalid_date", "task_not_found"],
+    "phrasing": ["formal", "casual", "imperative", "question"],
+}
+
+def check_coverage(dataset):
+    """Returns missing scenarios."""
+    covered = {category: set() for category in REQUIRED_SCENARIOS}
+
+    for example in dataset:
+        # Categorize each example
+        operation = extract_operation(example)
+        priority = extract_priority(example)
+        # ... etc
+
+    missing = {}
+    for category, required in REQUIRED_SCENARIOS.items():
+        missing[category] = set(required) - covered[category]
+
+    return missing
+
+Dimension 4: Diversity​
+
+Definition: Varied phrasing, styles, and approaches—not just the same example repeated.
+
+Impact of Failures: Brittleness. The model only understands inputs phrased exactly like training examples.
+
+Examples in Task API context:
+
+Diverse	Repetitive
+"Create a task to buy milk" "Add 'buy milk' to my list" "I need to remember to buy milk" "New task: buy milk"	"Create a task to buy milk" "Create a task to buy bread" "Create a task to buy eggs" (same pattern, different nouns)
+
+Detection method: Embedding clustering to find near-duplicates.
+
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import DBSCAN
+
+def check_diversity(dataset, threshold=0.85):
+    """Finds clusters of too-similar examples."""
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    # Embed all instructions
+    instructions = [ex["instruction"] for ex in dataset]
+    embeddings = model.encode(instructions)
+
+    # Cluster similar examples
+    clustering = DBSCAN(eps=1-threshold, min_samples=2, metric="cosine")
+    clusters = clustering.fit_predict(embeddings)
+
+    # Find over-represented clusters
+    from collections import Counter
+    cluster_sizes = Counter(clusters)
+
+    # Return clusters with too many similar examples
+    repetitive = {c: size for c, size in cluster_sizes.items()
+                  if c != -1 and size > len(dataset) * 0.1}
+
+    return repetitive
+
+The Quality Hierarchy​
+
+Not all dimensions are equal. Here's the priority order:
+
+Priority 1: ACCURACY
+  ↓ Inaccurate data teaches hallucination
+
+Priority 2: CONSISTENCY
+  ↓ Inconsistent data teaches unpredictability
+
+Priority 3: COVERAGE
+  ↓ Missing coverage creates gaps
+
+Priority 4: DIVERSITY
+  ↓ Low diversity creates brittleness
+
+
+Rule: Fix accuracy issues before worrying about diversity. A dataset with 100% accuracy and low diversity outperforms a dataset with high diversity and 80% accuracy.
+
+Quantity vs. Quality: The Real Tradeoff​
+
+Conventional wisdom suggests "more data is better." For fine-tuning, this is wrong.
+
+Dataset Size	Quality	Result
+100 examples	100% accurate, consistent	Excellent: model learns correct patterns
+1000 examples	80% accurate, inconsistent	Poor: model learns mistakes confidently
+500 examples	95% accurate, 90% consistent	Good: model mostly correct, minor inconsistencies
+
+The research backs this up:
+
+Stanford Alpaca (52K examples) performed worse than later datasets with fewer but higher-quality examples
+Hugging Face studies show diminishing returns after ~500-1000 high-quality examples for most tasks
+OpenAI fine-tuning guidance recommends starting with 50-100 examples and iterating on quality
+
+Bottom line: Start with fewer examples, verify quality obsessively, then expand if needed.
+
+Quality Audit Checklist​
+
+Before training, run this checklist:
+
+## Pre-Training Quality Audit
+
+### Accuracy (Priority 1)
+- [ ] Sample reviewed by domain expert (min 10% of dataset)
+- [ ] Zero known factual errors in reviewed samples
+- [ ] Error cases produce appropriate error messages
+
+### Consistency (Priority 2)
+- [ ] Output format validated against schema (100% pass)
+- [ ] Date/time formats standardized
+- [ ] Priority/status values from controlled vocabulary
+- [ ] Tone/style consistent across examples
+
+### Coverage (Priority 3)
+- [ ] All required operations included (create/update/complete/delete)
+- [ ] Error cases represented (min 10% of dataset)
+- [ ] Edge cases included (empty inputs, very long inputs)
+- [ ] Multiple phrasing styles per operation
+
+### Diversity (Priority 4)
+- [ ] Embedding clustering shows no repetitive clusters
+- [ ] Input lengths vary (short commands to long descriptions)
+- [ ] Different user personas represented
+
+Real-World Case Study: The Alpaca Problem​
+
+When Stanford released Alpaca-7B in 2023, it was trained on 52,000 instruction-following examples generated by GPT-3.5. It seemed impressive at first. But quality issues emerged:
+
+Issue	Impact on Model
+Inconsistent output formats	Model randomly chose between formats
+Factual errors propagated from GPT-3.5	Model hallucinated with confidence
+Limited coverage (mostly English, general topics)	Model struggled with specialized domains
+Repetitive phrasing patterns	Model was brittle to input variations
+
+Later datasets like Dolly (15K examples, human-written) and OpenAssistant (10K examples, quality-filtered) performed better with fewer examples because quality was prioritized.
+
+Lesson: 52,000 mediocre examples lose to 10,000 excellent ones.
+
+Applying This to Task API​
+
+For your Task API fine-tuning project, here's what quality means:
+
+Dimension	Task API Standard
+Accuracy	Every task creation matches what was requested; every update modifies correct fields; every error message is appropriate
+Consistency	All outputs follow the same JSON structure; dates always YYYY-MM-DD; priorities always low/medium/high
+Coverage	All CRUD operations; all priorities; error cases (missing title, invalid date, not found); various input styles
+Diversity	"Create task", "Add to list", "I need to remember", "New task", "Schedule", etc. for same operation
+
+The next lessons teach you how to create data meeting these standards. This lesson ensures you know why each standard matters.
+
+Try With AI​
+Prompt 1: Audit Sample Data​
+Here's a sample from a training dataset for a Task API assistant:
+
+{"instruction": "make a task for the meeting", "output": "Created task 'meeting'"}
+{"instruction": "new task buy groceries", "output": "I've added 'buy groceries' to your tasks!"}
+{"instruction": "add task call mom", "output": "Task created: Call mom, Priority: high"}
+{"instruction": "create a task to review the budget by Friday", "output": "Done! Task 'review budget' added for Friday."}
+
+Using the four quality dimensions (accuracy, consistency, coverage, diversity),
+identify issues in this dataset. For each issue:
+1. What dimension does it violate?
+2. How would this affect a fine-tuned model?
+3. What would you change?
+
+
+What you're learning: Applying the quality framework to real (flawed) examples. The issues are intentional—your job is to find them.
+
+Prompt 2: Design Quality Gates​
+I'm building a data pipeline for fine-tuning. Help me design automated
+quality gates that run before training:
+
+1. What can I check automatically (Pydantic schemas, regex, embeddings)?
+2. What requires human review (accuracy, domain correctness)?
+3. How do I balance automation vs manual review for a 500-example dataset?
+
+Be specific about tools and thresholds.
+
+
+What you're learning: Practical implementation of quality control. Some checks are automatable; others require human judgment. Understanding the boundary is crucial.
+
+Prompt 3: Predict Model Failures​
+Imagine a training dataset with these characteristics:
+- 80% of examples are task creation, 15% are task completion, 5% are updates
+- All examples use formal language ("Please create a task for...")
+- No error case examples (all inputs are valid)
+- Consistent output format
+
+If I fine-tune on this dataset, what problems will the model have in production?
+Be specific about failure modes and how they trace back to data quality issues.
+
+
+What you're learning: Predicting downstream effects of data quality decisions. This mental model helps you catch problems before they're encoded in weights.
+
+Safety Note​
+
+Data quality assessment requires domain expertise. AI can help identify patterns and inconsistencies, but determining whether an output is "correct" requires human judgment about what correct means in your context. Always have a domain expert review accuracy before training.

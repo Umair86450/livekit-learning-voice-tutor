@@ -1,0 +1,899 @@
+Dataset Versioning and Management
+
+You've created 100+ training examples for Task API. Now comes a critical question: how do you manage this data over time? What happens when you want to:
+
+Add more examples next month?
+Compare model performance across dataset versions?
+Share the dataset with your team?
+Reproduce training results from three months ago?
+
+Without proper versioning, datasets become chaos. You'll have files like task_api_v2_final_FINAL_updated.jsonl and no idea which one trained your production model.
+
+This lesson teaches dataset versioning using HuggingFace Datasets - the standard for ML data management. You'll learn to version, document, and manage training data like production code.
+
+Why Dataset Versioning Matters​
+
+Consider what happens without versioning:
+
+Scenario	Without Versioning	With Versioning
+Model regression	"Something changed... was it the data?"	"Compare model v3 (dataset v1.2) vs v4 (dataset v1.3)"
+Team collaboration	"Which file did you train on?"	"Load task-api-dataset/v1.2"
+Reproducing results	Hope the files haven't changed	Checksums guarantee identical data
+Auditing	No idea how data was created	Full provenance in dataset card
+
+Fine-tuned models inherit their training data's properties. If you can't track the data, you can't understand the model.
+
+Step 1: Convert to HuggingFace Format​
+
+HuggingFace Datasets provides a standard format that works across the ML ecosystem. Let's convert our JSONL files.
+
+Install the Library
+
+pip install datasets
+
+
+Create Dataset from JSONL
+
+"""Convert JSONL files to HuggingFace Dataset format."""
+from datasets import Dataset, DatasetDict
+import json
+from pathlib import Path
+
+def load_jsonl(path: str) -> list[dict]:
+    """Load JSONL file into list of dicts."""
+    with open(path) as f:
+        return [json.loads(line) for line in f]
+
+def create_dataset() -> DatasetDict:
+    """Create HuggingFace DatasetDict from our splits."""
+    # Load each split
+    train_data = load_jsonl("data/splits/train.jsonl")
+    val_data = load_jsonl("data/splits/val.jsonl")
+    test_data = load_jsonl("data/splits/test.jsonl")
+
+    # Convert to HuggingFace Dataset
+    dataset = DatasetDict({
+        "train": Dataset.from_list(train_data),
+        "validation": Dataset.from_list(val_data),
+        "test": Dataset.from_list(test_data)
+    })
+
+    return dataset
+
+if __name__ == "__main__":
+    dataset = create_dataset()
+    print(dataset)
+
+    # Save locally
+    dataset.save_to_disk("data/hf_dataset")
+    print("\nSaved to data/hf_dataset/")
+
+
+Output:
+
+DatasetDict({
+    train: Dataset({
+        features: ['conversations'],
+        num_rows: 84
+    })
+    validation: Dataset({
+        features: ['conversations'],
+        num_rows: 11
+    })
+    test: Dataset({
+        features: ['conversations'],
+        num_rows: 11
+    })
+})
+
+Saved to data/hf_dataset/
+
+
+Loading the Dataset
+
+Now anyone can load your dataset with a single line:
+
+from datasets import load_from_disk
+
+dataset = load_from_disk("data/hf_dataset")
+
+# Access splits
+train = dataset["train"]
+print(f"Training examples: {len(train)}")
+
+# Iterate over examples
+for example in train.select(range(3)):
+    print(example["conversations"])
+
+
+Output:
+
+Training examples: 84
+[{'from': 'human', 'value': 'Create a task for the quarterly budget review by Friday'}, ...]
+[{'from': 'human', 'value': 'I need help setting up a new task'}, ...]
+[{'from': 'human', 'value': 'Mark task #1523 as in progress'}, ...]
+
+Step 2: Add Version Metadata​
+
+Datasets need version information. We'll add metadata that tracks:
+
+Version number (semantic versioning)
+Creation timestamp
+SHA256 checksums (for integrity verification)
+Generation configuration
+
+Create Version Metadata
+
+"""Add version metadata to dataset."""
+import hashlib
+import json
+from datetime import datetime
+from pathlib import Path
+
+def compute_checksum(path: str) -> str:
+    """Compute SHA256 checksum of a file."""
+    sha256 = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+def create_version_info(version: str = "1.0.0") -> dict:
+    """Create version metadata for the dataset."""
+    return {
+        "version": version,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "splits": {
+            "train": {
+                "num_examples": 84,
+                "checksum": compute_checksum("data/splits/train.jsonl")
+            },
+            "validation": {
+                "num_examples": 11,
+                "checksum": compute_checksum("data/splits/val.jsonl")
+            },
+            "test": {
+                "num_examples": 11,
+                "checksum": compute_checksum("data/splits/test.jsonl")
+            }
+        },
+        "generation_config": {
+            "seed_examples": 12,
+            "variations_per_seed": 8,
+            "model": "gpt-4o-mini",
+            "temperature": 0.9,
+            "random_seed": 42
+        },
+        "format": "sharegpt"
+    }
+
+if __name__ == "__main__":
+    version_info = create_version_info("1.0.0")
+
+    # Save metadata
+    with open("data/hf_dataset/version.json", "w") as f:
+        json.dump(version_info, f, indent=2)
+
+    print("Version metadata:")
+    print(json.dumps(version_info, indent=2))
+
+
+Output:
+
+{
+  "version": "1.0.0",
+  "created_at": "2025-01-01T15:30:00Z",
+  "splits": {
+    "train": {
+      "num_examples": 84,
+      "checksum": "a1b2c3d4e5f6..."
+    },
+    "validation": {
+      "num_examples": 11,
+      "checksum": "f6e5d4c3b2a1..."
+    },
+    "test": {
+      "num_examples": 11,
+      "checksum": "1234567890ab..."
+    }
+  },
+  "generation_config": {
+    "seed_examples": 12,
+    "variations_per_seed": 8,
+    "model": "gpt-4o-mini",
+    "temperature": 0.9,
+    "random_seed": 42
+  },
+  "format": "sharegpt"
+}
+
+
+Verify Integrity
+
+When loading a dataset, verify its checksums:
+
+def verify_dataset_integrity(dataset_path: str) -> bool:
+    """Verify dataset hasn't been modified."""
+    version_path = Path(dataset_path) / "version.json"
+    with open(version_path) as f:
+        version_info = json.load(f)
+
+    for split_name, split_info in version_info["splits"].items():
+        # Load the split and compute checksum
+        split_path = f"data/splits/{split_name}.jsonl"
+        if split_name == "validation":
+            split_path = "data/splits/val.jsonl"
+
+        current_checksum = compute_checksum(split_path)
+        expected_checksum = split_info["checksum"]
+
+        if current_checksum != expected_checksum:
+            print(f"INTEGRITY FAILURE: {split_name} checksum mismatch")
+            return False
+
+    print("Dataset integrity verified")
+    return True
+
+Step 3: Create a Dataset Card​
+
+A dataset card is documentation that travels with your data. It answers: What is this? Where did it come from? How should it be used?
+
+HuggingFace has a standard format. Create data/hf_dataset/README.md:
+
+---
+language:
+  - en
+license: apache-2.0
+task_categories:
+  - text-generation
+  - conversational
+tags:
+  - task-management
+  - fine-tuning
+  - synthetic
+pretty_name: Task API Conversations
+size_categories:
+  - n<1K
+---
+
+# Task API Conversations Dataset
+
+## Dataset Description
+
+Training data for fine-tuning language models on Task API interactions. The dataset contains multi-turn conversations between users and an AI assistant that manages tasks.
+
+### Dataset Summary
+
+
+|
+ Attribute 
+|
+ Value 
+|
+
+
+|
+-----------
+|
+-------
+|
+
+
+|
+ Total examples 
+|
+ 106 
+|
+
+
+|
+ Training split 
+|
+ 84 
+|
+
+
+|
+ Validation split 
+|
+ 11 
+|
+
+
+|
+ Test split 
+|
+ 11 
+|
+
+
+|
+ Format 
+|
+ ShareGPT (conversations) 
+|
+
+
+|
+ Language 
+|
+ English 
+|
+
+
+|
+ Domain 
+|
+ Task management 
+|
+
+
+
+### Supported Tasks
+
+- **Instruction-following**: Model responds to task management requests
+- **Multi-turn conversation**: Model maintains context across turns
+- **Error handling**: Model gracefully handles invalid inputs
+
+### Languages
+
+English (en)
+
+## Dataset Structure
+
+### Data Format
+
+Each example contains a `conversations` array with alternating human/gpt messages:
+
+\`\`\`json
+{
+  "conversations": [
+    {"from": "human", "value": "Create a task for the budget review by Friday"},
+    {"from": "gpt", "value": "I'll create that. What priority - low, medium, or high?"},
+    {"from": "human", "value": "High priority"},
+    {"from": "gpt", "value": "Created task #1847 'Budget review' due Friday with high priority."}
+  ]
+}
+\`\`\`
+
+### Data Splits
+
+
+|
+ Split 
+|
+ Examples 
+|
+ Purpose 
+|
+
+
+|
+-------
+|
+----------
+|
+---------
+|
+
+
+|
+ train 
+|
+ 84 
+|
+ Model training 
+|
+
+
+|
+ validation 
+|
+ 11 
+|
+ Hyperparameter tuning 
+|
+
+
+|
+ test 
+|
+ 11 
+|
+ Final evaluation 
+|
+
+
+
+### Coverage
+
+The dataset covers these Task API operations:
+
+
+|
+ Operation 
+|
+ Scenarios 
+|
+
+
+|
+-----------
+|
+-----------
+|
+
+
+|
+ Create 
+|
+ Basic, missing info, invalid input 
+|
+
+
+|
+ Update 
+|
+ Status change, partial update, not found 
+|
+
+
+|
+ Complete 
+|
+ Normal completion, already complete 
+|
+
+
+|
+ Delete 
+|
+ With confirmation, active task handling 
+|
+
+
+|
+ Query 
+|
+ Filtered list, empty results 
+|
+
+
+
+## Dataset Creation
+
+### Generation Method
+
+**Synthetic generation using GPT-4o-mini**
+
+1. 12 seed examples written by domain experts
+2. 8 variations generated per seed
+3. Pydantic validation for format compliance
+4. Manual quality review
+
+### Seed Examples
+
+Seeds were designed to cover:
+- Multiple phrasing styles (formal, casual, terse, detailed)
+- Happy paths and error cases
+- Single-turn and multi-turn interactions
+- All CRUD operations
+
+### Quality Assurance
+
+- Schema validation with Pydantic
+- Duplicate detection
+- Manual review of 10% sample
+- Turn distribution analysis
+
+## Considerations for Using the Data
+
+### Intended Use
+
+- Fine-tuning instruction-following models for task management
+- Research on conversational AI for productivity applications
+- Benchmarking task-oriented dialogue systems
+
+### Limitations
+
+- **Synthetic data**: May not capture all real-world phrasing patterns
+- **English only**: Not suitable for multilingual applications
+- **Domain-specific**: Trained for task management, not general conversation
+- **Scale**: 106 examples is minimal; production use may need more
+
+### Bias and Fairness
+
+The dataset reflects:
+- Western business context (business hours, Western holidays)
+- Professional communication norms
+- Task management workflows common in tech companies
+
+Consider augmenting for other cultural contexts.
+
+## Additional Information
+
+### Version History
+
+
+|
+ Version 
+|
+ Date 
+|
+ Changes 
+|
+
+
+|
+---------
+|
+------
+|
+---------
+|
+
+
+|
+ 1.0.0 
+|
+ 2025-01-01 
+|
+ Initial release 
+|
+
+
+
+### Citation
+
+\`\`\`bibtex
+@dataset{task_api_conversations,
+  title={Task API Conversations Dataset},
+  author={Your Team},
+  year={2025},
+  version={1.0.0}
+}
+\`\`\`
+
+### License
+
+Apache 2.0
+
+### Contact
+
+[Your contact information]
+
+
+This dataset card provides everything someone needs to understand and use your data responsibly.
+
+Step 4: Implement Version Control Workflow​
+
+Now let's establish a workflow for managing dataset versions over time.
+
+Version Bump Script
+
+Create version_dataset.py:
+
+"""Manage dataset versions."""
+import json
+import shutil
+from pathlib import Path
+from datetime import datetime
+
+def bump_version(current: str, bump_type: str = "patch") -> str:
+    """Increment semantic version."""
+    major, minor, patch = map(int, current.split("."))
+
+    if bump_type == "major":
+        return f"{major + 1}.0.0"
+    elif bump_type == "minor":
+        return f"{major}.{minor + 1}.0"
+    else:  # patch
+        return f"{major}.{minor}.{patch + 1}"
+
+def archive_version(dataset_path: str, version: str):
+    """Archive current version before updating."""
+    archive_dir = Path("data/archives") / version
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy current dataset
+    shutil.copytree(dataset_path, archive_dir / "dataset", dirs_exist_ok=True)
+
+    # Copy source files
+    for split in ["train", "val", "test"]:
+        src = Path("data/splits") / f"{split}.jsonl"
+        if src.exists():
+            shutil.copy(src, archive_dir / f"{split}.jsonl")
+
+    print(f"Archived version {version} to {archive_dir}")
+
+def create_new_version(
+    dataset_path: str,
+    bump_type: str = "patch",
+    changelog: str = ""
+):
+    """Create a new version of the dataset."""
+    # Load current version
+    version_path = Path(dataset_path) / "version.json"
+    with open(version_path) as f:
+        version_info = json.load(f)
+
+    current_version = version_info["version"]
+
+    # Archive current
+    archive_version(dataset_path, current_version)
+
+    # Bump version
+    new_version = bump_version(current_version, bump_type)
+
+    # Update version info
+    version_info["version"] = new_version
+    version_info["created_at"] = datetime.utcnow().isoformat() + "Z"
+    version_info["changelog"] = changelog
+    version_info["previous_version"] = current_version
+
+    # Recalculate checksums
+    for split_name in version_info["splits"]:
+        split_file = f"data/splits/{split_name}.jsonl"
+        if split_name == "validation":
+            split_file = "data/splits/val.jsonl"
+        if Path(split_file).exists():
+            version_info["splits"][split_name]["checksum"] = compute_checksum(split_file)
+
+    # Save new version
+    with open(version_path, "w") as f:
+        json.dump(version_info, f, indent=2)
+
+    print(f"Created version {new_version}")
+    return new_version
+
+if __name__ == "__main__":
+    import sys
+
+    bump_type = sys.argv[1] if len(sys.argv) > 1 else "patch"
+    changelog = sys.argv[2] if len(sys.argv) > 2 else "Minor updates"
+
+    create_new_version("data/hf_dataset", bump_type, changelog)
+
+
+Output:
+
+python version_dataset.py minor "Added 20 new examples for recurring tasks"
+
+# Output:
+Archived version 1.0.0 to data/archives/1.0.0
+Created version 1.1.0
+
+Step 5: Reproducibility Practices​
+
+Reproducibility means someone else (or future you) can recreate exactly the same dataset.
+
+The Reproducibility Checklist
+
+Requirement	How We Meet It
+Fixed random seed	random_seed: 42 in version.json
+Model version pinned	model: gpt-4o-mini with date
+Checksums	SHA256 for each split
+Generation code	Saved in repository
+Seed examples	Included in dataset
+Parameters documented	Temperature, variations per seed
+
+Reproducibility Verification Script
+
+"""Verify dataset reproducibility."""
+import json
+from pathlib import Path
+
+def check_reproducibility(dataset_path: str) -> dict:
+    """Check that all reproducibility requirements are met."""
+    version_path = Path(dataset_path) / "version.json"
+    readme_path = Path(dataset_path) / "README.md"
+
+    results = {
+        "version_file": version_path.exists(),
+        "readme_file": readme_path.exists(),
+        "has_checksums": False,
+        "has_random_seed": False,
+        "has_model_info": False,
+        "has_generation_config": False
+    }
+
+    if results["version_file"]:
+        with open(version_path) as f:
+            version_info = json.load(f)
+
+        # Check for checksums
+        splits = version_info.get("splits", {})
+        results["has_checksums"] = all(
+            "checksum" in split for split in splits.values()
+        )
+
+        # Check generation config
+        gen_config = version_info.get("generation_config", {})
+        results["has_random_seed"] = "random_seed" in gen_config
+        results["has_model_info"] = "model" in gen_config
+        results["has_generation_config"] = bool(gen_config)
+
+    # Calculate score
+    passed = sum(results.values())
+    total = len(results)
+
+    print(f"Reproducibility check: {passed}/{total} requirements met")
+    for check, passed in results.items():
+        status = "PASS" if passed else "FAIL"
+        print(f"  [{status}] {check}")
+
+    return results
+
+if __name__ == "__main__":
+    check_reproducibility("data/hf_dataset")
+
+
+Output:
+
+Reproducibility check: 6/6 requirements met
+  [PASS] version_file
+  [PASS] readme_file
+  [PASS] has_checksums
+  [PASS] has_random_seed
+  [PASS] has_model_info
+  [PASS] has_generation_config
+
+The Complete Dataset Structure​
+
+After implementing versioning, your dataset directory looks like this:
+
+data/
+  hf_dataset/
+    README.md                 # Dataset card
+    version.json              # Version metadata
+    dataset_dict.json         # HuggingFace metadata
+    train/
+      data-00000-of-00001.arrow
+    validation/
+      data-00000-of-00001.arrow
+    test/
+      data-00000-of-00001.arrow
+
+  archives/
+    1.0.0/
+      dataset/                # Full dataset snapshot
+      train.jsonl
+      val.jsonl
+      test.jsonl
+
+  splits/
+    train.jsonl               # Current working files
+    val.jsonl
+    test.jsonl
+
+Common Mistakes​
+
+Mistake 1: Not documenting synthetic generation
+
+# Wrong - no provenance
+This dataset contains task management conversations.
+
+# Right - full provenance
+This dataset was synthetically generated using GPT-4o-mini.
+- 12 seed examples written by domain experts
+- 8 variations per seed (temperature=0.9)
+- Validated with Pydantic schemas
+
+
+Anyone using your data needs to know it's synthetic and how it was created.
+
+Mistake 2: Forgetting the test split
+
+# Wrong - only train/val
+dataset = DatasetDict({
+    "train": train,
+    "validation": val
+})
+
+# Right - include test for final evaluation
+dataset = DatasetDict({
+    "train": train,
+    "validation": val,
+    "test": test  # Never used during training
+})
+
+
+The test split must remain untouched until final evaluation. Using it during development invalidates your results.
+
+Mistake 3: Modifying data without version bump
+
+# Wrong - silently modify
+echo '{"conversations": [...]}' >> data/splits/train.jsonl
+
+# Right - version first
+python version_dataset.py patch "Added edge case examples"
+echo '{"conversations": [...]}' >> data/splits/train.jsonl
+
+
+Every data change needs a new version. Otherwise, you can't compare model performance across training runs.
+
+Try With AI​
+
+Now that you understand dataset versioning, explore these advanced topics with your AI partner.
+
+Prompt 1: Design Dataset Schema Evolution
+
+My Task API dataset is version 1.0. I want to add a new field 'tool_calls' to support
+fine-tuning for function calling:
+
+{
+  "conversations": [...],
+  "tool_calls": [{"name": "create_task", "arguments": {...}}]
+}
+
+How do I evolve my dataset schema while maintaining backward compatibility?
+What versioning strategy (major/minor/patch) is appropriate?
+Should I migrate existing examples or create a parallel dataset?
+
+
+What you're learning: Schema evolution is inevitable as requirements change. This prompt teaches you to think about backward compatibility and migration strategies - skills that transfer to any data management context.
+
+Prompt 2: Compare Versioning Approaches
+
+I'm choosing between three dataset versioning approaches:
+
+1. HuggingFace Hub (push to hub, use revisions)
+2. DVC (Data Version Control with Git)
+3. Manual versioning (what we built in this lesson)
+
+My constraints:
+- Team of 3 people
+- Private data (cannot be public)
+- Training happens on cloud (need remote access)
+- Want to compare models across dataset versions
+
+Which approach fits best? What are the trade-offs?
+
+
+What you're learning: There's no single "right" versioning system. This prompt helps you evaluate tools based on your actual constraints. The analysis skills transfer to any tooling decision.
+
+Prompt 3: Automate Quality Gates
+
+I want to prevent bad data from entering my dataset. Design a CI/CD pipeline that:
+
+1. Validates format (Pydantic schemas)
+2. Checks for duplicates
+3. Verifies minimum quality score
+4. Updates version automatically
+5. Generates dataset card updates
+
+Show me a GitHub Actions workflow that implements these quality gates.
+The pipeline should block merges that would degrade dataset quality.
+
+
+What you're learning: Manual processes don't scale. This prompt teaches you to think about automation and quality gates - essential skills for production ML systems. The CI/CD patterns apply beyond just datasets.
+
+Reflect on Your Skill​
+
+You built an llmops-data-engineer skill in Lesson 0. This lesson covered versioning and management - critical for any data engineering role.
+
+Test Your Skill​
+Using my llmops-data-engineer skill, help me set up dataset versioning.
+Does my skill include version control practices, dataset cards, and reproducibility?
+
+Identify Gaps​
+
+Consider:
+
+Did your skill mention HuggingFace Datasets format?
+Did it include dataset card requirements?
+Did it cover checksums and integrity verification?
+Did it address version history and archives?
+Improve Your Skill​
+
+If you found gaps:
+
+Update my llmops-data-engineer skill to include:
+1. HuggingFace Datasets format conversion
+2. Dataset card template (following HuggingFace standard)
+3. Version metadata with checksums
+4. Archive workflow for version history
+5. Reproducibility checklist
+
+
+Your skill should now guide you through the complete lifecycle from raw data to versioned, documented datasets ready for production fine-tuning.

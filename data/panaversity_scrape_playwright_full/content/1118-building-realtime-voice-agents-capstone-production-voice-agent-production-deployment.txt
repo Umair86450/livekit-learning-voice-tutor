@@ -1,0 +1,1038 @@
+Production Deployment & Operations
+
+Your voice-enabled Task Manager works. Users speak to it through browsers, call it on the phone, share their screens and create tasks with a single sentence. The implementation is complete. The integration tests pass.
+
+Now comes the question that separates tutorial projects from Digital FTEs: Can it run in production?
+
+Production is where 3 AM calls happen because Redis crashed. Where cost tracking reveals you are spending three times your budget. Where a provider outage takes down voice for all users. Where compliance violations trigger legal reviews.
+
+This lesson takes your working voice agent and makes it production-grade. You will deploy to Kubernetes with session persistence, configure observability that tracks what matters for voice systems, implement cost monitoring against your $0.03-0.07/min target, document compliance requirements, and design failover strategies that keep your voice agent running when providers fail.
+
+By the end, your specification will be fully validated. Every target you set in Lesson 1 will have a checkbox with evidence.
+
+Kubernetes Deployment Strategy​
+
+You learned Kubernetes patterns in Part 7. Now you apply them to voice workloads, which have unique requirements.
+
+Why Voice Deployments Are Different​
+
+Voice agents are not typical web services:
+
+Standard Web Service	Voice Agent
+Stateless requests	Stateful conversations (5-30 minutes)
+Scale on HTTP requests/sec	Scale on concurrent sessions
+200ms latency acceptable	800ms latency is the hard limit
+Pod restart is invisible	Pod restart drops active calls
+Memory footprint ~100MB	Memory footprint ~500MB-1GB (audio buffers)
+
+These differences demand specific deployment patterns.
+
+The Deployment Manifest​
+
+Here is the Kubernetes deployment for your voice agent:
+
+# voice-agent-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-agent
+  labels:
+    app: task-manager-voice
+    component: agent
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-manager-voice
+      component: agent
+  template:
+    metadata:
+      labels:
+        app: task-manager-voice
+        component: agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: voice-agent
+        image: your-registry/task-manager-voice:v1.0.0
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: LIVEKIT_URL
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: livekit-url
+        - name: LIVEKIT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: livekit-api-key
+        - name: LIVEKIT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: livekit-api-secret
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: redis-url
+        - name: DEEPGRAM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: deepgram-api-key
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: openai-api-key
+        - name: CARTESIA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: voice-secrets
+              key: cartesia-api-key
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: task-manager-voice
+              topologyKey: kubernetes.io/hostname
+
+
+Output:
+
+$ kubectl apply -f voice-agent-deployment.yaml
+deployment.apps/voice-agent created
+
+$ kubectl get pods -l app=task-manager-voice
+NAME                           READY   STATUS    RESTARTS   AGE
+voice-agent-6d8f9b7c44-abc12   1/1     Running   0          45s
+voice-agent-6d8f9b7c44-def34   1/1     Running   0          45s
+voice-agent-6d8f9b7c44-ghi56   1/1     Running   0          45s
+
+Key Deployment Decisions​
+
+Resource allocation: Voice agents process audio buffers in memory. The 512Mi-1Gi range handles typical conversations. Increase limits for agents that maintain long conversation histories.
+
+Pod anti-affinity: Spreading pods across nodes prevents a single node failure from taking down multiple voice sessions.
+
+Prometheus annotations: Voice metrics must be scraped for the observability stack you will build later in this lesson.
+
+Session Persistence​
+
+A voice conversation is stateful. If a pod restarts mid-conversation, the user should not have to repeat everything they said.
+
+Redis for Session State​
+# redis-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voice-redis
+  template:
+    metadata:
+      labels:
+        app: voice-redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - --appendonly
+        - "yes"
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+      volumes:
+      - name: redis-data
+        persistentVolumeClaim:
+          claimName: voice-redis-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: voice-redis
+spec:
+  selector:
+    app: voice-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+
+Session Persistence Implementation​
+
+Your voice agent persists session state on every turn:
+
+# session_persistence.py
+from redis import asyncio as aioredis
+from dataclasses import dataclass, asdict
+from typing import Optional
+import json
+from datetime import datetime
+
+@dataclass
+class VoiceSession:
+    """Serializable voice session state."""
+    session_id: str
+    user_id: Optional[str]
+    channel: str  # "browser", "phone", "screen_share"
+    conversation_history: list
+    current_agent: str
+    created_at: str
+    last_activity: str
+    context: dict
+
+class SessionPersistence:
+    """Redis-backed session persistence for voice agents."""
+
+    def __init__(self, redis_url: str):
+        self.redis = aioredis.from_url(redis_url)
+        self.session_ttl = 3600  # 1 hour
+        self.handoff_ttl = 300   # 5 minutes for handoff context
+
+    async def save_session(self, session: VoiceSession) -> None:
+        """Persist session state to Redis."""
+        key = f"voice:session:{session.session_id}"
+        session.last_activity = datetime.utcnow().isoformat()
+
+        await self.redis.setex(
+            key,
+            self.session_ttl,
+            json.dumps(asdict(session))
+        )
+
+    async def load_session(
+        self, session_id: str
+    ) -> Optional[VoiceSession]:
+        """Restore session from Redis."""
+        key = f"voice:session:{session_id}"
+        data = await self.redis.get(key)
+
+        if data:
+            return VoiceSession(**json.loads(data))
+        return None
+
+    async def extend_session(self, session_id: str) -> None:
+        """Extend TTL for active sessions."""
+        key = f"voice:session:{session_id}"
+        await self.redis.expire(key, self.session_ttl)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Clean up completed session."""
+        key = f"voice:session:{session_id}"
+        await self.redis.delete(key)
+
+
+Output:
+
+# Example session save/load
+>>> persistence = SessionPersistence("redis://voice-redis:6379")
+>>> session = VoiceSession(
+...     session_id="sess_abc123",
+...     user_id="user_456",
+...     channel="phone",
+...     conversation_history=[
+...         {"role": "user", "content": "Add a task to review the proposal"},
+...         {"role": "assistant", "content": "I've added 'Review the proposal' to your tasks."}
+...     ],
+...     current_agent="TaskAgent",
+...     created_at="2024-01-15T10:30:00Z",
+...     last_activity="2024-01-15T10:32:15Z",
+...     context={"phone_number": "+1555123456"}
+... )
+>>> await persistence.save_session(session)
+>>> restored = await persistence.load_session("sess_abc123")
+>>> restored.conversation_history
+[{'role': 'user', 'content': 'Add a task to review the proposal'}, ...]
+
+Reconnection Logic​
+
+When a pod restarts, the voice agent checks for existing sessions:
+
+async def on_session_connect(self, ctx: RunContext):
+    """Handle reconnection after pod restart."""
+    persistence = SessionPersistence(os.environ["REDIS_URL"])
+    existing = await persistence.load_session(ctx.session.id)
+
+    if existing:
+        # Restore conversation history
+        ctx.chat_history = existing.conversation_history
+
+        # Acknowledge reconnection naturally
+        await ctx.say(
+            "I'm back. We were discussing your task list. "
+            "Where were we?"
+        )
+    else:
+        # New session
+        await ctx.say("Hello! How can I help with your tasks today?")
+
+Horizontal Pod Autoscaling​
+
+Voice workloads scale with concurrent sessions, not HTTP requests per second.
+
+CPU-Based HPA Configuration​
+# voice-agent-hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: voice-agent-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: voice-agent
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 4
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 120
+
+
+Output:
+
+$ kubectl apply -f voice-agent-hpa.yaml
+horizontalpodautoscaler.autoscaling/voice-agent-hpa created
+
+$ kubectl get hpa voice-agent-hpa
+NAME              REFERENCE                TARGETS   MINPODS   MAXPODS   REPLICAS
+voice-agent-hpa   Deployment/voice-agent   35%/70%   2         20        3
+
+Why CPU-Based Scaling Works for Voice​
+
+Voice agents are CPU-bound during active conversations:
+
+STT processing (decoding audio)
+LLM inference coordination
+TTS synthesis coordination
+
+Memory usage is stable once the conversation starts. CPU spikes during turn transitions when all three components (STT, LLM, TTS) work sequentially.
+
+Scale-up behavior: Fast (60s stabilization). Voice demand can spike quickly during business hours.
+
+Scale-down behavior: Slow (300s stabilization). Avoid terminating pods with active sessions. The 25% per 2 minutes rate gives sessions time to complete naturally.
+
+Custom Metrics Alternative​
+
+For more precise scaling, expose a custom metric for concurrent sessions:
+
+# metrics.py
+from prometheus_client import Gauge
+
+active_sessions = Gauge(
+    'voice_agent_active_sessions',
+    'Number of active voice sessions on this pod'
+)
+
+# In your agent lifecycle
+async def on_session_start(self, ctx: RunContext):
+    active_sessions.inc()
+    # ... session logic
+
+async def on_session_end(self, ctx: RunContext):
+    active_sessions.dec()
+    # ... cleanup
+
+
+Then configure HPA to scale on this metric using the Prometheus adapter.
+
+Voice Observability Stack​
+
+Voice systems have metrics that web services do not. Latency matters at every stage. Cost accumulates with every minute of conversation. Quality degrades silently until users complain.
+
+Key Metrics for Voice Agents​
+# voice_metrics.py
+from prometheus_client import Histogram, Counter, Gauge
+import time
+
+# Latency metrics (in seconds)
+voice_latency = Histogram(
+    'voice_latency_seconds',
+    'End-to-end voice response latency',
+    ['channel'],  # browser, phone, screen_share
+    buckets=[0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0, 1.5, 2.0]
+)
+
+stt_duration = Histogram(
+    'voice_stt_duration_seconds',
+    'Speech-to-text processing time',
+    ['provider'],  # deepgram, whisper
+    buckets=[0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0]
+)
+
+llm_duration = Histogram(
+    'voice_llm_duration_seconds',
+    'LLM response generation time',
+    ['model'],  # gpt-4o-mini
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0, 2.0]
+)
+
+tts_duration = Histogram(
+    'voice_tts_duration_seconds',
+    'Text-to-speech synthesis time',
+    ['provider'],  # cartesia
+    buckets=[0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]
+)
+
+# Cost metrics (in USD)
+voice_cost_per_call = Histogram(
+    'voice_cost_per_call_usd',
+    'Total cost per voice call in USD',
+    ['channel'],
+    buckets=[0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20]
+)
+
+# Quality metrics
+transcription_errors = Counter(
+    'voice_transcription_errors_total',
+    'Number of STT transcription failures',
+    ['provider', 'error_type']
+)
+
+session_duration = Histogram(
+    'voice_session_duration_seconds',
+    'Duration of voice sessions',
+    ['channel', 'outcome'],  # outcome: completed, dropped, error
+    buckets=[30, 60, 120, 300, 600, 1200, 1800]
+)
+
+Metrics Collection in Voice Pipeline​
+
+Instrument your voice agent to collect these metrics:
+
+class InstrumentedVoiceAgent:
+    """Voice agent with production metrics."""
+
+    async def process_turn(
+        self, ctx: RunContext, user_audio: bytes
+    ) -> bytes:
+        """Process one conversation turn with full instrumentation."""
+        turn_start = time.time()
+        channel = ctx.session.metadata.get("channel", "unknown")
+
+        # STT
+        stt_start = time.time()
+        try:
+            transcript = await self.stt.transcribe(user_audio)
+            stt_duration.labels(provider="deepgram").observe(
+                time.time() - stt_start
+            )
+        except Exception as e:
+            transcription_errors.labels(
+                provider="deepgram",
+                error_type=type(e).__name__
+            ).inc()
+            raise
+
+        # LLM
+        llm_start = time.time()
+        response_text = await self.llm.generate(
+            transcript,
+            history=ctx.chat_history
+        )
+        llm_duration.labels(model="gpt-4o-mini").observe(
+            time.time() - llm_start
+        )
+
+        # TTS
+        tts_start = time.time()
+        response_audio = await self.tts.synthesize(response_text)
+        tts_duration.labels(provider="cartesia").observe(
+            time.time() - tts_start
+        )
+
+        # Record end-to-end latency
+        total_latency = time.time() - turn_start
+        voice_latency.labels(channel=channel).observe(total_latency)
+
+        return response_audio
+
+
+Output:
+
+# Prometheus query examples
+# P95 end-to-end latency
+histogram_quantile(0.95, rate(voice_latency_seconds_bucket[5m]))
+# Result: 0.72 (within 800ms target)
+
+# Average cost per call today
+sum(increase(voice_cost_per_call_usd_sum[24h])) /
+sum(increase(voice_cost_per_call_usd_count[24h]))
+# Result: 0.042 (within $0.03-0.07 target)
+
+# STT error rate
+rate(voice_transcription_errors_total[1h])
+# Result: 0.02 (2% error rate)
+
+Grafana Dashboard Design​
+
+Create a voice operations dashboard with these panels:
+
+Panel	Query	Purpose
+Latency P95	histogram_quantile(0.95, rate(voice_latency_seconds_bucket[5m]))	Track against 800ms target
+Latency Breakdown	STT + LLM + TTS duration stacked	Identify bottleneck component
+Cost Per Call	rate(voice_cost_per_call_usd_sum[1h]) / rate(voice_cost_per_call_usd_count[1h])	Track against $0.03-0.07 target
+Daily Cost	sum(increase(voice_cost_per_call_usd_sum[24h]))	Budget tracking
+Active Sessions	sum(voice_agent_active_sessions)	Capacity planning
+Error Rate	rate(voice_transcription_errors_total[5m])	Quality monitoring
+Session Outcomes	sum by (outcome)(increase(voice_session_duration_seconds_count[1h]))	Success tracking
+Alerting Configuration​
+# voice-alerts.yaml
+groups:
+- name: voice-agent-alerts
+  rules:
+  - alert: VoiceLatencyHigh
+    expr: histogram_quantile(0.95, rate(voice_latency_seconds_bucket[5m])) > 0.8
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Voice latency exceeds 800ms target"
+      description: "P95 latency is {{ $value | printf \"%.2f\" }}s"
+
+  - alert: VoiceLatencyCritical
+    expr: histogram_quantile(0.95, rate(voice_latency_seconds_bucket[5m])) > 1.0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Voice latency critically high"
+      description: "P95 latency is {{ $value | printf \"%.2f\" }}s - users experiencing delays"
+
+  - alert: VoiceCostExceeded
+    expr: |
+      (rate(voice_cost_per_call_usd_sum[1h]) /
+       rate(voice_cost_per_call_usd_count[1h])) > 0.10
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Voice cost per call exceeds $0.10"
+      description: "Average cost is ${{ $value | printf \"%.3f\" }} per call"
+
+  - alert: VoiceSTTErrorsHigh
+    expr: rate(voice_transcription_errors_total[15m]) > 0.05
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "STT error rate exceeds 5%"
+      description: "Transcription failures may affect user experience"
+
+Cost Monitoring & Optimization​
+
+Your specification targets $0.03-0.07 per minute. Every conversation must be tracked.
+
+Per-Call Cost Tracking​
+# cost_tracker.py
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class VoiceCost:
+    """Cost breakdown for a voice call."""
+    stt_cost: float
+    llm_cost: float
+    tts_cost: float
+    total_cost: float
+    duration_minutes: float
+    cost_per_minute: float
+
+class CostTracker:
+    """Track costs for voice conversations."""
+
+    # Provider pricing (as of spec)
+    STT_COST_PER_MINUTE = 0.0077   # Deepgram Nova-3
+    LLM_COST_PER_1K_TOKENS = 0.00015  # GPT-4o-mini input
+    LLM_OUTPUT_PER_1K_TOKENS = 0.0006  # GPT-4o-mini output
+    TTS_COST_PER_MINUTE = 0.024    # Cartesia Sonic-3
+
+    def __init__(self):
+        self.session_costs = {}
+
+    def track_stt(
+        self, session_id: str, audio_duration_seconds: float
+    ) -> float:
+        """Track STT cost for audio segment."""
+        minutes = audio_duration_seconds / 60
+        cost = minutes * self.STT_COST_PER_MINUTE
+
+        self._add_cost(session_id, "stt", cost)
+        return cost
+
+    def track_llm(
+        self,
+        session_id: str,
+        input_tokens: int,
+        output_tokens: int
+    ) -> float:
+        """Track LLM cost for generation."""
+        input_cost = (input_tokens / 1000) * self.LLM_COST_PER_1K_TOKENS
+        output_cost = (output_tokens / 1000) * self.LLM_OUTPUT_PER_1K_TOKENS
+        cost = input_cost + output_cost
+
+        self._add_cost(session_id, "llm", cost)
+        return cost
+
+    def track_tts(
+        self, session_id: str, audio_duration_seconds: float
+    ) -> float:
+        """Track TTS cost for synthesized audio."""
+        minutes = audio_duration_seconds / 60
+        cost = minutes * self.TTS_COST_PER_MINUTE
+
+        self._add_cost(session_id, "tts", cost)
+        return cost
+
+    def get_session_cost(self, session_id: str) -> VoiceCost:
+        """Get total cost for a session."""
+        costs = self.session_costs.get(session_id, {})
+        stt = costs.get("stt", 0)
+        llm = costs.get("llm", 0)
+        tts = costs.get("tts", 0)
+        total = stt + llm + tts
+        duration = costs.get("duration_minutes", 0)
+
+        return VoiceCost(
+            stt_cost=stt,
+            llm_cost=llm,
+            tts_cost=tts,
+            total_cost=total,
+            duration_minutes=duration,
+            cost_per_minute=total / duration if duration > 0 else 0
+        )
+
+    def _add_cost(
+        self, session_id: str, category: str, amount: float
+    ) -> None:
+        if session_id not in self.session_costs:
+            self.session_costs[session_id] = {}
+        current = self.session_costs[session_id].get(category, 0)
+        self.session_costs[session_id][category] = current + amount
+
+
+Output:
+
+>>> tracker = CostTracker()
+>>> session_id = "sess_abc123"
+
+# Track a 30-second STT transcription
+>>> tracker.track_stt(session_id, 30.0)
+0.00385
+
+# Track LLM generation (150 input tokens, 80 output tokens)
+>>> tracker.track_llm(session_id, 150, 80)
+0.0000705
+
+# Track 25 seconds of TTS output
+>>> tracker.track_tts(session_id, 25.0)
+0.01
+
+# Get session total
+>>> cost = tracker.get_session_cost(session_id)
+>>> print(f"Total: ${cost.total_cost:.4f}")
+Total: $0.0139
+
+>>> print(f"Cost/min: ${cost.cost_per_minute:.4f}")
+Cost/min: $0.0417  # Within $0.03-0.07 target
+
+Cost Optimization Strategies​
+
+When costs exceed targets, apply these optimizations:
+
+Strategy	Savings	Trade-off
+Shorter TTS responses	20-40% TTS cost	Less conversational feel
+Prompt optimization	15-30% LLM cost	Requires testing to maintain quality
+Response caching	50%+ for repeated queries	Stale responses for dynamic data
+Lower TTS quality	40% TTS cost	Perceptible audio quality reduction
+Batch STT	10-20% STT cost	Higher latency
+
+For your Task Manager, the most effective optimization is response caching. Task lists change infrequently. Cache the last response for "What are my tasks?" and invalidate when tasks change.
+
+Compliance & Recording​
+
+Voice agents that record calls must comply with privacy regulations.
+
+GDPR and CCPA Requirements​
+Requirement	GDPR (EU)	CCPA (California)
+Consent	Explicit opt-in required	Notification required, opt-out available
+Data retention	Minimize, document period	Document, honor deletion requests
+Access rights	Provide recordings on request	Provide recordings on request
+Deletion rights	Delete on request	Delete on request
+Cross-border transfer	Restricted, requires safeguards	Not restricted, but document
+Consent Flow Implementation​
+
+Browser channel: Consent modal before microphone access.
+
+Phone channel: Audio announcement at call start.
+
+class ConsentManager:
+    """Manage recording consent for voice calls."""
+
+    PHONE_CONSENT_ANNOUNCEMENT = (
+        "This call may be recorded for quality and training purposes. "
+        "Say 'stop recording' at any time to disable recording."
+    )
+
+    async def get_phone_consent(self, ctx: RunContext) -> bool:
+        """Announce recording and proceed (implied consent model)."""
+        await ctx.say(self.PHONE_CONSENT_ANNOUNCEMENT)
+        ctx.session.metadata["recording_announced"] = True
+        ctx.session.metadata["recording_enabled"] = True
+        return True
+
+    async def handle_stop_recording(self, ctx: RunContext) -> None:
+        """User requested recording stop."""
+        ctx.session.metadata["recording_enabled"] = False
+        await ctx.say(
+            "Recording has been stopped for this call. "
+            "How can I help you?"
+        )
+
+    def should_record(self, ctx: RunContext) -> bool:
+        """Check if recording is enabled for this session."""
+        return ctx.session.metadata.get("recording_enabled", False)
+
+Recording Storage Configuration​
+# recording-storage.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: voice-recording-config
+data:
+  RECORDING_ENABLED: "true"
+  RECORDING_STORAGE: "s3://voice-recordings-bucket"
+  RECORDING_RETENTION_DAYS: "90"
+  RECORDING_ENCRYPTION: "AES-256"
+  RECORDING_ACCESS_LOGGING: "true"
+
+
+Important: Store recordings encrypted. Log all access. Delete after retention period expires. Implement access controls so only authorized personnel can retrieve recordings.
+
+Failover & Resilience​
+
+Voice systems cannot silently fail. Users are on the phone. They notice immediately.
+
+Provider Failover Strategy​
+
+Your economy stack uses Deepgram, GPT-4o-mini, and Cartesia. Each can fail.
+
+class ResilientVoicePipeline:
+    """Voice pipeline with automatic failover."""
+
+    def __init__(self):
+        # Primary providers
+        self.primary_stt = DeepgramSTT()
+        self.primary_llm = OpenAILLM(model="gpt-4o-mini")
+        self.primary_tts = CartesiaTTS()
+
+        # Fallback providers
+        self.fallback_stt = WhisperSTT()  # OpenAI Whisper
+        self.fallback_llm = OpenAILLM(model="gpt-3.5-turbo")
+        self.fallback_tts = ElevenLabsTTS()
+
+    async def transcribe(self, audio: bytes) -> str:
+        """STT with automatic failover."""
+        try:
+            return await self.primary_stt.transcribe(audio)
+        except Exception as e:
+            logger.warning(f"Deepgram failed: {e}, falling back to Whisper")
+            stt_failover_counter.inc()
+            return await self.fallback_stt.transcribe(audio)
+
+    async def generate(self, prompt: str, history: list) -> str:
+        """LLM with automatic failover."""
+        try:
+            return await self.primary_llm.generate(prompt, history)
+        except Exception as e:
+            logger.warning(f"GPT-4o-mini failed: {e}, falling back to GPT-3.5")
+            llm_failover_counter.inc()
+            return await self.fallback_llm.generate(prompt, history)
+
+    async def synthesize(self, text: str) -> bytes:
+        """TTS with automatic failover."""
+        try:
+            return await self.primary_tts.synthesize(text)
+        except Exception as e:
+            logger.warning(f"Cartesia failed: {e}, falling back to ElevenLabs")
+            tts_failover_counter.inc()
+            return await self.fallback_tts.synthesize(text)
+
+Regional Failover​
+
+For 99.5% availability, deploy to multiple regions:
+
+Primary Region (us-east-1)
+├── Voice Agent Pods (3 replicas)
+├── Redis (primary)
+└── LiveKit Server
+
+Failover Region (us-west-2)
+├── Voice Agent Pods (2 replicas, standby)
+├── Redis (replica)
+└── LiveKit Server
+
+DNS Failover
+├── Health checks on primary
+└── Automatic failover to secondary on failure
+
+Graceful Degradation​
+
+When voice fails completely, offer text fallback:
+
+async def handle_complete_failure(self, ctx: RunContext, error: Exception):
+    """Graceful degradation when voice pipeline fails."""
+    logger.error(f"Complete voice pipeline failure: {error}")
+
+    # Attempt text-only response
+    try:
+        # Send SMS for phone users
+        if ctx.session.metadata.get("channel") == "phone":
+            phone = ctx.session.metadata.get("phone_number")
+            await send_sms(
+                phone,
+                "We're experiencing technical difficulties with voice. "
+                "Please text this number or try again in a few minutes."
+            )
+
+        # Show text interface for browser users
+        elif ctx.session.metadata.get("channel") == "browser":
+            await ctx.send_ui_message({
+                "type": "fallback_to_text",
+                "message": "Voice is temporarily unavailable. "
+                          "You can type your request below."
+            })
+
+    except Exception as fallback_error:
+        logger.error(f"Fallback also failed: {fallback_error}")
+        # At this point, alert on-call engineer
+        await page_oncall("Voice and fallback both failed", error)
+
+Incident Runbook Outline​
+
+Document these scenarios for your operations team:
+
+Deepgram Outage: Symptoms, detection, failover to Whisper, cost impact
+Cartesia Outage: Symptoms, detection, failover to ElevenLabs, latency impact
+Redis Failure: Session persistence impact, recovery procedure
+LiveKit Outage: All voice fails, escalation path
+Regional Outage: DNS failover procedure, data sync verification
+Production Validation​
+
+Your specification defined success criteria. Now validate each one.
+
+Final Checklist​
+Criterion	Target	Validation Method	Status
+P95 Latency	Sub-800ms	Prometheus query over 24 hours	[ ]
+Cost Per Minute	$0.03-0.07	Cost tracker aggregate	[ ]
+Browser Channel	Working	Manual test: create task via browser	[ ]
+Phone Channel	Working	Manual test: call number, create task	[ ]
+Screen Share	Working	Manual test: share screen, create task from visual	[ ]
+Session Persistence	Pod restart survives	Kill pod during call, verify reconnection	[ ]
+Monitoring Active	Grafana dashboard	Verify all panels populated	[ ]
+Alerting Active	Alerts firing	Trigger test alert, verify notification	[ ]
+Failover Tested	Provider failover works	Simulate Deepgram failure, verify Whisper takes over	[ ]
+Compliance Documented	GDPR/CCPA ready	Review consent flows, retention policy	[ ]
+Validation Commands​
+# Check P95 latency
+kubectl exec -it prometheus-0 -- promtool query instant \
+  'histogram_quantile(0.95, rate(voice_latency_seconds_bucket[24h]))'
+
+# Check deployment health
+kubectl get pods -l app=task-manager-voice
+kubectl get hpa voice-agent-hpa
+
+# Check Redis sessions
+kubectl exec -it voice-redis-0 -- redis-cli keys "voice:session:*" | wc -l
+
+# Verify metrics endpoint
+kubectl port-forward svc/voice-agent 9090:9090
+curl localhost:9090/metrics | grep voice_latency
+
+
+Output:
+
+$ kubectl get pods -l app=task-manager-voice
+NAME                           READY   STATUS    RESTARTS   AGE
+voice-agent-6d8f9b7c44-abc12   1/1     Running   0          2h
+voice-agent-6d8f9b7c44-def34   1/1     Running   0          2h
+voice-agent-6d8f9b7c44-ghi56   1/1     Running   0          2h
+
+$ kubectl get hpa voice-agent-hpa
+NAME              REFERENCE                TARGETS   MINPODS   MAXPODS   REPLICAS
+voice-agent-hpa   Deployment/voice-agent   42%/70%   2         20        3
+
+# P95 latency check
+$ promtool query instant 'histogram_quantile(0.95, ...)'
+0.72  # Under 800ms target
+
+Sign-Off​
+
+When all checklist items pass:
+
+Document final configuration in your repository
+Update spec.md with "Validated: [date]" annotation
+Archive production metrics baseline for future comparison
+Notify stakeholders: "Voice-enabled Task Manager is production-ready"
+
+Your voice-enabled Task Manager is now a validated Digital FTE component.
+
+Try With AI​
+
+Use your accumulated skills to finalize production deployment.
+
+Prompt 1: Generate Production Kubernetes Manifests​
+Using my livekit-agents skill and Part 7 Kubernetes knowledge,
+generate complete production manifests for my voice agent:
+
+Requirements from my spec:
+- 2-20 replicas based on CPU utilization (70% target)
+- Redis for session persistence with 1-hour TTL
+- Prometheus metrics exposure on port 9090
+- Health checks: /health/live (liveness), /health/ready (readiness)
+- Secrets for: LIVEKIT_*, DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY
+- Pod anti-affinity to spread across nodes
+
+My cluster: GKE with 3 nodes, each n2-standard-4
+
+Generate:
+1. Deployment manifest
+2. Service manifest
+3. HPA manifest
+4. Redis deployment and service
+5. Secret template (placeholder values)
+
+I'll customize and apply these to my cluster.
+
+
+What you're learning: Production manifest generation - translating requirements into declarative Kubernetes configuration.
+
+Prompt 2: Design the Voice Observability Dashboard​
+I need a Grafana dashboard for monitoring my production voice agent.
+
+Metrics I'm exposing:
+- voice_latency_seconds (histogram, labels: channel)
+- voice_stt_duration_seconds (histogram, labels: provider)
+- voice_llm_duration_seconds (histogram, labels: model)
+- voice_tts_duration_seconds (histogram, labels: provider)
+- voice_cost_per_call_usd (histogram, labels: channel)
+- voice_transcription_errors_total (counter, labels: provider, error_type)
+- voice_session_duration_seconds (histogram, labels: channel, outcome)
+- voice_agent_active_sessions (gauge)
+
+Design a dashboard with:
+1. Top row: Key metrics (P95 latency, cost/call, active sessions, error rate)
+2. Second row: Latency breakdown (STT + LLM + TTS stacked)
+3. Third row: Cost analysis (daily cost, cost by channel, cost trend)
+4. Fourth row: Session analysis (outcomes, duration distribution)
+
+For each panel, provide:
+- Panel title
+- Prometheus query
+- Visualization type (stat, graph, bar chart)
+- Thresholds (for stat panels)
+
+I'll create this in my Grafana instance.
+
+
+What you're learning: Voice observability design - choosing metrics that reveal production health for voice-specific workloads.
+
+Prompt 3: Plan Provider Failover Strategy​
+My voice agent uses this economy stack:
+- STT: Deepgram Nova-3 ($0.0077/min)
+- LLM: GPT-4o-mini
+- TTS: Cartesia Sonic-3 ($0.024/min)
+
+I need failover plans for each provider failure:
+
+For each scenario, document:
+1. Detection: How do I know the provider is down?
+2. Failover: What's the backup provider?
+3. Cost impact: How much more does failover cost?
+4. Latency impact: How much slower is failover?
+5. Recovery: How do I return to primary when it's back?
+6. User experience: What do users notice during failover?
+
+Scenarios:
+- Deepgram is down (API returns 503)
+- Cartesia is down (timeout after 5s)
+- OpenAI is rate-limited (429 errors)
+- AWS us-east-1 is down (regional outage)
+
+This will go into my operations runbook.
+
+
+What you're learning: Resilience engineering for voice - planning for failure modes specific to real-time audio processing.
+
+Safety Note​
+
+Production voice systems handle real user conversations. Before deploying:
+
+Test failover scenarios in staging first
+Verify session persistence survives intentional pod kills
+Confirm consent flows are legally reviewed for your jurisdictions
+Set up on-call rotation before going live
+Monitor cost closely in the first week to catch unexpected patterns

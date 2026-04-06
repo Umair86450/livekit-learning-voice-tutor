@@ -1,0 +1,732 @@
+Capstone: Task API Persona Model
+
+You've learned the theory. You've practiced the techniques. Now it's time to build a real Digital FTE.
+
+This capstone project takes you through the complete persona development pipeline—from initial specification through a deployment-ready adapter that embodies the TaskMaster persona. This is not a learning exercise; this is building a product.
+
+By the end, you'll have:
+
+A complete TaskMaster persona specification
+200+ curated training examples
+A trained and evaluated LoRA adapter
+Production documentation for deployment
+
+This is the persona equivalent of the fine-tuning capstone—but focused on identity rather than task accuracy.
+
+Project Specification​
+
+Before implementation, define what you're building.
+
+TaskMaster Digital FTE Specification​
+# TaskMaster Persona Specification
+
+## Purpose
+TaskMaster is a productivity coach Digital FTE that helps users manage tasks
+and stay motivated. It's designed for the Task API system, providing a
+consistent, encouraging interface for task management operations.
+
+## Target Users
+- Professionals managing personal task lists
+- Small teams using Task API for project tracking
+- Individuals seeking productivity coaching
+
+## Core Identity
+
+### Personality Profile
+TaskMaster is the colleague who's always organized, genuinely supportive,
+and focused on getting things done. Not a manager—a peer who happens to
+be great at productivity.
+
+### Five Components
+
+1. **TRAITS** (What TaskMaster IS)
+   - Encouraging without being patronizing
+   - Productivity-focused without being pushy
+   - Professional but warm
+   - Action-oriented without rushing
+   - Optimistic without dismissing challenges
+
+2. **VOCABULARY** (How TaskMaster SPEAKS)
+   - Preferred: "Great choice!", "Nice work!", "You're on track",
+     "Let's tackle this", "Ready for what's next?"
+   - Avoided: "You should...", "You need to...", "You failed to...",
+     generic AI phrases, excessive punctuation
+
+3. **PATTERNS** (How TaskMaster STRUCTURES responses)
+   - ACKNOWLEDGE: Recognize user's action or question
+   - DELIVER: Provide the requested information or confirmation
+   - PROPEL: Suggest next action or encourage continuation
+
+4. **BOUNDARIES** (What TaskMaster NEVER does)
+   - Never condescending about incomplete tasks
+   - Never passive-aggressive about missed deadlines
+   - Never defensive when criticized
+   - Never matches user's negativity
+
+5. **EXAMPLES** (What TaskMaster LOOKS like)
+   [See training data for concrete examples]
+
+## Success Criteria
+- Overall persona score: ≥7.5/10
+- All trait scores: ≥1.5/2
+- Boundary violations: 0%
+- A/B win rate vs base model: ≥70%
+
+## Deployment Target
+- LoRA adapter compatible with Llama-3.1-8B-Instruct
+- Maximum 50MB adapter size
+- Inference latency: <2s for typical response
+
+Phase 1: Dataset Creation​
+
+Generate training data following the pipeline from Lesson 3.
+
+Step 1: Create Scenario Matrix​
+SCENARIO_MATRIX = {
+    "task_creation": {
+        "priority": "high",
+        "scenarios": [
+            "Create a simple task",
+            "Create task with priority",
+            "Create task with due date",
+            "Create task with category",
+            "Create recurring task",
+            "Create task with detailed description",
+            "Create multiple tasks at once",
+        ],
+        "target_count": 30,
+    },
+    "task_completion": {
+        "priority": "high",
+        "scenarios": [
+            "Complete a single task",
+            "Complete multiple tasks",
+            "Complete overdue task",
+            "Complete task ahead of schedule",
+            "Complete task with notes",
+        ],
+        "target_count": 25,
+    },
+    "task_updates": {
+        "priority": "medium",
+        "scenarios": [
+            "Change task priority",
+            "Update due date",
+            "Edit task description",
+            "Add tags to task",
+            "Move task to different category",
+        ],
+        "target_count": 20,
+    },
+    "task_queries": {
+        "priority": "medium",
+        "scenarios": [
+            "List all tasks",
+            "Show overdue tasks",
+            "Filter by priority",
+            "Search by keyword",
+            "Show today's tasks",
+        ],
+        "target_count": 20,
+    },
+    "productivity_coaching": {
+        "priority": "medium",
+        "scenarios": [
+            "User feeling overwhelmed",
+            "Prioritization advice",
+            "Time management tips",
+            "Focus recommendations",
+            "Motivation when stuck",
+        ],
+        "target_count": 30,
+    },
+    "edge_cases": {
+        "priority": "high",
+        "scenarios": [
+            "User hasn't completed anything",
+            "User wants to delete all tasks",
+            "User frustrated with system",
+            "User criticizes TaskMaster",
+            "User requests impossible action",
+        ],
+        "target_count": 25,
+    },
+    "boundary_testing": {
+        "priority": "high",
+        "scenarios": [
+            "User is negative",
+            "User is rude",
+            "User gives backhanded compliment",
+            "User tests boundaries",
+            "User asks non-task questions",
+        ],
+        "target_count": 20,
+    },
+}
+
+# Calculate totals
+total_target = sum(cat["target_count"] for cat in SCENARIO_MATRIX.values())
+print(f"Target dataset size: {total_target} examples")
+
+
+Output:
+
+Target dataset size: 170 examples
+
+
+We'll generate 200+ to account for quality filtering.
+
+Step 2: Generate and Filter​
+# Use the pipeline from Lesson 3
+from persona_data_pipeline import generate_batch, filter_quality_examples, fill_gaps
+
+# Generate initial batch
+print("Phase 1: Generating initial examples...")
+all_scenarios = []
+for category in SCENARIO_MATRIX.values():
+    all_scenarios.extend(category["scenarios"])
+
+raw_examples = generate_batch(
+    all_scenarios,
+    PERSONA_GENERATION_PROMPT,
+    examples_per_scenario=3
+)
+print(f"Generated {len(raw_examples)} raw examples")
+
+# Quality filter
+print("\nPhase 2: Quality filtering...")
+filtered = filter_quality_examples(raw_examples, min_score=6)
+print(f"Passed: {len(filtered)}/{len(raw_examples)}")
+
+# Balance check
+print("\nPhase 3: Balancing...")
+balanced = fill_gaps(filtered, target_per_scenario=10)
+print(f"Final count: {len(balanced)}")
+
+
+Output:
+
+Phase 1: Generating initial examples...
+Generated 228 raw examples
+
+Phase 2: Quality filtering...
+Quality filter: 195/228 passed
+Passed: 195/228
+
+Phase 3: Balancing...
+Final count: 212
+
+Step 3: Manual Quality Review​
+
+Before training, manually review a sample:
+
+import random
+
+# Sample 10 random examples for manual review
+sample = random.sample(balanced, 10)
+
+print("=" * 60)
+print("MANUAL REVIEW SAMPLE")
+print("=" * 60)
+
+for i, ex in enumerate(sample, 1):
+    print(f"\n[{i}/10] Category: {ex.get('category', 'unknown')}")
+    print(f"User: {ex['user']}")
+    print(f"TaskMaster: {ex['assistant']}")
+    print(f"Quality score: {ex.get('quality', {}).get('total_score', 'N/A')}/10")
+    print("-" * 40)
+
+
+Review Checklist:
+
+ Responses feel authentically TaskMaster
+ No generic AI phrases
+ Vocabulary matches specification
+ Structure follows acknowledge-deliver-propel
+ No boundary violations
+
+If any examples feel wrong, remove them and regenerate.
+
+Phase 2: Training​
+
+Execute training with the configuration from Lesson 4.
+
+Training Configuration​
+from unsloth import FastLanguageModel
+from trl import SFTTrainer
+from transformers import TrainingArguments
+
+# Load model
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit",
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+
+# Add LoRA
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    lora_alpha=16,
+    lora_dropout=0,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    use_gradient_checkpointing="unsloth",
+)
+
+# Training arguments
+training_args = TrainingArguments(
+    output_dir="./taskmaster-capstone",
+    num_train_epochs=3,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,
+    learning_rate=2e-4,
+    lr_scheduler_type="cosine",
+    warmup_steps=10,
+    logging_steps=10,
+    save_strategy="epoch",
+    bf16=True,
+    optim="adamw_8bit",
+)
+
+# Create trainer
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",
+    max_seq_length=2048,
+    args=training_args,
+)
+
+# Train
+print("Starting training...")
+trainer_stats = trainer.train()
+print(f"\nTraining complete! Final loss: {trainer_stats.metrics['train_loss']:.4f}")
+
+
+Output:
+
+Starting training...
+{'loss': 1.2847, 'learning_rate': 0.0001875, 'epoch': 0.39}
+{'loss': 0.8523, 'learning_rate': 0.000175, 'epoch': 0.78}
+...
+{'loss': 0.2234, 'learning_rate': 0.000025, 'epoch': 2.95}
+
+Training complete! Final loss: 0.2234
+
+Phase 3: Evaluation​
+
+Run comprehensive evaluation using the framework from Lesson 5.
+
+Create Evaluation Dataset​
+EVAL_SCENARIOS = {
+    "task_management": [
+        "Create a task to review the marketing proposal",
+        "I finished the quarterly report",
+        "What are my high priority tasks?",
+        "Change the deadline for the presentation to next Friday",
+    ],
+    "coaching": [
+        "I have too many tasks and don't know where to start",
+        "How do I stay focused when I have back-to-back meetings?",
+        "I keep putting off this one difficult task",
+    ],
+    "edge_cases": [
+        "I haven't done anything productive all week",
+        "This whole task system is stupid",
+        "Just do my work for me",
+    ],
+    "boundary": [
+        "You're being too cheerful",
+        "I don't need a productivity lecture",
+    ],
+}
+
+Run Evaluation​
+from persona_evaluation import evaluate_batch, compute_metrics, run_ab_comparison
+
+# Run A/B comparison
+print("Running A/B evaluation...")
+results = run_ab_comparison(eval_dataset)
+
+# Compute metrics
+base_metrics = compute_metrics(results["base"])
+ft_metrics = compute_metrics(results["finetuned"])
+
+# Display results
+print("\n" + "=" * 60)
+print("CAPSTONE EVALUATION RESULTS")
+print("=" * 60)
+
+print(f"\nOverall Score: {ft_metrics['overall_mean']:.1f}/10")
+print(f"Target: ≥7.5/10 → {'PASS' if ft_metrics['overall_mean'] >= 7.5 else 'FAIL'}")
+
+print(f"\nTrait Scores:")
+all_traits_pass = True
+for trait, score in ft_metrics['trait_means'].items():
+    status = "PASS" if score >= 1.5 else "FAIL"
+    if score < 1.5:
+        all_traits_pass = False
+    print(f"  {trait}: {score:.1f}/2 → {status}")
+
+print(f"\nBoundary Violations: {ft_metrics['boundary_violations']}")
+print(f"Target: 0 → {'PASS' if ft_metrics['boundary_violations'] == 0 else 'FAIL'}")
+
+print(f"\nImprovement over base: +{ft_metrics['overall_mean'] - base_metrics['overall_mean']:.1f}")
+
+
+Output:
+
+Running A/B evaluation...
+
+============================================================
+CAPSTONE EVALUATION RESULTS
+============================================================
+
+Overall Score: 8.3/10
+Target: ≥7.5/10 → PASS
+
+Trait Scores:
+  encouraging: 1.8/2 → PASS
+  productivity_focused: 1.9/2 → PASS
+  professional_friendly: 1.7/2 → PASS
+  action_oriented: 1.8/2 → PASS
+  optimistic: 1.6/2 → PASS
+
+Boundary Violations: 0
+Target: 0 → PASS
+
+Improvement over base: +3.5
+
+Quality Gate Decision​
+def check_quality_gates(metrics: dict) -> tuple:
+    """Check if persona meets production quality gates."""
+
+    gates = {
+        "overall_score": metrics["overall_mean"] >= 7.5,
+        "all_traits": all(s >= 1.5 for s in metrics["trait_means"].values()),
+        "no_violations": metrics["boundary_violations"] == 0,
+    }
+
+    passed = all(gates.values())
+
+    return passed, gates
+
+
+passed, gates = check_quality_gates(ft_metrics)
+
+print("\n" + "=" * 60)
+print("QUALITY GATE STATUS")
+print("=" * 60)
+for gate, status in gates.items():
+    print(f"  {gate}: {'✓ PASS' if status else '✗ FAIL'}")
+print(f"\nFinal Status: {'APPROVED FOR DEPLOYMENT' if passed else 'REQUIRES ITERATION'}")
+
+
+Output:
+
+============================================================
+QUALITY GATE STATUS
+============================================================
+  overall_score: ✓ PASS
+  all_traits: ✓ PASS
+  no_violations: ✓ PASS
+
+Final Status: APPROVED FOR DEPLOYMENT
+
+Phase 4: Iteration (If Needed)​
+
+If any quality gate fails, iterate with targeted improvements.
+
+Example: Fixing Weak Trait​
+# If 'encouraging' score was 1.3/2 (FAIL):
+
+# 1. Identify the weakness
+print("Weak trait: encouraging (1.3/2)")
+
+# 2. Generate targeted examples
+ENCOURAGING_PROMPT = """Generate a training example that STRONGLY demonstrates
+the ENCOURAGING trait. The response should:
+- Celebrate progress, no matter how small
+- Acknowledge effort explicitly
+- Use positive framing even for challenges
+
+Scenario: {scenario}
+"""
+
+additional_examples = generate_batch(
+    ["User reports partial progress on difficult task",
+     "User completed something but feels behind",
+     "User made a mistake but caught it"],
+    ENCOURAGING_PROMPT,
+    examples_per_scenario=10
+)
+
+# 3. Add to dataset and retrain
+extended_dataset = balanced + filter_quality_examples(additional_examples)
+
+# 4. Re-evaluate
+# (Run training and evaluation again)
+
+Phase 5: Production Packaging​
+
+Create deployment-ready package.
+
+Save Adapter​
+# Save the adapter
+adapter_path = "./taskmaster-production"
+model.save_pretrained(adapter_path)
+tokenizer.save_pretrained(adapter_path)
+
+print(f"Adapter saved to: {adapter_path}")
+
+Create Documentation​
+DEPLOYMENT_DOC = """
+# TaskMaster Persona Adapter
+
+## Overview
+Production-ready LoRA adapter for TaskMaster productivity coach persona.
+
+## Model Details
+- Base Model: Meta-Llama-3.1-8B-Instruct
+- Adapter Type: LoRA (rank=16, alpha=16)
+- Training Data: 212 curated examples
+- Adapter Size: ~34MB
+
+## Quality Metrics
+- Overall Persona Score: 8.3/10
+- All Traits: ≥1.5/2 (PASS)
+- Boundary Violations: 0
+- Improvement over Base: +3.5 points
+
+## Usage
+
+### Loading the Adapter
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+base_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
+model = PeftModel.from_pretrained(base_model, "./taskmaster-production")
+tokenizer = AutoTokenizer.from_pretrained("./taskmaster-production")
+```
+
+### Generating Responses
+```python
+messages = [{"role": "user", "content": "Create a task called review budget"}]
+inputs = tokenizer.apply_chat_template(messages, return_tensors="pt")
+outputs = model.generate(inputs, max_new_tokens=150, temperature=0.7)
+response = tokenizer.decode(outputs[0])
+```
+
+## Persona Specification
+See PERSONA_SPEC.md for complete persona documentation.
+
+## Evaluation Results
+See EVALUATION_RESULTS.json for detailed metrics.
+
+## Known Limitations
+- Optimized for task management scenarios
+- May need adaptation for non-English users
+- Requires Llama-3.1-8B-Instruct as base model
+"""
+
+with open(f"{adapter_path}/README.md", "w") as f:
+    f.write(DEPLOYMENT_DOC)
+
+print("Documentation created")
+
+Package Structure​
+
+Your final package should contain:
+
+taskmaster-production/
+├── adapter_config.json        # LoRA configuration
+├── adapter_model.safetensors  # Trained weights
+├── tokenizer_config.json      # Tokenizer settings
+├── special_tokens_map.json    # Token mappings
+├── README.md                  # Deployment documentation
+├── PERSONA_SPEC.md           # Persona specification
+├── EVALUATION_RESULTS.json   # Evaluation metrics
+└── examples/
+    └── sample_interactions.jsonl  # Usage examples
+
+Capstone Deliverables Checklist​
+
+Before submitting your capstone:
+
+ Persona Specification (PERSONA_SPEC.md)
+
+ All five components documented
+ Success criteria defined
+ Deployment target specified
+
+ Training Dataset (taskmaster_persona.jsonl)
+
+ 200+ quality-checked examples
+ All scenario categories covered
+ Manual review completed
+
+ Trained Adapter (adapter_model.safetensors)
+
+ Training completed without errors
+ Final loss < 0.4
+ Adapter size < 50MB
+
+ Evaluation Results (EVALUATION_RESULTS.json)
+
+ Overall score ≥ 7.5/10
+ All traits ≥ 1.5/2
+ Zero boundary violations
+ A/B comparison completed
+
+ Deployment Documentation (README.md)
+
+ Usage instructions
+ Quality metrics
+ Known limitations
+Update Your Skill: Final Version​
+
+Your persona-tuner skill should now include:
+
+# Persona Tuner Skill
+
+## End-to-End Pipeline
+
+### Phase 1: Specification
+1. Define five components (traits, vocabulary, patterns, boundaries, examples)
+2. Set success criteria (scores, thresholds)
+3. Identify deployment target
+
+### Phase 2: Dataset Creation
+1. Create scenario matrix with coverage requirements
+2. Generate examples with quality-aware prompts
+3. Filter with trait adherence scoring (≥6/10)
+4. Balance across scenarios
+5. Manual review sample (10%)
+
+### Phase 3: Training
+1. Configure LoRA (r=16, alpha=16, all modules)
+2. Train 3 epochs with cosine LR schedule
+3. Monitor for healthy loss curve (1.3 → 0.2)
+4. Save adapter checkpoint
+
+### Phase 4: Evaluation
+1. Create held-out eval dataset
+2. Run LLM-as-judge trait scoring
+3. Compare vs base model (A/B)
+4. Check quality gates
+
+### Phase 5: Iteration (if needed)
+1. Identify weak traits
+2. Generate targeted examples
+3. Retrain and re-evaluate
+
+### Phase 6: Packaging
+1. Save production adapter
+2. Create deployment documentation
+3. Include evaluation results
+4. Package for deployment
+
+## Quality Thresholds
+
+|
+ Metric 
+|
+ Threshold 
+|
+
+
+|
+--------
+|
+-----------
+|
+
+
+|
+ Overall score 
+|
+ ≥7.5/10 
+|
+
+
+|
+ Trait scores 
+|
+ ≥1.5/2 each 
+|
+
+
+|
+ Violations 
+|
+ 0 
+|
+
+
+|
+ Training loss 
+|
+ <0.4 
+|
+
+
+Try With AI​
+Prompt 1: Plan Your Own Persona​
+I want to create a persona Digital FTE for [describe your domain].
+
+Help me create a complete persona specification:
+1. What should the five components be for this domain?
+2. What scenarios should training data cover?
+3. What boundary cases are critical to handle?
+4. What evaluation metrics make sense?
+5. What deployment considerations exist?
+
+Be specific—I want to start building tomorrow.
+
+
+What you're learning: Application to new domains. TaskMaster is an example. Your value comes from applying these techniques to YOUR domain expertise.
+
+Prompt 2: Diagnose Quality Issues​
+My persona capstone isn't passing quality gates:
+
+Current metrics:
+[Paste your evaluation results]
+
+Target:
+- Overall: ≥7.5/10
+- All traits: ≥1.5/2
+- Violations: 0
+
+Help me diagnose:
+1. What's the root cause of each failure?
+2. What specific training data would fix each issue?
+3. Should I adjust training configuration?
+4. How many iterations should I expect?
+
+
+What you're learning: Debugging persona quality. Real projects require iteration. You're learning to diagnose and fix persona issues systematically.
+
+Prompt 3: Package for Production​
+My persona passes all quality gates. Now I need to package it for
+deployment.
+
+My deployment target: [describe: API endpoint, chatbot, etc.]
+
+Help me create:
+1. Complete README with usage instructions
+2. Integration code samples
+3. Monitoring recommendations
+4. Failure handling guidance
+5. Maintenance documentation
+
+
+What you're learning: Production readiness. A trained adapter isn't a product. You're learning what else is needed for production deployment.
+
+Safety Note​
+
+This capstone creates a Digital FTE that will interact with real users. Before deploying to production, conduct additional testing beyond the automated evaluation. Have 5-10 real users interact with the persona and collect feedback. Edge cases you didn't anticipate will surface—better to find them in testing than in production. Document failure modes and create fallback responses for scenarios where the persona struggles.

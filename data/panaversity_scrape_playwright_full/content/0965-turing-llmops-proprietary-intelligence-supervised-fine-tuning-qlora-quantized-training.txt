@@ -1,0 +1,364 @@
+QLoRA: Quantized Training
+
+LoRA reduces the number of trainable parameters by 99%. QLoRA goes further by reducing the memory needed to store the frozen base model. Together, they enable fine-tuning of 7-8B parameter models on a free Colab T4 GPU with just 15GB VRAM.
+
+The key insight is that the frozen weights do not need high precision. They are not being updated, just used for forward passes. By storing them in 4-bit instead of 16-bit format, you immediately cut memory by 4x.
+
+This lesson explains how quantization works, why NF4 is the optimal format, and how to configure your training for maximum efficiency on constrained hardware.
+
+The Memory Problem​
+
+A 7B parameter model in standard formats:
+
+Precision	Memory for Weights	Total with Training
+FP32 (32-bit)	28 GB	~100 GB
+FP16 (16-bit)	14 GB	~56 GB
+INT8 (8-bit)	7 GB	~28 GB
+INT4 (4-bit)	3.5 GB	~10 GB
+
+With 4-bit quantization, a 7B model fits comfortably in T4's 15GB VRAM, with room for training state.
+
+How Quantization Works​
+
+Quantization maps high-precision numbers to a smaller set of discrete values. Think of it as rounding, but with intelligent bucket selection.
+
+Standard Precision (FP16):
+
+65,536 possible values
+Captures subtle weight differences
+High memory cost
+
+4-bit Quantization:
+
+16 possible values
+Groups similar weights together
+4x memory reduction
+
+The Quality Question: Does using only 16 values instead of 65,536 hurt the model?
+
+Surprisingly, the answer is: not much, if done correctly. The key is choosing which 16 values to use.
+
+NormalFloat4: The Optimal Format​
+
+The QLoRA paper introduced NormalFloat4 (NF4), a data type specifically designed for neural network weights.
+
+Why NF4 Works:
+
+Neural network weights follow a normal (Gaussian) distribution. Most weights cluster around zero, with fewer weights at extreme values.
+
+Weight Distribution:
+        ▲ Frequency
+        │    ████
+        │   ██████
+        │  ████████
+        │ ██████████
+        │████████████
+        └──────────────────▶ Value
+       -2  -1   0   1   2
+
+
+NF4 allocates its 16 quantization levels to match this distribution:
+
+More levels near zero (where most weights live)
+Fewer levels at extremes (where few weights exist)
+
+This is "information-theoretically optimal" because it minimizes information loss given the weight distribution.
+
+Comparison:
+
+Quantization Type	Level Allocation	Quality
+FP4 (uniform)	Equal spacing across range	Lower
+NF4 (normal-aware)	Concentrated near zero	Higher
+
+Always use NF4 for training. It provides better quality than FP4 with the same memory cost.
+
+Double Quantization​
+
+Standard quantization requires storing scaling factors for each block of weights. These scaling factors themselves use memory.
+
+Double quantization applies quantization to the scaling factors:
+
+Standard Quantization:
+- Weights: 4-bit (compact)
+- Scaling factors: FP32 (not compact) → ~0.5 GB overhead for 7B model
+
+Double Quantization:
+- Weights: 4-bit (compact)
+- Scaling factors: 4-bit (also compact) → ~0.06 GB overhead
+
+
+Enable double quantization for constrained hardware. It adds minor computational overhead but significantly reduces memory.
+
+Compute Data Type​
+
+Although weights are stored in 4-bit, computations happen at higher precision. The weights are dequantized on-the-fly during computation.
+
+Compute Dtype	Speed	Quality	Hardware Support
+float32	Slow	Highest	All GPUs
+float16	Fast	Good	Most GPUs
+bfloat16	Fast	Better	Ampere+ (A100, RTX 30xx+)
+
+For T4 (Turing architecture): Use float16. T4 does not support bfloat16.
+
+For A100 or RTX 30xx/40xx: Use bfloat16. It provides better numerical stability.
+
+BitsAndBytes Configuration​
+
+The BitsAndBytes library provides the quantization implementation. Configure it through BitsAndBytesConfig:
+
+from transformers import BitsAndBytesConfig
+import torch
+
+# Configuration for Colab T4 (no bfloat16 support)
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,                      # Enable 4-bit loading
+    bnb_4bit_quant_type="nf4",              # Use NormalFloat4
+    bnb_4bit_compute_dtype=torch.float16,   # Compute in FP16
+    bnb_4bit_use_double_quant=True,         # Enable double quantization
+)
+
+# For A100 or RTX 30xx/40xx (bfloat16 support)
+bnb_config_ampere = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,  # More stable on Ampere
+    bnb_4bit_use_double_quant=True,
+)
+
+Loading a Model with QLoRA​
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_name = "meta-llama/Llama-3.2-3B-Instruct"
+
+# Load tokenizer (not quantized)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Load model with 4-bit quantization
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=bnb_config,
+    device_map="auto",           # Automatically place on GPU
+    trust_remote_code=True,
+)
+
+
+Output:
+
+Loading checkpoint shards: 100%|██████████| 2/2 [00:05<00:00,  2.61s/it]
+
+Memory Verification​
+
+Check that the model fits in your VRAM:
+
+import torch
+
+# Check GPU memory usage
+if torch.cuda.is_available():
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+    print(f"Allocated: {allocated:.2f} GB")
+    print(f"Reserved: {reserved:.2f} GB")
+
+
+Output (3B model on T4):
+
+Allocated: 2.84 GB
+Reserved: 3.14 GB
+
+
+A 3B model uses only ~3GB in 4-bit, leaving 12GB for LoRA adapters and training state.
+
+Memory Calculation Guide​
+
+Use this formula to estimate memory requirements:
+
+Base Model Memory (GB) = Parameters (B) × Bits / 8
+
+Examples:
+- 3B model, 4-bit: 3 × 4 / 8 = 1.5 GB
+- 7B model, 4-bit: 7 × 4 / 8 = 3.5 GB
+- 8B model, 4-bit: 8 × 4 / 8 = 4 GB
+- 13B model, 4-bit: 13 × 4 / 8 = 6.5 GB
+
+Training Overhead (approximate):
+- LoRA adapters: +0.1-0.5 GB
+- Optimizer states: +1-2 GB
+- Activation memory: +2-8 GB (depends on batch size, seq length)
+
+T4 Budget (15GB VRAM)​
+Component	Memory	Running Total
+8B model (4-bit)	4 GB	4 GB
+LoRA adapters	0.3 GB	4.3 GB
+Optimizer (8-bit Adam)	0.6 GB	4.9 GB
+Activations (batch=4, seq=2048)	6 GB	10.9 GB
+CUDA overhead	2 GB	12.9 GB
+Available buffer	2.1 GB	15 GB
+
+With gradient checkpointing (trading compute for memory), you can further reduce activation memory.
+
+Combining QLoRA with LoRA Config​
+
+Apply LoRA to your quantized model:
+
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
+# Prepare model for 4-bit training (required step)
+model = prepare_model_for_kbit_training(model)
+
+# Configure LoRA
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=16,
+    lora_dropout=0.0,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+# Apply LoRA to quantized model
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+
+
+Output:
+
+trainable params: 3,407,872 || all params: 3,213,749,248 || trainable%: 0.1061%
+
+
+The base model is in 4-bit, but LoRA adapters are trained in full precision (FP16/BF16).
+
+Common Issues and Solutions​
+Issue: CUDA Out of Memory​
+RuntimeError: CUDA out of memory. Tried to allocate X MiB
+
+
+Solutions (in order):
+
+Reduce batch size:
+per_device_train_batch_size = 2  # Try 2, then 1
+
+Increase gradient accumulation:
+gradient_accumulation_steps = 8  # Compensate for smaller batch
+
+Reduce sequence length:
+max_seq_length = 1024  # From 2048
+
+Enable gradient checkpointing:
+model.gradient_checkpointing_enable()
+
+Use a smaller model
+Issue: Slow Training​
+
+QLoRA is slightly slower than LoRA due to dequantization overhead.
+
+Expected overhead: 10-20% slower than FP16 LoRA
+
+Mitigation:
+
+Use Unsloth (next lesson) for optimized kernels
+Accept the tradeoff for memory savings
+Issue: NaN Loss​
+Loss: nan
+
+
+Causes and solutions:
+
+Learning rate too high → Reduce to 1e-4
+Numerical instability → Use bfloat16 if hardware supports
+Corrupt data → Check training data for issues
+QLoRA vs LoRA Trade-offs​
+Factor	LoRA (16-bit)	QLoRA (4-bit)
+Memory for 7B model	~14 GB	~3.5 GB
+Training speed	Faster	~10-20% slower
+Quality	Slightly higher	Slightly lower
+T4 compatibility	3B models only	Up to 8B models
+A100 compatibility	Up to 70B	All sizes
+
+Recommendation: Use QLoRA when memory is the constraint. Use LoRA when you have abundant memory and want maximum quality/speed.
+
+Reflect on Your Skill​
+
+Update your llmops-fine-tuner skill with QLoRA specifics:
+
+## QLoRA Configuration
+
+### Standard Configuration (T4 GPU)
+```python
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",           # Always NF4
+    bnb_4bit_compute_dtype=torch.float16, # FP16 for T4
+    bnb_4bit_use_double_quant=True,       # Enable for memory
+)
+
+Memory Budget (T4, 15GB)​
+Base model (4-bit): ~4GB for 8B
+Training overhead: ~6-8GB
+Safe margin: 2-3GB
+OOM Resolution Order​
+batch_size: 4 → 2 → 1
+gradient_accumulation: 4 → 8 → 16
+max_seq_length: 2048 → 1024 → 512
+Enable gradient_checkpointing
+Use smaller base model
+
+## Try With AI
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+### Prompt 1: Calculate Memory Budget
+
+
+
+Help me calculate if my fine-tuning setup will fit in memory:
+
+Hardware: [GPU model and VRAM] Base model: [model name and parameter count] Batch size: [your intended batch size] Sequence length: [max sequence length]
+
+Calculate:
+
+Memory for quantized base model
+Estimated training overhead
+Total expected usage vs available VRAM
+Recommended adjustments if it does not fit
+
+**What you are learning**: Memory budgeting. You are building intuition for how different factors affect GPU memory usage.
+
+### Prompt 2: Debug Quantization Issues
+
+
+
+I am trying to load a model with QLoRA but getting this error: [paste your error message]
+
+My configuration: [paste your BitsAndBytesConfig and model loading code]
+
+Help me diagnose:
+
+What is causing this error?
+What configuration changes might fix it?
+Are there compatibility issues I should check?
+
+**What you are learning**: Troubleshooting quantization. You are learning to interpret error messages and systematically resolve configuration issues.
+
+### Prompt 3: Compare Quantization Strategies
+
+
+
+I have access to both a T4 (15GB) and an A100 (40GB) GPU. For my use case: [describe task and dataset size]
+
+Compare strategies:
+
+QLoRA on T4 with 8B model
+LoRA on A100 with 8B model
+QLoRA on A100 with 13B model
+
+Which would you recommend and why? Consider training time, quality, and resource efficiency.
+
+
+**What you are learning**: Strategic tradeoffs. Fine-tuning involves balancing multiple factors. You are learning to make informed decisions about resource allocation.
+
+### Safety Note
+
+Quantization introduces small approximation errors. For most tasks, these errors are negligible. However, for applications requiring extremely high precision (financial calculations, safety-critical systems), validate that quantization does not affect your specific use case adversely.

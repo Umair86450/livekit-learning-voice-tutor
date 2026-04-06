@@ -1,0 +1,377 @@
+Pod Security Standards: Hardening Container Workloads
+
+In February 2022, security researchers demonstrated CVE-2022-0185—a container escape vulnerability affecting Linux kernels. An attacker with access to a container running as root could exploit a heap overflow in the filesystem context API to escape the container entirely and gain root access to the host node. A single compromised pod became a compromised cluster.
+
+Container escapes exploit a fundamental problem: containers running with excessive privileges. Root users inside containers, mounted host filesystems, elevated Linux capabilities—each creates attack surface. Kubernetes Pod Security Standards (PSS) exist to eliminate these vectors systematically, enforcing security constraints before pods ever start.
+
+Your Task API currently runs with default security settings. This lesson transforms it into a hardened workload that passes the most restrictive PSS profile.
+
+Understanding Pod Security Standards​
+
+Pod Security Standards define three progressively restrictive security profiles. Kubernetes enforces these profiles through the Pod Security Admission controller—a built-in admission controller enabled by default since Kubernetes 1.25.
+
+The Three PSS Levels​
+Level	Purpose	Key Restrictions
+Privileged	System workloads needing full access	None—pods can do anything
+Baseline	Prevent known privilege escalations	Blocks hostNetwork, hostPID, hostIPC, privileged containers, hostPath mounts
+Restricted	Maximum hardening for security-critical workloads	Baseline + runAsNonRoot, drop ALL capabilities, read-only root filesystem, seccomp profile required
+
+When to use each level:
+
+Privileged: CNI plugins, storage drivers, node agents—system components that genuinely need host access
+Baseline: Development environments, internal tools, workloads where Restricted would break functionality
+Restricted: Production APIs, customer-facing services, anything processing sensitive data
+
+Your Task API belongs in the Restricted profile. It processes user requests, stores data, and has no legitimate need for host access or elevated privileges.
+
+Enforcement Modes​
+
+PSS namespace labels support three enforcement modes, allowing gradual rollout:
+
+Mode	Behavior	Use Case
+enforce	Reject non-compliant pods	Production namespaces—violations blocked
+audit	Allow pods but log violations	Visibility into compliance gaps before enforcement
+warn	Allow pods but return warnings to client	Developer feedback during kubectl apply
+
+Best practice: Apply all three modes simultaneously. This provides immediate enforcement while also generating warnings and audit logs for operational visibility.
+
+Labeling Namespaces for PSS Enforcement​
+
+The Task API namespace needs Restricted profile enforcement. Apply labels using kubectl:
+
+kubectl label namespace task-api \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/audit-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=latest
+
+
+Output:
+
+namespace/task-api labeled
+
+
+Verify the labels are applied:
+
+kubectl get namespace task-api -o yaml | grep pod-security
+
+
+Output:
+
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+
+What these labels mean:
+
+enforce=restricted: Pods violating Restricted profile are rejected
+audit=restricted: Violations logged to Kubernetes audit log
+warn=restricted: Users see warnings during kubectl apply
+version=latest: Use current Kubernetes version's Restricted definition
+Testing Enforcement: Privileged Pod Rejection​
+
+With enforcement active, attempt to deploy a privileged container. Create test-privileged.yaml:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-privileged
+  namespace: task-api
+spec:
+  containers:
+  - name: test
+    image: nginx:latest
+    securityContext:
+      privileged: true
+
+kubectl apply -f test-privileged.yaml
+
+
+Output:
+
+Error from server (Forbidden): error when creating "test-privileged.yaml": pods "test-privileged" is forbidden: violates PodSecurity "restricted:latest": privileged (container "test" must not set securityContext.privileged=true)
+
+
+The admission controller rejected the pod before it could be created. This is PSS working correctly.
+
+Writing a Restricted-Compliant Pod Spec​
+
+The Restricted profile requires specific securityContext fields. Here is a compliant Task API deployment. Create task-api-deployment.yaml:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+    spec:
+      serviceAccountName: task-api-sa
+      automountServiceAccountToken: false
+
+      # Pod-level security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+      - name: task-api
+        image: ghcr.io/org/task-api:v1.0.0
+        ports:
+        - containerPort: 8000
+
+        # Container-level security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+        # Resource limits (good practice)
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+
+        # Writable directory for application needs
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+
+      volumes:
+      - name: tmp
+        emptyDir: {}
+
+
+Output:
+
+kubectl apply -f task-api-deployment.yaml
+
+deployment.apps/task-api created
+
+
+Verify pods are running:
+
+kubectl get pods -n task-api -l app=task-api
+
+
+Output:
+
+NAME                        READY   STATUS    RESTARTS   AGE
+task-api-6f9d8c7b5-abc12    1/1     Running   0          30s
+task-api-6f9d8c7b5-def34    1/1     Running   0          30s
+
+Restricted Profile Requirements Explained​
+
+Each securityContext field addresses a specific attack vector:
+
+Field	Requirement	Attack Vector Mitigated
+runAsNonRoot: true	Container cannot run as root user	Root-to-host escape exploits like CVE-2022-0185
+runAsUser: 1000	Explicit non-root UID	Prevents container defaulting to root
+allowPrivilegeEscalation: false	Cannot gain privileges via setuid/setgid	Privilege escalation through binaries
+readOnlyRootFilesystem: true	Container filesystem is immutable	Malware installation, config tampering
+capabilities.drop: ["ALL"]	Remove all Linux capabilities	Capability-based attacks (CAP_SYS_ADMIN, CAP_NET_RAW)
+seccompProfile.type: RuntimeDefault	System call filtering	Syscall-based container escapes
+
+Why the /tmp volume mount?
+
+With readOnlyRootFilesystem: true, your application cannot write anywhere in the container filesystem. Many applications need a writable directory for temporary files, caches, or logs. The emptyDir volume provides a writable /tmp that:
+
+Is isolated to the pod (not shared with host)
+Is deleted when the pod terminates
+Does not compromise the security benefit of read-only root
+Common PSS Violations and Fixes​
+
+When migrating existing workloads to Restricted profile, you will encounter these violations:
+
+Violation Message	Cause	Fix
+runAsNonRoot != true	Missing or false runAsNonRoot	Add securityContext.runAsNonRoot: true and specify runAsUser
+allowPrivilegeEscalation != false	Missing allowPrivilegeEscalation	Add securityContext.allowPrivilegeEscalation: false
+unrestricted capabilities	Capabilities not dropped	Add capabilities.drop: ["ALL"]
+seccompProfile	Missing seccomp profile	Add securityContext.seccompProfile.type: RuntimeDefault
+privileged	Running as privileged container	Remove privileged: true (or use Privileged namespace)
+hostPath volumes	Mounting host filesystem	Remove hostPath volumes (or use Privileged namespace)
+Example: Fixing a Non-Compliant Deployment​
+
+Given this failing deployment:
+
+# FAILS: Missing security context
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-app
+  namespace: task-api
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: myapp:latest
+
+
+The fix requires adding complete security context:
+
+# PASSES: Complete security context
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-app
+  namespace: task-api
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        image: myapp:latest
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+
+Verifying PSS Compliance​
+
+Use dry-run mode to test compliance without creating resources:
+
+kubectl apply -f task-api-deployment.yaml --dry-run=server
+
+
+Output (compliant):
+
+deployment.apps/task-api created (server dry run)
+
+
+Output (non-compliant):
+
+Error from server (Forbidden): error when creating "task-api-deployment.yaml": pods "task-api" is forbidden: violates PodSecurity "restricted:latest": runAsNonRoot != true (container "task-api" must not set securityContext.runAsNonRoot=false)
+
+
+The --dry-run=server flag sends the request through admission control but does not persist the resource. This validates PSS compliance before deployment.
+
+PSS in Multi-Environment Deployments​
+
+Different environments warrant different PSS levels:
+
+Environment	Recommended PSS Level	Rationale
+Development	Baseline	Faster iteration, debugging tools may need access
+Staging	Restricted	Catches compliance issues before production
+Production	Restricted	Maximum protection for customer data
+
+Create namespace with appropriate labels during provisioning:
+
+# Production namespace
+kubectl create namespace production-api
+kubectl label namespace production-api \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
+
+# Development namespace
+kubectl create namespace dev-api
+kubectl label namespace dev-api \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
+
+
+Notice the development namespace uses enforce=baseline but warn=restricted. Developers see Restricted violations as warnings, preparing them for production constraints without blocking their work.
+
+Reflect on Your Skill​
+
+Test your cloud-security skill against what you learned:
+
+Using my cloud-security skill, create a PSS-compliant Kubernetes
+Deployment for a Python Flask API that:
+- Runs on port 5000
+- Needs to write logs to /var/log/app
+- Uses the python:3.11-slim image
+- Must pass Restricted PSS validation
+
+
+Evaluation questions:
+
+Does your skill include complete pod-level securityContext (runAsNonRoot, seccompProfile)?
+Does your skill include container-level securityContext (allowPrivilegeEscalation, capabilities, readOnlyRootFilesystem)?
+Does your skill handle the writable directory requirement correctly (emptyDir for /var/log/app)?
+Does your skill set appropriate runAsUser/runAsGroup values?
+
+If any answers are "no," update your skill with the patterns from this lesson.
+
+Try With AI​
+
+Test your understanding of Pod Security Standards and secure container configuration.
+
+Prompt 1:
+
+Review this securityContext and identify all PSS Restricted violations:
+
+securityContext:
+  runAsUser: 0
+  allowPrivilegeEscalation: true
+  capabilities:
+    add:
+      - NET_ADMIN
+
+
+What you're learning: How to audit existing configurations for PSS compliance. The violations include: runAsUser: 0 (root), allowPrivilegeEscalation: true (must be false), and adding capabilities instead of dropping ALL. Practice identifying each violation before the fix.
+
+Prompt 2:
+
+My Deployment keeps failing with "violates PodSecurity restricted" but
+I've set runAsNonRoot: true. The image is nginx:latest and the error
+says "container has runAsNonRoot and image will run as root". What's
+happening and how do I fix it?
+
+
+What you're learning: The difference between Kubernetes configuration and container image defaults. The nginx:latest image runs as root by default—setting runAsNonRoot: true tells Kubernetes to reject containers that would run as root, but doesn't change the image. The fix requires either using an nginx image built for non-root (nginx:1.25-alpine with explicit USER) or specifying runAsUser that overrides the image default.
+
+Prompt 3:
+
+Design a PSS enforcement strategy for a company with these requirements:
+- Developers can run any container locally in their dev namespaces
+- Pre-production must catch Restricted violations before deployment
+- Production namespaces cannot run any non-compliant workloads
+
+What namespace labels would you apply to each environment?
+
+
+What you're learning: How to design a progressive enforcement strategy across environments. The pattern uses Privileged for dev (maximum flexibility), Restricted with warn for pre-prod (visibility without blocking), and Restricted with enforce for production (zero tolerance).
+
+SECURITY REMINDER
+
+Pod Security Standards are admission-time controls—they prevent non-compliant pods from being created but do not affect already-running pods. After enabling PSS on a namespace, existing non-compliant pods continue running until they are deleted or restarted. Use kubectl rollout restart to force re-evaluation of existing deployments against PSS policies.

@@ -1,0 +1,1253 @@
+Production Telephony Patterns
+
+Your voice agent connects to the phone network. Users can call in, and your agent responds. But what happens when a caller says "I need to talk to someone about my invoice" instead of pressing a number? What if your call recordings violate privacy laws in your customer's jurisdiction? What if Twilio goes down during your busiest hour?
+
+Production telephony requires patterns that go beyond basic integration. Enterprise call centers have solved these problems for decades, but the solutions—IVR systems, compliance frameworks, failover architectures—need adaptation for AI-native voice agents. The good news: modern LLM-powered intent detection makes some traditional patterns obsolete while making others more powerful.
+
+This lesson transforms your telephony integration from demo-ready to production-grade. You'll implement natural language IVR that understands what callers want without forcing them through menu trees, configure recording with proper consent flows for global compliance, and design failover that survives provider outages. By the end, both your voice-telephony and web-audio-capture skills will be production-ready assets—genuine Digital FTE components you can deploy for customers.
+
+Modern IVR: Natural Language Intent Detection​
+The Problem with Traditional IVR​
+
+Traditional Interactive Voice Response systems force callers through menu trees:
+
+"Press 1 for billing. Press 2 for technical support. Press 3 for sales.
+Press 4 to repeat these options."
+
+
+This approach has fundamental problems:
+
+Issue	Impact
+Caller frustration	Users hate navigating phone trees (average abandonment: 13% per menu level)
+Rigid routing	Callers with mixed needs ("billing question about technical issue") don't fit categories
+Maintenance burden	Every new department requires menu updates across systems
+Limited context	DTMF codes carry no semantic information to downstream agents
+Natural Language IVR Pattern​
+
+Modern voice agents replace menu trees with conversational intent detection:
+
+Traditional: "Press 1 for billing, Press 2 for support..."
+Modern: "Hi, I'm here to help. What can I do for you today?"
+
+
+The pattern:
+
+Caller speaks freely
+        │
+        ▼
+┌─────────────────┐
+│  Intent Classifier  │
+│  (LLM-powered)      │
+└────────┬────────┘
+         │
+         ▼
+   ┌─────────────┐
+   │ Route by Intent │
+   │   billing → Billing Agent    │
+   │   technical → Tech Agent     │
+   │   sales → Sales Agent        │
+   │   escalation → Human         │
+   └─────────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Specialist Agent   │
+│  (receives context) │
+└─────────────────┘
+
+Implementation: Conversational IVR​
+
+Here's a complete IVR implementation that uses your voice agent for intent detection:
+
+from dataclasses import dataclass
+from typing import Optional, Literal
+from livekit.agents import Agent, RunContext
+import json
+
+IntentType = Literal["billing", "technical", "sales", "escalation", "general"]
+
+@dataclass
+class CallerContext:
+    """Accumulated context about the caller."""
+    caller_id: str
+    intent: Optional[IntentType]
+    raw_statement: str
+    sentiment: str
+    extracted_entities: dict
+
+class ConversationalIVR(Agent):
+    """Natural language IVR using LLM intent detection."""
+
+    INTENT_PROMPT = """
+    Classify the caller's intent into exactly one category:
+
+    - billing: Invoice questions, payment issues, refunds, charges, pricing disputes
+    - technical: Product errors, bugs, outages, how-to questions, troubleshooting
+    - sales: Upgrade interest, new features, demos, enterprise inquiries
+    - escalation: Frustration, complaints, cancellation threats, manager requests
+    - general: Greetings, unclear intent, unrelated questions
+
+    Caller said: "{statement}"
+
+    Respond with JSON:
+    {{
+        "intent": "billing|technical|sales|escalation|general",
+        "confidence": 0.0-1.0,
+        "sentiment": "positive|neutral|negative|frustrated",
+        "entities": {{}}
+    }}
+
+    For entities, extract any mentioned: account_id, invoice_number,
+    product_name, error_message, dates.
+    """
+
+    async def on_enter(self, ctx: RunContext):
+        """Greet caller conversationally."""
+        await ctx.say(
+            "Hi, thanks for calling. How can I help you today?"
+        )
+
+    async def on_user_turn(self, ctx: RunContext, message: str):
+        """Classify intent and route appropriately."""
+        # Classify intent using LLM
+        classification = await self._classify_intent(ctx, message)
+
+        # Build caller context for handoff
+        caller_ctx = CallerContext(
+            caller_id=ctx.session.participant_id,
+            intent=classification["intent"],
+            raw_statement=message,
+            sentiment=classification["sentiment"],
+            extracted_entities=classification.get("entities", {})
+        )
+
+        # Route based on intent
+        if classification["intent"] == "billing":
+            await self._route_to_specialist(
+                ctx, caller_ctx, "billing", BillingAgent
+            )
+        elif classification["intent"] == "technical":
+            await self._route_to_specialist(
+                ctx, caller_ctx, "technical support", TechnicalAgent
+            )
+        elif classification["intent"] == "sales":
+            await self._route_to_specialist(
+                ctx, caller_ctx, "sales", SalesAgent
+            )
+        elif classification["intent"] == "escalation":
+            await self._handle_escalation(ctx, caller_ctx)
+        else:
+            # General query - handle directly or clarify
+            await self._handle_general(ctx, message)
+
+    async def _classify_intent(
+        self,
+        ctx: RunContext,
+        statement: str
+    ) -> dict:
+        """Use LLM to classify caller intent."""
+        prompt = self.INTENT_PROMPT.format(statement=statement)
+        response = await ctx.llm.generate(prompt)
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            # Fallback for malformed response
+            return {
+                "intent": "general",
+                "confidence": 0.5,
+                "sentiment": "neutral",
+                "entities": {}
+            }
+
+    async def _route_to_specialist(
+        self,
+        ctx: RunContext,
+        caller_ctx: CallerContext,
+        specialist_name: str,
+        agent_class: type
+    ):
+        """Transfer to specialist with full context."""
+        # Acknowledge and inform caller
+        await ctx.say(
+            f"I understand you need help with {specialist_name}. "
+            f"Let me connect you with a specialist who can assist. "
+            f"One moment please."
+        )
+
+        # Handoff with context
+        await ctx.handoff(agent_class, context=caller_ctx)
+
+    async def _handle_escalation(
+        self,
+        ctx: RunContext,
+        caller_ctx: CallerContext
+    ):
+        """Handle frustrated callers or escalation requests."""
+        if caller_ctx.sentiment == "frustrated":
+            await ctx.say(
+                "I'm sorry you're having a difficult experience. "
+                "Let me connect you with a manager who has more "
+                "authority to help resolve this. Please hold."
+            )
+        else:
+            await ctx.say(
+                "I'll connect you with a manager right away. "
+                "Please hold for just a moment."
+            )
+
+        # Transfer to escalation queue or human agent
+        await ctx.handoff(EscalationAgent, context=caller_ctx)
+
+    async def _handle_general(self, ctx: RunContext, message: str):
+        """Handle unclear or general queries."""
+        await ctx.say(
+            "I want to make sure I connect you with the right person. "
+            "Are you calling about a billing question, a technical issue, "
+            "or something else?"
+        )
+
+
+Output:
+
+Caller: "Hi, I was charged twice on my credit card last week"
+Agent: "I understand you need help with billing. Let me connect you
+        with a specialist who can assist. One moment please."
+        [Handoff to BillingAgent with context:
+         - intent: billing
+         - sentiment: neutral
+         - entities: {timeframe: "last week", issue: "duplicate charge"}]
+
+Caller: "This is ridiculous, I've called three times already!"
+Agent: "I'm sorry you're having a difficult experience. Let me connect
+        you with a manager who has more authority to help resolve this.
+        Please hold."
+        [Handoff to EscalationAgent with context:
+         - intent: escalation
+         - sentiment: frustrated
+         - entities: {prior_calls: 3}]
+
+Hybrid Approach: DTMF Fallback​
+
+Some callers prefer pressing keys. Some phone systems don't support speech. Implement both:
+
+class HybridIVR(Agent):
+    """IVR that accepts both speech and DTMF input."""
+
+    DTMF_MAPPING = {
+        "1": "billing",
+        "2": "technical",
+        "3": "sales",
+        "0": "escalation"
+    }
+
+    async def on_enter(self, ctx: RunContext):
+        """Offer both options."""
+        await ctx.say(
+            "Hi, thanks for calling. Tell me how I can help, "
+            "or press 1 for billing, 2 for technical support, "
+            "3 for sales, or 0 for a representative."
+        )
+
+    async def on_dtmf(self, ctx: RunContext, digit: str):
+        """Handle keypad input."""
+        intent = self.DTMF_MAPPING.get(digit)
+        if intent:
+            # Route based on DTMF
+            await self._route_by_intent(ctx, intent, via_dtmf=True)
+        else:
+            await ctx.say("I didn't recognize that. Please try again.")
+
+    async def on_user_turn(self, ctx: RunContext, message: str):
+        """Handle speech input with LLM classification."""
+        classification = await self._classify_intent(ctx, message)
+        await self._route_by_intent(
+            ctx,
+            classification["intent"],
+            via_dtmf=False,
+            full_context=classification
+        )
+
+Call Queuing, Transfer, and Hold​
+Queue Management for Voice Agents​
+
+When more callers connect than agents can handle, you need queuing:
+
+from asyncio import Queue
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+import asyncio
+
+@dataclass
+class QueuedCall:
+    """A call waiting in queue."""
+    session_id: str
+    caller_context: CallerContext
+    queued_at: datetime = field(default_factory=datetime.now)
+    position: int = 0
+    estimated_wait: int = 0  # seconds
+
+class CallQueue:
+    """Manages waiting callers with position updates."""
+
+    def __init__(self, max_size: int = 100):
+        self.queue: Queue[QueuedCall] = Queue(maxsize=max_size)
+        self.active_calls: dict[str, QueuedCall] = {}
+        self.avg_handle_time: int = 180  # 3 minutes default
+
+    async def enqueue(
+        self,
+        session_id: str,
+        context: CallerContext
+    ) -> QueuedCall:
+        """Add call to queue and return queue position."""
+        position = self.queue.qsize() + 1
+        estimated_wait = position * self.avg_handle_time
+
+        queued_call = QueuedCall(
+            session_id=session_id,
+            caller_context=context,
+            position=position,
+            estimated_wait=estimated_wait
+        )
+
+        await self.queue.put(queued_call)
+        self.active_calls[session_id] = queued_call
+
+        return queued_call
+
+    async def dequeue(self) -> Optional[QueuedCall]:
+        """Get next call from queue."""
+        if self.queue.empty():
+            return None
+
+        call = await self.queue.get()
+        del self.active_calls[call.session_id]
+
+        # Update positions for remaining callers
+        await self._update_positions()
+
+        return call
+
+    async def _update_positions(self):
+        """Recalculate positions after dequeue."""
+        position = 1
+        # This is simplified - production would iterate queue properly
+        for session_id, call in self.active_calls.items():
+            call.position = position
+            call.estimated_wait = position * self.avg_handle_time
+            position += 1
+
+class QueueingAgent(Agent):
+    """Agent that manages callers in queue."""
+
+    def __init__(self, queue: CallQueue):
+        self.queue = queue
+        self.update_interval = 60  # seconds
+
+    async def on_enter(self, ctx: RunContext):
+        """Inform caller of queue status."""
+        caller_ctx = ctx.handoff_context
+        queued = await self.queue.enqueue(ctx.session.id, caller_ctx)
+
+        await ctx.say(
+            f"All of our specialists are currently helping other callers. "
+            f"You are number {queued.position} in the queue. "
+            f"Estimated wait time is about {queued.estimated_wait // 60} minutes. "
+            f"Please hold, and we'll be with you shortly."
+        )
+
+        # Start hold music and periodic updates
+        await self._start_hold_experience(ctx, queued)
+
+    async def _start_hold_experience(
+        self,
+        ctx: RunContext,
+        queued: QueuedCall
+    ):
+        """Play music and provide periodic updates."""
+        while queued.position > 0:
+            # Play hold music for update_interval
+            await ctx.play_audio("hold_music.mp3", duration=self.update_interval)
+
+            # Check if still in queue
+            if ctx.session.id not in self.queue.active_calls:
+                break
+
+            # Provide position update
+            current = self.queue.active_calls[ctx.session.id]
+            if current.position <= 3:
+                await ctx.say(
+                    f"Thank you for your patience. You're now number "
+                    f"{current.position} in the queue. A specialist will "
+                    f"be with you very soon."
+                )
+            else:
+                await ctx.say(
+                    f"Thank you for holding. You're currently number "
+                    f"{current.position}. Estimated wait: "
+                    f"{current.estimated_wait // 60} minutes."
+                )
+
+Warm Transfer with Context​
+
+When transferring between agents, preserve the conversation:
+
+async def warm_transfer(
+    ctx: RunContext,
+    target_agent: type,
+    transfer_context: CallerContext,
+    summary: str
+):
+    """Transfer with full context briefing to receiving agent."""
+
+    # Inform caller
+    await ctx.say(
+        "I'm going to transfer you to a specialist. I'll brief them "
+        "on your situation so you don't need to repeat anything. "
+        "Please hold for just a moment."
+    )
+
+    # Build enhanced context for receiving agent
+    transfer_context.prior_summary = summary
+    transfer_context.transferred_from = ctx.agent.__class__.__name__
+    transfer_context.transfer_reason = "warm_transfer"
+
+    # Perform handoff
+    await ctx.handoff(target_agent, context=transfer_context)
+
+
+Output:
+
+[After warm transfer]
+Specialist: "Hi Sarah, I'm Alex from billing. I understand you were
+            charged twice for your March invoice - $49.99 each time.
+            Let me look into getting that duplicate refunded for you.
+            Can you confirm the last four digits of the card that
+            was charged?"
+
+[Caller never repeats the problem - context preserved]
+
+Call Recording with Compliance​
+The Compliance Landscape​
+
+Call recording is legally required for some industries and legally complex everywhere:
+
+Jurisdiction	Requirement
+GDPR (EU)	Explicit consent required; right to access and deletion; data processing agreement
+CCPA (California)	Disclosure required; consumer rights to know and delete
+Two-party consent (US)	All parties must agree (CA, FL, IL, MD, MA, MT, NH, PA, WA, + others)
+One-party consent (US)	Only one party needs to consent (most other states)
+PCI-DSS	Pause recording during credit card input
+Implementation: Compliant Recording​
+from enum import Enum
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import hashlib
+
+class ConsentStatus(Enum):
+    PENDING = "pending"
+    GRANTED = "granted"
+    DECLINED = "declined"
+
+@dataclass
+class RecordingConsent:
+    """Tracks consent for call recording."""
+    session_id: str
+    consent_status: ConsentStatus
+    consent_timestamp: Optional[datetime]
+    caller_region: str
+    consent_method: str  # "voice", "dtmf", "web"
+    recording_purposes: list[str]
+
+@dataclass
+class RecordingMetadata:
+    """Metadata for compliant recording storage."""
+    recording_id: str
+    session_id: str
+    consent: RecordingConsent
+    start_time: datetime
+    end_time: Optional[datetime]
+    storage_location: str
+    retention_days: int
+    deletion_scheduled: Optional[datetime]
+
+class CompliantRecorder:
+    """Manages call recording with compliance controls."""
+
+    # Retention periods by jurisdiction
+    RETENTION_DAYS = {
+        "EU": 30,      # GDPR - minimize retention
+        "US-CA": 90,   # CCPA
+        "US-DEFAULT": 365,
+        "FINANCE": 2555,  # 7 years for regulated industries
+    }
+
+    def __init__(self, storage_backend, region_detector):
+        self.storage = storage_backend
+        self.region_detector = region_detector
+        self.active_recordings: dict[str, RecordingMetadata] = {}
+
+    async def request_consent(
+        self,
+        ctx: RunContext
+    ) -> RecordingConsent:
+        """Request recording consent from caller."""
+        # Detect caller region for compliance requirements
+        caller_number = ctx.session.caller_id
+        region = await self.region_detector.detect(caller_number)
+
+        # Determine consent announcement
+        if region.startswith("EU"):
+            announcement = (
+                "This call may be recorded for quality assurance and "
+                "training purposes. Your recording will be stored for "
+                "30 days and you can request deletion at any time. "
+                "Do you consent to being recorded? Say yes or no, "
+                "or press 1 for yes, 2 for no."
+            )
+        elif region in ["US-CA", "US-FL", "US-IL", "US-PA"]:
+            # Two-party consent states
+            announcement = (
+                "This call may be recorded for quality and training. "
+                "By continuing, you consent to recording. "
+                "If you do not wish to be recorded, please say no now "
+                "or press 2."
+            )
+        else:
+            # One-party consent - disclosure only
+            announcement = (
+                "This call may be recorded for quality and training purposes."
+            )
+
+        await ctx.say(announcement)
+
+        # For two-party consent regions, wait for response
+        if region.startswith("EU") or region in ["US-CA", "US-FL", "US-IL"]:
+            consent = await self._wait_for_consent(ctx)
+        else:
+            # One-party: announcement is sufficient
+            consent = ConsentStatus.GRANTED
+
+        return RecordingConsent(
+            session_id=ctx.session.id,
+            consent_status=consent,
+            consent_timestamp=datetime.now() if consent == ConsentStatus.GRANTED else None,
+            caller_region=region,
+            consent_method="voice",
+            recording_purposes=["quality_assurance", "training"]
+        )
+
+    async def _wait_for_consent(
+        self,
+        ctx: RunContext,
+        timeout: int = 10
+    ) -> ConsentStatus:
+        """Wait for explicit consent response."""
+        try:
+            response = await asyncio.wait_for(
+                ctx.wait_for_input(),
+                timeout=timeout
+            )
+
+            # Check for positive consent
+            positive = ["yes", "yeah", "sure", "okay", "1"]
+            negative = ["no", "nope", "2"]
+
+            response_lower = response.lower().strip()
+
+            if any(p in response_lower for p in positive):
+                return ConsentStatus.GRANTED
+            elif any(n in response_lower for n in negative):
+                return ConsentStatus.DECLINED
+            else:
+                # Unclear response - ask again or default based on region
+                return ConsentStatus.PENDING
+
+        except asyncio.TimeoutError:
+            # No response - treat as implicit consent for most regions
+            return ConsentStatus.GRANTED
+
+    async def start_recording(
+        self,
+        ctx: RunContext,
+        consent: RecordingConsent
+    ) -> Optional[RecordingMetadata]:
+        """Start recording if consent granted."""
+        if consent.consent_status != ConsentStatus.GRANTED:
+            return None
+
+        recording_id = self._generate_recording_id(ctx.session.id)
+        retention = self.RETENTION_DAYS.get(
+            consent.caller_region,
+            self.RETENTION_DAYS["US-DEFAULT"]
+        )
+
+        metadata = RecordingMetadata(
+            recording_id=recording_id,
+            session_id=ctx.session.id,
+            consent=consent,
+            start_time=datetime.now(),
+            end_time=None,
+            storage_location=f"recordings/{recording_id}",
+            retention_days=retention,
+            deletion_scheduled=None
+        )
+
+        # Start actual recording
+        await ctx.start_recording(metadata.storage_location)
+        self.active_recordings[ctx.session.id] = metadata
+
+        return metadata
+
+    async def pause_for_pci(self, ctx: RunContext):
+        """Pause recording for PCI-DSS compliance during card input."""
+        if ctx.session.id in self.active_recordings:
+            await ctx.pause_recording()
+            await ctx.say("For your security, recording is paused.")
+
+    async def resume_after_pci(self, ctx: RunContext):
+        """Resume recording after sensitive data input."""
+        if ctx.session.id in self.active_recordings:
+            await ctx.resume_recording()
+
+    def _generate_recording_id(self, session_id: str) -> str:
+        """Generate unique recording identifier."""
+        timestamp = datetime.now().isoformat()
+        return hashlib.sha256(
+            f"{session_id}:{timestamp}".encode()
+        ).hexdigest()[:16]
+
+
+Output:
+
+# EU caller
+Agent: "This call may be recorded for quality assurance and training
+        purposes. Your recording will be stored for 30 days and you
+        can request deletion at any time. Do you consent to being
+        recorded? Say yes or no, or press 1 for yes, 2 for no."
+Caller: "Yes, that's fine"
+[Recording started with GDPR-compliant consent]
+
+# California caller
+Agent: "This call may be recorded for quality and training. By
+        continuing, you consent to recording. If you do not wish
+        to be recorded, please say no now or press 2."
+[5 second pause - no objection]
+[Recording started with two-party consent disclosure]
+
+# Texas caller (one-party consent)
+Agent: "This call may be recorded for quality and training purposes."
+[Recording started immediately after disclosure]
+
+Recording Deletion and Data Subject Requests​
+class RecordingRetentionManager:
+    """Manages recording lifecycle and deletion requests."""
+
+    async def process_deletion_request(
+        self,
+        caller_id: str,
+        request_type: str = "gdpr_erasure"
+    ):
+        """Handle GDPR Article 17 or CCPA deletion requests."""
+
+        # Find all recordings for this caller
+        recordings = await self.storage.find_by_caller(caller_id)
+
+        deletion_report = {
+            "request_type": request_type,
+            "caller_id": caller_id,
+            "recordings_found": len(recordings),
+            "recordings_deleted": 0,
+            "recordings_retained": 0,
+            "retention_reasons": []
+        }
+
+        for recording in recordings:
+            # Check if recording must be retained (legal hold, dispute)
+            if await self._is_under_legal_hold(recording):
+                deletion_report["recordings_retained"] += 1
+                deletion_report["retention_reasons"].append({
+                    "recording_id": recording.recording_id,
+                    "reason": "legal_hold"
+                })
+            else:
+                # Delete recording and metadata
+                await self.storage.delete(recording.recording_id)
+                deletion_report["recordings_deleted"] += 1
+
+        # Log deletion for compliance audit
+        await self._log_deletion_request(deletion_report)
+
+        return deletion_report
+
+Failover and Redundancy Design​
+Failure Scenarios​
+
+Production telephony systems face multiple failure modes:
+
+Failure Type	Example	Impact
+Provider outage	Twilio API returns 503	All inbound/outbound calls fail
+Network partition	SIP trunk disconnected	Calls connect but no audio
+Agent unavailability	All voice agent pods down	Calls connect but no response
+Capacity exhaustion	Max concurrent calls reached	New calls rejected
+Multi-Provider Failover Architecture​
+from enum import Enum
+from dataclasses import dataclass
+from typing import Optional
+import asyncio
+import aiohttp
+
+class ProviderStatus(Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+@dataclass
+class TelephonyProvider:
+    """Configuration for a telephony provider."""
+    name: str
+    priority: int  # Lower = higher priority
+    api_base: str
+    health_endpoint: str
+    cost_per_minute: float
+    max_concurrent: int
+    current_calls: int = 0
+    status: ProviderStatus = ProviderStatus.HEALTHY
+
+class FailoverController:
+    """Manages multi-provider failover for telephony."""
+
+    def __init__(self):
+        self.providers = [
+            TelephonyProvider(
+                name="twilio",
+                priority=1,
+                api_base="https://api.twilio.com",
+                health_endpoint="/health",
+                cost_per_minute=0.0085,
+                max_concurrent=500
+            ),
+            TelephonyProvider(
+                name="telnyx",
+                priority=2,
+                api_base="https://api.telnyx.com",
+                health_endpoint="/health",
+                cost_per_minute=0.002,
+                max_concurrent=1000
+            ),
+            TelephonyProvider(
+                name="signalwire",
+                priority=3,
+                api_base="https://api.signalwire.com",
+                health_endpoint="/health",
+                cost_per_minute=0.004,
+                max_concurrent=300
+            )
+        ]
+        self.health_check_interval = 30  # seconds
+
+    async def start_health_monitoring(self):
+        """Continuously monitor provider health."""
+        while True:
+            await self._check_all_providers()
+            await asyncio.sleep(self.health_check_interval)
+
+    async def _check_all_providers(self):
+        """Check health of all providers in parallel."""
+        tasks = [
+            self._check_provider_health(p)
+            for p in self.providers
+        ]
+        await asyncio.gather(*tasks)
+
+    async def _check_provider_health(self, provider: TelephonyProvider):
+        """Check single provider health status."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{provider.api_base}{provider.health_endpoint}",
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as response:
+                    if response.status == 200:
+                        provider.status = ProviderStatus.HEALTHY
+                    elif response.status in [429, 503]:
+                        provider.status = ProviderStatus.DEGRADED
+                    else:
+                        provider.status = ProviderStatus.UNHEALTHY
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            provider.status = ProviderStatus.UNHEALTHY
+
+    def get_best_provider(self) -> Optional[TelephonyProvider]:
+        """Select best available provider based on health and capacity."""
+        available = [
+            p for p in self.providers
+            if p.status == ProviderStatus.HEALTHY
+            and p.current_calls < p.max_concurrent
+        ]
+
+        if not available:
+            # Fall back to degraded providers
+            available = [
+                p for p in self.providers
+                if p.status == ProviderStatus.DEGRADED
+                and p.current_calls < p.max_concurrent
+            ]
+
+        if not available:
+            return None
+
+        # Sort by priority (lower = better)
+        return sorted(available, key=lambda p: p.priority)[0]
+
+    async def route_call(self, call_request: dict) -> dict:
+        """Route call through best available provider with failover."""
+        attempts = []
+
+        for attempt in range(3):
+            provider = self.get_best_provider()
+
+            if provider is None:
+                return {
+                    "success": False,
+                    "error": "all_providers_unavailable",
+                    "attempts": attempts
+                }
+
+            try:
+                result = await self._place_call(provider, call_request)
+                provider.current_calls += 1
+
+                return {
+                    "success": True,
+                    "provider": provider.name,
+                    "call_id": result["call_id"],
+                    "attempts": attempts + [provider.name]
+                }
+
+            except ProviderError as e:
+                attempts.append({
+                    "provider": provider.name,
+                    "error": str(e)
+                })
+                # Mark provider as degraded for this failure
+                provider.status = ProviderStatus.DEGRADED
+                continue
+
+        return {
+            "success": False,
+            "error": "max_attempts_exceeded",
+            "attempts": attempts
+        }
+
+Graceful Degradation​
+
+When all providers fail, degrade gracefully:
+
+class GracefulDegradation:
+    """Fallback behaviors when telephony is unavailable."""
+
+    async def handle_inbound_failure(
+        self,
+        ctx: RunContext,
+        failure_reason: str
+    ):
+        """Handle inbound call when voice agent unavailable."""
+
+        if failure_reason == "agent_unavailable":
+            # Offer voicemail
+            await ctx.play_audio("voicemail_greeting.mp3")
+            recording = await ctx.record_voicemail(max_duration=120)
+            await self._queue_voicemail(ctx.session.caller_id, recording)
+            await ctx.say(
+                "Thank you for your message. We'll call you back "
+                "within 24 hours."
+            )
+
+        elif failure_reason == "capacity_exceeded":
+            # Offer callback
+            await ctx.say(
+                "We're experiencing high call volume. Would you like "
+                "us to call you back when an agent is available? "
+                "Press 1 for callback, or 2 to hold."
+            )
+            choice = await ctx.wait_for_dtmf(timeout=10)
+
+            if choice == "1":
+                await self._schedule_callback(ctx.session.caller_id)
+                await ctx.say(
+                    "Great, we'll call you back within 30 minutes. "
+                    "Thank you for your patience."
+                )
+            else:
+                # Transfer to hold queue
+                await ctx.handoff(QueueingAgent)
+
+        elif failure_reason == "provider_outage":
+            # Critical failure - minimal response
+            await ctx.play_audio("technical_difficulties.mp3")
+            await ctx.say(
+                "We're experiencing technical difficulties. "
+                "Please try again in a few minutes or visit our "
+                "website for assistance."
+            )
+
+Cost Optimization Strategies​
+Hybrid Provider Routing​
+
+Use cheaper providers for high-volume, lower-priority traffic:
+
+class CostOptimizedRouter:
+    """Routes calls to minimize cost while maintaining quality."""
+
+    def __init__(self, failover: FailoverController):
+        self.failover = failover
+
+    def select_provider(
+        self,
+        call_type: str,
+        caller_tier: str,
+        expected_duration: int
+    ) -> TelephonyProvider:
+        """Select provider based on cost optimization rules."""
+
+        # Get healthy providers
+        healthy = [
+            p for p in self.failover.providers
+            if p.status == ProviderStatus.HEALTHY
+        ]
+
+        if not healthy:
+            return self.failover.get_best_provider()
+
+        # Premium callers get primary provider (best quality)
+        if caller_tier == "enterprise":
+            return sorted(healthy, key=lambda p: p.priority)[0]
+
+        # Long calls go to cheapest provider
+        if expected_duration > 600:  # 10+ minutes
+            return sorted(healthy, key=lambda p: p.cost_per_minute)[0]
+
+        # Outbound marketing goes to cheapest
+        if call_type == "outbound_marketing":
+            return sorted(healthy, key=lambda p: p.cost_per_minute)[0]
+
+        # Default: use priority ordering
+        return sorted(healthy, key=lambda p: p.priority)[0]
+
+    def estimate_monthly_cost(
+        self,
+        minutes_by_type: dict[str, int]
+    ) -> dict:
+        """Estimate monthly costs with current routing strategy."""
+
+        costs = {}
+        total = 0.0
+
+        for call_type, minutes in minutes_by_type.items():
+            # Simulate provider selection for each type
+            if call_type == "enterprise_support":
+                provider = "twilio"
+                rate = 0.0085
+            elif call_type in ["outbound_marketing", "long_support"]:
+                provider = "telnyx"
+                rate = 0.002
+            else:
+                provider = "twilio"
+                rate = 0.0085
+
+            cost = minutes * rate
+            costs[call_type] = {
+                "provider": provider,
+                "minutes": minutes,
+                "rate": rate,
+                "cost": cost
+            }
+            total += cost
+
+        return {
+            "breakdown": costs,
+            "total_monthly": total
+        }
+
+
+Output:
+
+# Example cost comparison
+router = CostOptimizedRouter(failover)
+
+# Scenario: 10,000 minutes/month mixed traffic
+costs = router.estimate_monthly_cost({
+    "enterprise_support": 2000,    # $17.00 via Twilio
+    "general_support": 3000,       # $25.50 via Twilio
+    "outbound_marketing": 3000,    # $6.00 via Telnyx
+    "long_support": 2000           # $4.00 via Telnyx
+})
+
+# Result:
+# - Without optimization (all Twilio): $85.00/month
+# - With hybrid routing: $52.50/month
+# - Savings: 38%
+
+Finalize Your Skills​
+
+You've learned production telephony patterns. Now update both skills to include this production knowledge.
+
+voice-telephony Skill Completion​
+
+Your voice-telephony skill should now guide:
+
+Capability	Source	Status
+SIP fundamentals	Lesson 1	Covered
+Twilio integration	Lesson 1	Covered
+Telnyx setup	Lesson 1	Covered
+IVR patterns	This lesson	NEW
+Call recording compliance	This lesson	NEW
+Multi-provider failover	This lesson	NEW
+Cost optimization	This lesson	NEW
+
+Add these sections to .claude/skills/voice-telephony/SKILL.md:
+
+## IVR Patterns
+
+### Natural Language IVR
+1. Greet caller conversationally (no menu tree)
+2. Use LLM to classify intent from free speech
+3. Route to specialist with full context
+4. Provide DTMF fallback for accessibility
+
+### Queue Management
+- Announce position and estimated wait
+- Provide periodic updates (every 60 seconds)
+- Offer callback option for long waits
+
+## Compliance
+
+### Recording Consent by Region
+- GDPR (EU): Explicit consent required, 30-day retention
+- CCPA (California): Disclosure required, 90-day retention
+- Two-party consent states: All parties must agree
+- One-party consent: Disclosure sufficient
+
+### PCI-DSS
+- Pause recording during credit card input
+- Resume after sensitive data collection
+
+## High Availability
+
+### Failover Strategy
+1. Primary: Twilio (highest quality)
+2. Secondary: Telnyx (cost-effective)
+3. Tertiary: SignalWire (backup)
+
+### Health Monitoring
+- Check provider health every 30 seconds
+- Mark degraded on 429/503 responses
+- Mark unhealthy on timeout/error
+
+### Graceful Degradation
+- Agent unavailable: Offer voicemail
+- Capacity exceeded: Offer callback
+- Provider outage: Apologize and retry message
+
+web-audio-capture Skill Completion​
+
+Your web-audio-capture skill should now guide:
+
+Capability	Source	Status
+getUserMedia	Lesson 2	Covered
+AudioWorklet	Lesson 2	Covered
+Silero VAD WASM	Lesson 2	Covered
+Transport selection	Lesson 2	Covered
+Browser compatibility	This lesson	Enhanced
+Error handling	This lesson	Enhanced
+
+Add these sections to .claude/skills/web-audio-capture/SKILL.md:
+
+## Production Considerations
+
+### Browser Compatibility Matrix
+
+|
+ Browser 
+|
+ getUserMedia 
+|
+ AudioWorklet 
+|
+ WASM SIMD 
+|
+
+
+|
+---------
+|
+--------------
+|
+--------------
+|
+-----------
+|
+
+
+|
+ Chrome 76+ 
+|
+ Yes 
+|
+ Yes 
+|
+ Yes 
+|
+
+
+|
+ Firefox 76+ 
+|
+ Yes 
+|
+ Yes 
+|
+ Yes 
+|
+
+
+|
+ Safari 14.1+ 
+|
+ Yes 
+|
+ Yes 
+|
+ Partial 
+|
+
+
+|
+ Edge 79+ 
+|
+ Yes 
+|
+ Yes 
+|
+ Yes 
+|
+
+
+
+### Error Handling
+1. Permission denied: Show clear instructions
+2. HTTPS required: Redirect or warn user
+3. AudioWorklet failed: Fall back to ScriptProcessorNode
+4. WASM load failed: Use server-side VAD
+
+### Performance Targets
+- AudioWorklet latency: < 3ms
+- VAD inference: < 1ms per 30ms chunk
+- Total browser processing: < 10ms
+
+Test Your Finalized Skills​
+
+Verify both skills work with production scenarios:
+
+Prompt: "I need to set up a production voice agent with:
+- Natural language IVR (no phone tree)
+- GDPR-compliant call recording for EU customers
+- Automatic failover between Twilio and Telnyx
+- Browser audio option for web users
+
+Use my voice-telephony and web-audio-capture skills to walk me
+through the complete implementation."
+
+
+Your skills should now generate comprehensive guidance covering all production patterns from this chapter.
+
+Try With AI​
+
+Use both skills with these prompts to solidify production patterns.
+
+Prompt 1: Design Your IVR​
+I want to build an IVR for my Task Manager phone agent:
+
+Flow requirements:
+- Greeting: "Hi, this is Task Manager. How can I help?"
+- Intent detection: Natural language, not "press 1 for..."
+- Routing:
+  - Task queries -> Task Agent
+  - Billing -> Billing Agent
+  - Technical issues -> Tech Support
+  - Frustrated callers -> Immediate escalation
+- Fallback: Unclear intent -> Clarification question
+
+Use my voice-telephony skill to help me design:
+1. The complete IVR flow with intent classification
+2. Context that passes with each handoff type
+3. Error handling for unrecognized intent
+4. DTMF fallback for accessibility
+
+I'll implement this with my LiveKit agent and test with real callers.
+
+
+What you're learning: Modern IVR design replaces rigid phone trees with natural conversation. The key insight is that LLM intent classification provides flexibility that DTMF menus never could, while DTMF fallback ensures accessibility for all callers.
+
+Prompt 2: Implement Compliant Recording​
+My voice agent needs call recording for:
+- Training data collection (improving agent responses)
+- Dispute resolution (customer complaints)
+- Quality assurance (agent performance review)
+
+But I have users in:
+- United States (various states including California)
+- European Union (GDPR applies)
+- United Kingdom (post-Brexit rules)
+
+Use my voice-telephony skill to help me:
+1. What consent announcements are required for each region?
+2. How do I detect caller region from phone number?
+3. What retention policies should I implement?
+4. How do I handle GDPR deletion requests?
+5. When must I pause recording (PCI compliance)?
+
+I need a complete compliance implementation, not just guidance.
+
+
+What you're learning: Compliance engineering requires understanding that recording laws vary by jurisdiction and consent type. The key patterns are: detect region, apply appropriate consent flow, implement retention policies, and provide deletion mechanisms for data subject requests.
+
+Prompt 3: Design Failover Architecture​
+My production voice agent needs 99.9% uptime. Current setup:
+- Primary: Twilio Voice (quality preference)
+- Backup: Telnyx (cost optimization)
+- Voice agent: LiveKit on Kubernetes (3 pods)
+- Expected volume: 10,000 calls/month growing 20%
+
+Failure scenarios I need to handle:
+1. Twilio API outage (happened twice last year)
+2. My Kubernetes cluster restart during deployment
+3. Network connectivity issues
+4. Capacity exceeded during traffic spike
+
+Use my voice-telephony skill to design:
+1. Health monitoring for both providers
+2. Automatic failover logic
+3. Graceful degradation when both providers fail
+4. Recovery procedures after outage
+5. Alerting and monitoring setup
+
+I want a multi-provider, multi-region architecture that truly
+achieves 99.9% uptime. Walk me through the design with concrete
+configuration.
+
+
+What you're learning: High-availability telephony requires multiple layers of redundancy. The key insight is that 99.9% uptime (8.7 hours downtime/year) requires failover at every layer: provider, network, and application. Graceful degradation (voicemail, callback) maintains customer experience even during total failures.
+
+Safety Note​
+
+Production telephony systems handle real customer conversations with legal and financial implications. Before deploying:
+
+Test IVR flows with diverse accents and speaking styles
+Verify recording consent flows meet legal requirements for ALL your caller jurisdictions
+Validate failover by intentionally failing primary provider in staging
+Monitor sentiment trends to catch systemic issues before they escalate
+Document your compliance implementation for audit purposes

@@ -1,0 +1,520 @@
+Chaos Engineering Basics
+
+Your Task API is running in production with three replicas. Kubernetes promises self-healing: if a pod dies, ReplicaSet spawns a replacement. But have you seen it happen? Do you know how long recovery takes? What happens to in-flight requests during the transition?
+
+Most teams discover the answers during a real outage. At 3am. With customers waiting.
+
+Chaos engineering inverts this pattern. Instead of waiting for failures to find you, you inject failures intentionally. You break things on purpose, in controlled conditions, during business hours, with monitoring ready. When the real outage comes, you've already seen it. You've already fixed the gaps. You sleep through the night because you've proven your system recovers.
+
+This lesson teaches the "break things on purpose" philosophy and gives you the tools to practice it safely.
+
+The Four Principles of Chaos Engineering​
+
+Chaos engineering isn't random destruction. It's hypothesis-driven experimentation with clear methodology.
+
+Principle 1: Start with a Hypothesis​
+
+Every chaos experiment begins with a specific, falsifiable prediction:
+
+"If I kill one Task API pod, Kubernetes will spawn a replacement within 30 seconds, and no requests will return 5xx errors during the transition."
+
+This is not "let's see what happens." You're stating what you expect, then testing whether reality matches expectation. If it doesn't, you've learned something valuable.
+
+Good hypotheses are specific:
+
+"Recovery within 30 seconds" (measurable)
+"No 5xx errors" (observable)
+"One pod failure" (scoped)
+
+Bad hypotheses are vague:
+
+"The system should handle failures" (how?)
+"Things should be fine" (what does "fine" mean?)
+Principle 2: Vary Real-World Events​
+
+Inject failures that actually happen in production:
+
+Pods crash (OOMKilled, process failure)
+Network partitions (cloud provider issues)
+Disk fills up (log accumulation)
+CPU spikes (noisy neighbors)
+
+Don't waste time on failures that never occur. Focus on what your monitoring has shown you (or what similar systems experience).
+
+Principle 3: Minimize Blast Radius​
+
+Start small. Always.
+
+Phase	Blast Radius	Environment
+First test	One pod	Staging
+Confidence building	50% of pods	Staging
+Pre-production	One pod	Production (off-peak)
+Ongoing validation	One pod	Production (scheduled)
+
+Never start with "kill all pods in production." That's not chaos engineering; that's chaos.
+
+Principle 4: Run Experiments Continuously​
+
+A single successful test proves nothing. Systems change. Dependencies update. New code deploys. Last month's passing test may fail today.
+
+Schedule regular chaos experiments:
+
+Weekly: Core services (Task API pod kill)
+Monthly: Cross-service failures (database unavailable)
+Quarterly: Full Game Day exercises
+Chaos Mesh: CNCF Chaos Engineering Platform​
+
+Chaos Mesh is a CNCF project for Kubernetes-native chaos engineering. It provides CRDs (Custom Resource Definitions) that let you describe experiments declaratively, the same way you describe deployments.
+
+Installing Chaos Mesh​
+
+Install Chaos Mesh with namespace filtering enabled. This ensures experiments only run against namespaces you explicitly allow:
+
+# Add Chaos Mesh Helm repository
+helm repo add chaos-mesh https://charts.chaos-mesh.org
+helm repo update
+
+# Install with namespace filtering (experiments require annotation)
+helm install chaos-mesh chaos-mesh/chaos-mesh \
+  -n chaos-mesh \
+  --create-namespace \
+  --set controllerManager.enableFilterNamespace=true
+
+
+Output:
+
+NAME: chaos-mesh
+NAMESPACE: chaos-mesh
+STATUS: deployed
+REVISION: 1
+NOTES:
+Chaos Mesh is now running.
+
+To enable chaos experiments in a namespace, add annotation:
+  chaos-mesh.org/inject: enabled
+
+Enable Namespace for Chaos Experiments​
+
+By default, Chaos Mesh won't inject failures into any namespace. You must explicitly annotate namespaces where experiments are allowed:
+
+# Enable chaos experiments in staging namespace
+kubectl annotate namespace staging chaos-mesh.org/inject=enabled
+
+# Verify annotation
+kubectl get namespace staging -o jsonpath='{.metadata.annotations.chaos-mesh\.org/inject}'
+
+
+Output:
+
+enabled
+
+
+This is a safety mechanism. Even if someone accidentally applies a chaos experiment, it won't affect production unless production is annotated (which it shouldn't be until you've built confidence in staging).
+
+Experiment Types Overview​
+
+Chaos Mesh provides several experiment types. This lesson focuses on PodChaos; future lessons cover advanced types.
+
+Experiment Type	What It Does	Use Case
+PodChaos	Kill pods, container failures	Test ReplicaSet self-healing
+NetworkChaos	Latency, packet loss, partition	Test timeout handling, circuit breakers
+IOChaos	Disk latency, read/write failures	Test database resilience
+StressChaos	CPU/memory pressure	Test resource limits, OOM handling
+PodChaos: Testing Pod Failure Recovery​
+
+PodChaos is the starting point for chaos engineering. It answers the fundamental question: "Does my application recover when pods die?"
+
+PodChaos CRD Structure​
+
+Here's a complete PodChaos experiment for the Task API:
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: task-api-pod-kill
+  namespace: chaos-mesh
+spec:
+  action: pod-kill           # Kill the pod (not just container)
+  mode: one                  # Kill exactly one matching pod
+  selector:
+    namespaces:
+      - staging              # Only target staging namespace
+    labelSelectors:
+      app: task-api          # Pods with this label
+  duration: "30s"            # Experiment runs for 30 seconds
+
+Key Fields Explained​
+
+action: What to do to the pod
+
+pod-kill: Terminate the pod (Kubernetes respawns it)
+pod-failure: Make pod unavailable without killing it
+container-kill: Kill specific container (pod survives)
+
+mode: How many pods to affect
+
+one: Exactly one random matching pod
+all: Every matching pod (dangerous!)
+fixed: Specific count (e.g., value: "2")
+fixed-percent: Percentage (e.g., value: "50")
+
+selector: Which pods to target
+
+namespaces: Must include namespace explicitly
+labelSelectors: Standard Kubernetes label matching
+fieldSelectors: Pod spec fields (node, phase)
+
+duration: How long the experiment runs
+
+Experiment automatically stops after duration
+Killed pods are not restored (Kubernetes handles recovery)
+Running Your First PodChaos Experiment​
+
+Apply the experiment and observe what happens:
+
+# Apply the chaos experiment
+kubectl apply -f task-api-pod-kill.yaml
+
+# Watch pods in staging namespace
+kubectl get pods -n staging -w
+
+
+Output:
+
+NAME                        READY   STATUS    RESTARTS   AGE
+task-api-7d8f9b6c4d-abc12   1/1     Running   0          2h
+task-api-7d8f9b6c4d-def34   1/1     Running   0          2h
+task-api-7d8f9b6c4d-ghi56   1/1     Running   0          2h
+task-api-7d8f9b6c4d-abc12   1/1     Terminating   0          2h
+task-api-7d8f9b6c4d-jkl78   0/1     Pending       0          0s
+task-api-7d8f9b6c4d-jkl78   0/1     ContainerCreating   0          1s
+task-api-7d8f9b6c4d-jkl78   1/1     Running       0          3s
+
+
+The sequence shows:
+
+Pod abc12 is killed (Terminating)
+ReplicaSet immediately creates jkl78 (Pending)
+Container image pulls (ContainerCreating)
+New pod is ready (Running)
+
+Total recovery time: approximately 3-5 seconds (varies by image size and cluster state).
+
+Check Experiment Status​
+# View experiment status
+kubectl describe podchaos task-api-pod-kill -n chaos-mesh
+
+
+Output:
+
+Name:         task-api-pod-kill
+Namespace:    chaos-mesh
+Status:
+  Experiment:
+    Phase:              Finished
+    Conditions:
+    - Type:             Applied
+      Status:           True
+    Records:
+    - Id:               abc12
+      Phase:            Injected
+      InjectedCount:    1
+
+Safety Features: Why Chaos Mesh Won't Destroy Production​
+
+Chaos Mesh has multiple safety layers:
+
+Namespace Filtering​
+
+As configured above, only annotated namespaces allow experiments. Production isn't annotated.
+
+Selectors​
+
+Experiments only affect pods matching the selector. A typo in labelSelectors means no pods match (experiment does nothing).
+
+Duration Limits​
+
+Experiments automatically stop after duration. Even if you forget, the experiment ends.
+
+RBAC Authorization​
+
+Chaos Mesh respects Kubernetes RBAC. Users without appropriate ClusterRole can't create experiments.
+
+# Example RBAC: Only SRE team can run chaos
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chaos-engineer
+rules:
+  - apiGroups: ["chaos-mesh.org"]
+    resources: ["podchaos", "networkchaos"]
+    verbs: ["create", "delete", "get", "list"]
+
+Mode Selection​
+
+Using mode: one ensures only one pod is affected. Never use mode: all in your first experiments.
+
+The Game Day Pattern​
+
+A Game Day is a structured resilience validation exercise. It's the chaos engineering equivalent of a fire drill: planned, observed, and documented.
+
+The Six-Phase Game Day​
+
+Phase 1: Define Hypothesis
+
+Write your specific, falsifiable prediction:
+
+## Game Day: Task API Pod Failure Recovery
+
+**Date**: 2025-12-30
+**Participants**: SRE team, Backend team
+
+**Hypothesis**:
+If one Task API pod is killed:
+- Kubernetes spawns replacement within 30 seconds
+- No requests return 5xx during transition
+- P95 latency stays under 500ms
+- All in-flight requests complete or are retried by client
+
+
+Phase 2: Set Up Monitoring
+
+Before injecting failures, ensure you can see what happens:
+
+**Monitoring Checklist**:
+- [ ] Grafana dashboard open showing Task API latency
+- [ ] Prometheus alerts configured for error rate
+- [ ] kubectl watch running on staging pods
+- [ ] Log streaming from Task API pods
+
+
+Phase 3: Run in Staging First
+
+Never skip staging. This is where you find surprises:
+
+# Staging experiment
+kubectl apply -f task-api-pod-kill.yaml
+
+
+Phase 4: Observe and Document
+
+Record what actually happened versus what you predicted:
+
+**Observations**:
+- Pod killed at 14:32:15
+- New pod running at 14:32:19 (4 seconds, PASS)
+- Error rate: 0% (PASS)
+- P95 latency: 320ms during transition (PASS)
+
+**Unexpected**: No requests in flight during the kill.
+  Need to run during load test to verify handling.
+
+
+Phase 5: Iterate
+
+Address gaps found in observations:
+
+**Action Items**:
+1. Re-run during load test (100 RPS)
+2. Add NetworkChaos to test graceful degradation
+3. Document RTO as 5 seconds (observed)
+
+
+Phase 6: Graduate to Production (Off-Peak)
+
+Only after staging passes multiple times:
+
+# Enable chaos in production (carefully!)
+kubectl annotate namespace production chaos-mesh.org/inject=enabled
+
+# Run during maintenance window (e.g., Sunday 3am)
+kubectl apply -f task-api-pod-kill-prod.yaml
+
+Game Day Checklist Template​
+
+Use this checklist for every Game Day:
+
+## Game Day Checklist
+
+### Pre-Game
+- [ ] Hypothesis documented with measurable success criteria
+- [ ] Monitoring dashboards open and working
+- [ ] Staging namespace annotated for chaos
+- [ ] Rollback procedure documented (kubectl delete podchaos)
+- [ ] Communication channel open (Slack, Teams)
+- [ ] All participants briefed on their role
+
+### During Game
+- [ ] Announce experiment start
+- [ ] Apply chaos experiment
+- [ ] Record observations in real-time
+- [ ] Compare to hypothesis
+- [ ] Stop early if unexpected behavior
+
+### Post-Game
+- [ ] Document results (pass/fail for each criterion)
+- [ ] Create action items for gaps
+- [ ] Update runbooks with learnings
+- [ ] Schedule follow-up Game Day
+
+Putting It Together: Complete Workflow​
+
+Here's the end-to-end workflow from chaos engineering theory to validated resilience:
+
+1. Write Hypothesis
+   "Task API recovers from pod failure in 30 seconds"
+   ↓
+2. Prepare Monitoring
+   Open Grafana, enable alerts, start log streaming
+   ↓
+3. Enable Staging Namespace
+   kubectl annotate namespace staging chaos-mesh.org/inject=enabled
+   ↓
+4. Create PodChaos Experiment
+   apiVersion: chaos-mesh.org/v1alpha1
+   kind: PodChaos
+   ...
+   ↓
+5. Apply Experiment
+   kubectl apply -f task-api-pod-kill.yaml
+   ↓
+6. Observe and Record
+   Pod killed → New pod running → Recovery time
+   ↓
+7. Compare to Hypothesis
+   30 seconds expected → 5 seconds actual (PASS)
+   ↓
+8. Document and Iterate
+   Update RTO, schedule next Game Day
+
+Collaborative Chaos Design​
+
+This section demonstrates how you and AI collaborate to design and execute chaos experiments.
+
+Your Initial Request​
+
+You ask AI to help you set up chaos engineering for your Task API:
+
+My Task API has 3 replicas in staging. I want to test that it
+recovers from pod failures. Help me write a PodChaos experiment
+that's safe for staging.
+
+AI's Recommendation​
+
+AI suggests a minimal-blast-radius approach:
+
+# Suggested by AI: Start with mode: one, short duration
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: task-api-pod-kill
+  namespace: chaos-mesh
+spec:
+  action: pod-kill
+  mode: one                  # Safe: only one pod
+  selector:
+    namespaces: [staging]    # Safe: only staging
+    labelSelectors:
+      app: task-api
+  duration: "30s"            # Safe: auto-stops
+
+
+AI also notes: "Consider adding a Game Day checklist so you can repeat this experiment systematically."
+
+Your Refinement​
+
+You review AI's suggestion and add your specific requirements:
+
+Good start, but I need to test recovery during actual load.
+Our production traffic is 100 RPS. Can you add a hypothesis
+template that includes latency and error rate thresholds?
+
+AI's Adaptation​
+
+AI updates with your load testing requirement:
+
+## Hypothesis Template (Updated)
+
+**Pre-condition**: Task API under 100 RPS load (use hey or k6)
+
+**Hypothesis**: If one Task API pod is killed during 100 RPS load:
+- Recovery time: < 30 seconds
+- Error rate: < 1% during transition
+- P95 latency: < 500ms during recovery
+- No cascading failures to downstream services
+
+**Load Test Command**:
+hey -z 5m -q 100 https://staging.example.com/tasks
+
+What Emerged​
+
+A chaos engineering approach that neither of you had alone:
+
+AI suggested the safe PodChaos defaults (mode: one, namespace filtering)
+You refined with load testing requirements (100 RPS, latency thresholds)
+Together you produced a complete hypothesis template with measurable success criteria
+Try With AI​
+
+These prompts help you apply chaos engineering to your own deployments.
+
+Prompt 1: Design Your First Hypothesis
+
+I have a [YOUR SERVICE] deployed in Kubernetes with [N] replicas.
+Help me write a chaos engineering hypothesis that includes:
+- Specific failure scenario (pod kill, network delay, etc.)
+- Measurable success criteria (recovery time, error rate)
+- Blast radius limits (which namespace, how many pods)
+
+
+What you're learning: How to think hypothesis-first before running experiments. AI helps you articulate what success looks like before you break anything.
+
+Prompt 2: Expand Experiment Types
+
+I've successfully run PodChaos experiments. Now I want to test
+network resilience. My Task API depends on a PostgreSQL database.
+What NetworkChaos experiment would test graceful degradation
+if database latency increases to 500ms?
+
+
+What you're learning: How to progress from simple (pod kill) to complex (network chaos). AI demonstrates how each experiment type applies to real dependencies.
+
+Prompt 3: Build Your Game Day Runbook
+
+Help me create a Game Day runbook for our production environment.
+Include:
+- Pre-game safety checks
+- Communication templates (announcing start/end)
+- Observation checklists
+- Post-mortem template for documenting learnings
+
+
+What you're learning: How to systematize chaos engineering for your team. A runbook ensures experiments are repeatable and well-documented.
+
+Safety note: Always start chaos experiments in staging. Never run mode: all or skip namespace filtering. Have a rollback command ready (kubectl delete podchaos [name]). Schedule production experiments during low-traffic windows with team awareness.
+
+Reflect on Your Skill​
+
+You built an operational-excellence skill in Lesson 0. Test and improve it based on what you learned about chaos engineering.
+
+Test Your Skill​
+Using my operational-excellence skill, generate a PodChaos experiment
+for my Task API that kills one pod in staging for 30 seconds.
+Does my skill include the correct Chaos Mesh CRD structure?
+Does it enforce namespace filtering for safety?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the Game Day pattern with the six phases?
+Did it explain the four chaos engineering principles?
+Did it include the mode options (one, all, fixed, fixed-percent)?
+Improve Your Skill​
+
+If you found gaps:
+
+My operational-excellence skill is missing the Game Day pattern.
+Update it to include:
+1. Six-phase Game Day structure (hypothesis, monitoring, staging, observe, iterate, graduate)
+2. Game Day checklist template
+3. Post-experiment documentation template

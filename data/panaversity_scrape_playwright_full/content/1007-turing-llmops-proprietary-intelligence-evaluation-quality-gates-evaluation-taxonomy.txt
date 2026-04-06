@@ -1,0 +1,467 @@
+Evaluation Taxonomy
+
+A fine-tuned model that generates beautiful prose might completely fail at following instructions. A model with high accuracy on benchmarks might produce harmful content in edge cases. Understanding what to measure, and what your measurements actually tell you, is the difference between shipping a reliable Digital FTE and shipping a liability.
+
+This lesson maps the landscape of LLM evaluation. You will learn which metrics matter for which tasks, how to interpret results, and when numbers can deceive you.
+
+The Evaluation Dimensions​
+
+Every evaluation approach sits somewhere along three axes:
+
+                    AUTOMATED                          HUMAN
+                        |                                |
+    ┌───────────────────┼────────────────────────────────┼───────────────────┐
+    │ Perplexity        │ Exact Match                    │ Expert Rating     │
+    │ BLEU/ROUGE        │ Schema Validation              │ Preference Tests  │
+    │ Log-likelihood    │ Regex Matching                 │ Turing Tests      │
+    └───────────────────┼────────────────────────────────┼───────────────────┘
+                        |                                |
+                   REFERENCE-BASED                  REFERENCE-FREE
+                        |                                |
+    ┌───────────────────┼────────────────────────────────┼───────────────────┐
+    │ "Does output      │                                │ "Is this output   │
+    │  match expected?" │                                │  good by itself?" │
+    └───────────────────┼────────────────────────────────┼───────────────────┘
+
+
+Dimension 1: Automated vs Human
+
+Automated: Computable without human judgment (fast, cheap, scalable)
+Human: Requires human evaluators (slow, expensive, captures nuance)
+
+Dimension 2: Reference-Based vs Reference-Free
+
+Reference-based: Compare output to known correct answer
+Reference-free: Evaluate output quality without ground truth
+Metric Categories​
+Category 1: Intrinsic Metrics (Model Internals)​
+
+These metrics measure properties of the model itself, not task performance.
+
+Perplexity
+
+Perplexity measures how surprised the model is by a text. Lower perplexity means the model finds the text more expected.
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def calculate_perplexity(model, tokenizer, text):
+    """Calculate perplexity of text under model."""
+    inputs = tokenizer(text, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs, labels=inputs.input_ids)
+    return torch.exp(outputs.loss).item()
+
+# Example
+text = "The capital of France is Paris."
+perplexity = calculate_perplexity(model, tokenizer, text)
+
+
+Output:
+
+Perplexity: 3.42  # Lower = model finds text more expected
+
+
+What perplexity tells you:
+
+How well the model learned the training distribution
+Whether fine-tuning improved language modeling on domain text
+
+What perplexity does NOT tell you:
+
+Whether the model follows instructions
+Whether outputs are factually correct
+Whether the model is safe
+
+Perplexity trap: A model with low perplexity might generate fluent nonsense. Fluency does not equal correctness.
+
+Category 2: Task-Based Accuracy Metrics​
+
+For tasks with clear right/wrong answers.
+
+Metric	Formula	Use When
+Accuracy	(Correct / Total)	Single correct answer
+F1 Score	2 * (P * R) / (P + R)	Classification with imbalanced classes
+Exact Match	Output == Expected	Structured outputs (JSON, code)
+
+Example: Classification Accuracy
+
+def evaluate_classification(model, test_cases):
+    """Evaluate classification accuracy."""
+    correct = 0
+    total = len(test_cases)
+
+    for case in test_cases:
+        prompt = case['prompt']
+        expected = case['expected']
+
+        output = model.generate(prompt)
+        if output.strip() == expected.strip():
+            correct += 1
+
+    accuracy = correct / total
+    return {
+        'accuracy': accuracy,
+        'correct': correct,
+        'total': total
+    }
+
+# Example output
+results = evaluate_classification(model, test_cases)
+
+
+Output:
+
+{'accuracy': 0.87, 'correct': 87, 'total': 100}
+
+
+When accuracy misleads:
+
+Imbalanced classes: 95% "normal" → predicting all "normal" gives 95% accuracy
+Partial credit: Almost-correct answers get zero credit
+Format sensitivity: {"action": "create"} vs { "action" : "create" }
+Category 3: Generation Quality Metrics​
+
+For open-ended text generation where multiple outputs are valid.
+
+BLEU (Bilingual Evaluation Understudy)
+
+Measures n-gram overlap between output and reference.
+
+from nltk.translate.bleu_score import sentence_bleu
+
+def calculate_bleu(reference, candidate):
+    """Calculate BLEU score for single sentence."""
+    reference_tokens = [reference.split()]
+    candidate_tokens = candidate.split()
+    return sentence_bleu(reference_tokens, candidate_tokens)
+
+# Example
+reference = "Create a task to review the quarterly report"
+candidate = "Create a task for reviewing quarterly report"
+bleu = calculate_bleu(reference, candidate)
+
+
+Output:
+
+BLEU: 0.68  # Range 0-1, higher = more overlap
+
+
+ROUGE (Recall-Oriented Understudy for Gisting Evaluation)
+
+Similar to BLEU but focuses on recall (what percentage of reference words appear in output).
+
+ROUGE Variant	What It Measures
+ROUGE-1	Unigram overlap
+ROUGE-2	Bigram overlap
+ROUGE-L	Longest common subsequence
+
+When BLEU/ROUGE mislead:
+
+Paraphrases: "The meeting is at 3pm" vs "At 3pm, the meeting occurs" → low overlap, same meaning
+Factual errors: "Paris is in Germany" vs "Paris is in France" → high overlap, wrong answer
+Creative tasks: Multiple valid outputs exist
+Category 4: Format Compliance Metrics​
+
+For structured outputs like JSON, essential for the Task API use case.
+
+import json
+from jsonschema import validate, ValidationError
+
+TASK_SCHEMA = {
+    "type": "object",
+    "required": ["action", "title"],
+    "properties": {
+        "action": {"enum": ["create", "complete", "list", "delete"]},
+        "title": {"type": "string"},
+        "priority": {"enum": ["low", "medium", "high"]},
+        "due_date": {"type": ["string", "null"]}
+    }
+}
+
+def evaluate_format_compliance(outputs):
+    """Evaluate what percentage of outputs are valid JSON matching schema."""
+    valid = 0
+    parse_errors = 0
+    schema_errors = 0
+
+    for output in outputs:
+        try:
+            parsed = json.loads(output)
+            validate(parsed, TASK_SCHEMA)
+            valid += 1
+        except json.JSONDecodeError:
+            parse_errors += 1
+        except ValidationError:
+            schema_errors += 1
+
+    return {
+        'compliance_rate': valid / len(outputs),
+        'valid': valid,
+        'parse_errors': parse_errors,
+        'schema_errors': schema_errors
+    }
+
+# Example
+results = evaluate_format_compliance(model_outputs)
+
+
+Output:
+
+{
+  'compliance_rate': 0.92,
+  'valid': 92,
+  'parse_errors': 3,
+  'schema_errors': 5
+}
+
+
+Format compliance matters because:
+
+Invalid JSON breaks downstream systems
+Missing fields cause null pointer exceptions
+Wrong types cause API rejections
+Category 5: Safety and Alignment Metrics​
+
+Measuring what the model should NOT do.
+
+Metric	What It Catches
+Harmful response rate	Percentage of unsafe outputs
+Refusal rate	How often model declines harmful requests
+Toxicity score	Offensive language detection
+Bias score	Differential treatment by demographic
+def evaluate_safety(model, red_team_prompts):
+    """Test model against adversarial prompts."""
+    harmful_responses = 0
+    proper_refusals = 0
+
+    for prompt in red_team_prompts:
+        output = model.generate(prompt['text'])
+
+        if is_harmful(output):
+            harmful_responses += 1
+        elif is_refusal(output):
+            proper_refusals += 1
+
+    return {
+        'harmful_rate': harmful_responses / len(red_team_prompts),
+        'refusal_rate': proper_refusals / len(red_team_prompts)
+    }
+
+
+Output:
+
+{'harmful_rate': 0.02, 'refusal_rate': 0.85}
+
+
+Safety thresholds for deployment:
+
+Harmful rate: < 5% (ideally < 1%)
+Refusal rate on harmful prompts: > 90%
+The Metric Selection Framework​
+
+Given a use case, how do you choose metrics?
+
+Q1: Is there a single correct answer?
+    Yes → Use Accuracy/Exact Match
+    No  → Continue
+
+Q2: Is output format structured (JSON, code)?
+    Yes → Use Format Compliance + Semantic Correctness
+    No  → Continue
+
+Q3: Is there a reference output to compare against?
+    Yes → Use BLEU/ROUGE as sanity check, not primary metric
+    No  → Continue
+
+Q4: Is quality subjective (style, helpfulness)?
+    Yes → Use LLM-as-Judge or Human Evaluation
+    No  → Continue
+
+Q5: Is safety critical?
+    Yes → Add Safety Metrics regardless of above
+
+Evaluation Priorities by Task Type​
+Task API Assistant (Our Running Example)​
+Priority	Metric	Threshold
+1	JSON parse rate	> 99%
+2	Schema compliance	> 95%
+3	Action accuracy	> 90%
+4	Field correctness	> 85%
+5	Safety	Harmful < 5%
+Customer Support Bot​
+Priority	Metric	Threshold
+1	Helpfulness (LLM-judge)	> 4.0/5.0
+2	Factual accuracy	> 95%
+3	Tone appropriateness	> 4.5/5.0
+4	Resolution rate	> 80%
+5	Safety	Harmful < 1%
+Code Generation Assistant​
+Priority	Metric	Threshold
+1	Syntax validity	> 99%
+2	Test pass rate	> 80%
+3	Code quality (lint)	< 5 issues
+4	Security (no vulnerabilities)	0 critical
+5	Efficiency	Within 2x optimal
+Update Your Skill​
+
+Add this section to your llmops-evaluator/SKILL.md:
+
+## Evaluation Metric Reference
+
+### Quick Selection Guide
+
+
+|
+ Task Type 
+|
+ Primary Metrics 
+|
+ Secondary Metrics 
+|
+
+
+|
+-----------
+|
+----------------
+|
+-------------------
+|
+
+
+|
+ Classification 
+|
+ Accuracy, F1 
+|
+ Confusion matrix 
+|
+
+
+|
+ JSON output 
+|
+ Parse rate, Schema compliance 
+|
+ Field accuracy 
+|
+
+
+|
+ Free text 
+|
+ LLM-as-Judge 
+|
+ ROUGE (sanity check) 
+|
+
+
+|
+ Safety-critical 
+|
+ Harmful rate, Refusal rate 
+|
+ Toxicity score 
+|
+
+
+
+### Metric Limitations Cheatsheet
+
+
+|
+ Metric 
+|
+ What It Misses 
+|
+
+
+|
+--------
+|
+---------------
+|
+
+
+|
+ Perplexity 
+|
+ Instruction following, factuality 
+|
+
+
+|
+ Accuracy 
+|
+ Partial correctness, paraphrases 
+|
+
+
+|
+ BLEU/ROUGE 
+|
+ Semantic equivalence, factual errors 
+|
+
+
+|
+ Exact match 
+|
+ Valid variations, whitespace 
+|
+
+
+
+### Recommended Minimums
+
+- JSON tasks: 99% parse, 95% schema compliance
+- Classification: 85% accuracy (domain-dependent)
+- Safety: <5% harmful, >90% proper refusal
+- Generation quality: LLM-judge > 4.0/5.0
+
+Try With AI​
+Prompt 1: Analyze Your Use Case​
+I'm building a fine-tuned model for [describe your specific use case].
+
+Help me select evaluation metrics:
+1. What are the primary success criteria?
+2. Which metrics from this taxonomy apply?
+3. What threshold should I set for each metric?
+4. What failure modes might my metrics miss?
+
+
+What you are learning: Metric selection reasoning. Different use cases require different evaluation approaches. Your AI partner helps you think through the specific requirements of your application.
+
+Prompt 2: Identify Metric Gaps​
+I'm evaluating a Task API assistant with these metrics:
+- JSON parse rate: 98%
+- Action accuracy: 92%
+- Schema compliance: 94%
+
+What failure modes might these metrics miss? Give me 3 specific examples of outputs that would pass all these metrics but still be wrong or harmful.
+
+
+What you are learning: Metric limitations. No set of metrics captures everything. Your AI partner helps you identify blind spots before they cause production failures.
+
+Prompt 3: Design a Composite Score​
+I need to combine multiple metrics into a single "quality score" for CI/CD gates.
+
+My metrics:
+- parse_rate (0-1)
+- accuracy (0-1)
+- safety_score (0-1, where 1 = safe)
+
+Propose a weighted formula that:
+1. Fails immediately if safety < 0.95
+2. Weights accuracy higher than parse rate
+3. Returns a 0-100 score
+
+Explain your reasoning for the weights.
+
+
+What you are learning: Quality gate design. Real deployments need a single pass/fail decision. Your AI partner helps you design a scoring system that reflects your priorities.
+
+Safety Note​
+
+Metrics can create false confidence. A model passing all benchmarks might still fail in production on inputs you did not anticipate. Always maintain logging, monitoring, and human review processes alongside automated evaluation.

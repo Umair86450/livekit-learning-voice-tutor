@@ -1,0 +1,384 @@
+Provisioning DOKS Cluster
+
+You have a DigitalOcean account and doctl authenticated. Now comes the moment you've been working toward: creating your first production Kubernetes cluster in the cloud.
+
+This isn't Docker Desktop running locally. This is real cloud infrastructure—virtual machines in a DigitalOcean data center, managed Kubernetes control plane, and a Load Balancer endpoint accessible from anywhere on the internet.
+
+The command takes 5-10 minutes to complete. By the end of this lesson, kubectl get nodes will show nodes running in a real data center, not your laptop.
+
+The Cluster Provisioning Decision​
+
+Before running the command, you need to decide three things:
+
+Decision	Question	Task API Answer
+Node Size	How much CPU/RAM per node?	s-2vcpu-4gb (2 vCPUs, 4GB RAM)
+Node Count	How many worker nodes?	3 nodes (for availability)
+Region	Which data center?	nyc1 (or closest to you)
+Why s-2vcpu-4gb?​
+
+The Task API is a FastAPI application with Dapr sidecar. It doesn't need massive resources:
+
+Node Size	vCPUs	RAM	Monthly Cost	Fit for Task API
+s-1vcpu-2gb	1	2GB	~$12/node	Too small (Dapr needs headroom)
+s-2vcpu-4gb	2	4GB	~$24/node	Right size
+s-4vcpu-8gb	4	8GB	~$48/node	Oversized (wasted money)
+
+The principle: Start with the smallest size that works, scale up when metrics prove you need it.
+
+Why 3 Nodes?​
+
+Kubernetes distributes workloads across nodes. With 3 nodes:
+
+High availability: If one node fails, two remain healthy
+Rolling updates: Pods migrate during updates without downtime
+Resource headroom: Pods aren't fighting for space during deployments
+
+Minimum viable cluster: 2 nodes works but leaves no margin. 3 is the production starting point.
+
+Why Region nyc1?​
+
+Choose the region closest to your users. DigitalOcean regions:
+
+Region	Location	Use When
+nyc1, nyc3	New York	US East Coast users
+sfo1, sfo2	San Francisco	US West Coast users
+ams3	Amsterdam	European users
+sgp1	Singapore	Asian users
+blr1	Bangalore	Indian users
+
+For learning, any region works. For production, proximity reduces latency.
+
+Provision the Cluster​
+
+Run this command to create your DOKS cluster:
+
+doctl kubernetes cluster create task-api-cluster \
+  --region nyc1 \
+  --version 1.31.4-do.0 \
+  --size s-2vcpu-4gb \
+  --count 3 \
+  --wait
+
+
+Output:
+
+Notice: Cluster is provisioning, waiting for cluster to be running
+..........
+Notice: Cluster created, fetching credentials
+Notice: Adding cluster credentials to kubeconfig file
+Notice: Setting current-context to do-nyc1-task-api-cluster
+
+ID                                      Name                 Region    Version        Auto Upgrade    Status     Node Pools
+12345678-abcd-1234-abcd-123456789012    task-api-cluster     nyc1      1.31.4-do.0    false           running    default-pool
+
+
+This takes 5-10 minutes. The --wait flag blocks until the cluster is fully running.
+
+What Each Option Does​
+Option	Value	Effect
+--region	nyc1	Creates cluster in New York data center
+--version	1.31.4-do.0	Kubernetes version (latest stable at time of writing)
+--size	s-2vcpu-4gb	Each worker node gets 2 vCPUs and 4GB RAM
+--count	3	Creates 3 worker nodes in the default node pool
+--wait	(flag)	Blocks until cluster is fully running
+Finding Available Options​
+
+List available Kubernetes versions:
+
+doctl kubernetes options versions
+
+
+Output:
+
+Slug              Kubernetes Version    Supported Features
+1.31.4-do.0       1.31.4               cluster-autoscaler, docr-integration
+1.30.8-do.0       1.30.8               cluster-autoscaler, docr-integration
+1.29.12-do.0      1.29.12              cluster-autoscaler, docr-integration
+
+
+List available node sizes:
+
+doctl kubernetes options sizes
+
+
+Output:
+
+Slug               Name
+s-1vcpu-2gb        s-1vcpu-2gb
+s-2vcpu-2gb        s-2vcpu-2gb
+s-2vcpu-4gb        s-2vcpu-4gb
+s-4vcpu-8gb        s-4vcpu-8gb
+...
+
+
+List available regions for Kubernetes:
+
+doctl kubernetes options regions
+
+
+Output:
+
+Slug    Name
+nyc1    New York 1
+nyc3    New York 3
+sfo2    San Francisco 2
+sfo3    San Francisco 3
+ams3    Amsterdam 3
+sgp1    Singapore 1
+blr1    Bangalore 1
+...
+
+Verify Your Cluster​
+
+After provisioning completes, verify the cluster is healthy.
+
+Check Nodes​
+kubectl get nodes
+
+
+Output:
+
+NAME                         STATUS   ROLES    AGE   VERSION
+task-api-cluster-default-1   Ready    <none>   5m    v1.31.4
+task-api-cluster-default-2   Ready    <none>   5m    v1.31.4
+task-api-cluster-default-3   Ready    <none>   5m    v1.31.4
+
+
+You now have 3 worker nodes running in DigitalOcean's data center. These are real virtual machines.
+
+Check System Pods​
+kubectl get pods -n kube-system
+
+
+Output:
+
+NAME                                       READY   STATUS    RESTARTS   AGE
+cilium-operator-5d4b8c9c79-2xjkl          1/1     Running   0          5m
+cilium-qhkpl                               1/1     Running   0          5m
+cilium-rk2ht                               1/1     Running   0          5m
+cilium-vn4xf                               1/1     Running   0          5m
+coredns-5d78c9869d-4lmjk                  1/1     Running   0          5m
+coredns-5d78c9869d-8npqr                  1/1     Running   0          5m
+csi-do-node-2jkl8                         2/2     Running   0          5m
+csi-do-node-9mqrs                         2/2     Running   0          5m
+csi-do-node-ltp4z                         2/2     Running   0          5m
+do-node-agent-7vxzk                       1/1     Running   0          5m
+do-node-agent-9lmno                       1/1     Running   0          5m
+do-node-agent-kp2rs                       1/1     Running   0          5m
+kube-proxy-5jklm                          1/1     Running   0          5m
+kube-proxy-8npqr                          1/1     Running   0          5m
+kube-proxy-vxyz1                          1/1     Running   0          5m
+
+
+Key components:
+
+cilium: Network plugin (DigitalOcean's choice for DOKS)
+coredns: DNS for service discovery
+csi-do-node: Storage driver for DigitalOcean volumes
+do-node-agent: DigitalOcean monitoring agent
+kube-proxy: Network rules for Services
+
+All pods should be Running with no restarts.
+
+Check Cluster Info​
+kubectl cluster-info
+
+
+Output:
+
+Kubernetes control plane is running at https://12345678-abcd-1234-abcd-123456789012.k8s.ondigitalocean.com
+CoreDNS is running at https://12345678-abcd-1234-abcd-123456789012.k8s.ondigitalocean.com/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+
+The control plane URL shows this is a managed DOKS cluster—DigitalOcean handles control plane availability.
+
+Understanding kubeconfig and Context​
+
+When doctl created the cluster, it automatically:
+
+Downloaded credentials to ~/.kube/config
+Set the current context to your DOKS cluster
+View Your Contexts​
+kubectl config get-contexts
+
+
+Output:
+
+CURRENT   NAME                          CLUSTER                       AUTHINFO                            NAMESPACE
+          docker-desktop                docker-desktop                docker-desktop
+*         do-nyc1-task-api-cluster      do-nyc1-task-api-cluster      do-nyc1-task-api-cluster
+
+
+The * marks your current context. You're now connected to DOKS, not Docker Desktop.
+
+Switch Between Contexts​
+
+To switch back to Docker Desktop for local testing:
+
+kubectl config use-context docker-desktop
+
+
+Output:
+
+Switched to context "docker-desktop".
+
+
+To switch back to DOKS:
+
+kubectl config use-context do-nyc1-task-api-cluster
+
+
+Output:
+
+Switched to context "do-nyc1-task-api-cluster".
+
+Manually Save kubeconfig (If Needed)​
+
+If you need to reconfigure kubectl credentials (new machine, expired tokens):
+
+doctl kubernetes cluster kubeconfig save task-api-cluster
+
+
+Output:
+
+Notice: Adding cluster credentials to kubeconfig file found in "/Users/yourname/.kube/config"
+Notice: Setting current-context to do-nyc1-task-api-cluster
+
+
+This regenerates tokens and updates your local kubeconfig.
+
+Cost Awareness​
+
+Your cluster is now costing money. Know what you're paying:
+
+Resource	Monthly Cost
+3x s-2vcpu-4gb nodes	~$72/month ($24 each)
+Load Balancer (created in L04)	~$12/month
+Total minimum	~$84/month
+Set Up Budget Alerts​
+
+Go to cloud.digitalocean.com/account/billing and set:
+
+Alert threshold: $100/month (warns before you hit limit)
+Email notifications: Enabled
+Teardown When Not Using​
+
+If you're done learning for the day, delete the cluster:
+
+doctl kubernetes cluster delete task-api-cluster --force
+
+
+You can reprovision in 5-10 minutes. Don't pay for idle clusters.
+
+Common Issues​
+"Error: unable to find a default cluster"​
+
+Your context isn't set correctly. Run:
+
+doctl kubernetes cluster kubeconfig save task-api-cluster
+
+"Error: could not authenticate"​
+
+Your DigitalOcean token expired or doctl isn't authenticated. Re-authenticate:
+
+doctl auth init
+
+Cluster Creation Takes Longer Than 10 Minutes​
+
+Sometimes node provisioning is slow. Check status in DigitalOcean dashboard or run:
+
+doctl kubernetes cluster get task-api-cluster
+
+
+If status is provisioning, wait. If status is error, delete and retry.
+
+"Error: not enough resources"​
+
+DigitalOcean may have capacity constraints in a region. Try:
+
+Different region (--region sfo2)
+Smaller node size (--size s-1vcpu-2gb)
+Fewer nodes (--count 2)
+What You've Accomplished​
+
+You now have:
+
+A production Kubernetes cluster running in DigitalOcean's data center
+3 worker nodes with 2 vCPUs and 4GB RAM each
+kubectl configured to communicate with DOKS
+Understanding of node sizing, count, and region selection
+Context switching between local and cloud clusters
+
+This is real cloud infrastructure. The kubectl commands you learned in Chapter 80 work identically here. The difference: these nodes are in a data center, not your laptop.
+
+Next lesson, you'll configure the cloud Load Balancer and DNS—making your cluster accessible from the internet.
+
+Try With AI​
+
+Explore your DOKS cluster with AI assistance.
+
+Prompt 1: Node Pool Configuration​
+I just provisioned a DOKS cluster with 3 nodes using s-2vcpu-4gb size.
+
+Looking at 'doctl kubernetes cluster node-pool list task-api-cluster',
+I see a 'default-pool'.
+
+How do I:
+1. Add a second node pool with larger nodes for memory-intensive workloads?
+2. Use node selectors to schedule specific pods to specific pools?
+3. Enable cluster autoscaling to add nodes during high load?
+
+
+What you're learning: Node pool management for heterogeneous workloads—running different pod types on different node sizes.
+
+Prompt 2: Kubernetes Version Upgrades​
+My DOKS cluster is running Kubernetes 1.31.4-do.0.
+
+DigitalOcean will release newer versions over time. Help me understand:
+1. How do I check what versions are available for upgrade?
+2. What's the process for upgrading a running cluster?
+3. What are the risks and how do I minimize downtime?
+
+
+What you're learning: Cluster lifecycle management—keeping Kubernetes current without disrupting running workloads.
+
+Prompt 3: Multi-Cluster Strategy​
+I now have both docker-desktop and do-nyc1-task-api-cluster contexts in kubectl.
+
+For a real development workflow:
+1. How do I avoid accidentally deploying to production?
+2. What naming conventions help distinguish dev/staging/prod clusters?
+3. Should I use tools like kubectx/kubens to manage contexts?
+
+
+What you're learning: Safe multi-cluster workflows that prevent production incidents.
+
+Reflect on Your Skill​
+
+You built a multi-cloud-deployer skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my multi-cloud-deployer skill, generate the doctl command
+to provision a DOKS cluster in Amsterdam (ams3) with 2 nodes of 4 vCPUs each.
+
+
+Does your skill produce the correct doctl kubernetes cluster create command with --region ams3, --size s-4vcpu-8gb, and --count 2?
+
+Identify Gaps​
+
+Ask yourself:
+
+Does my skill include kubeconfig save and context switching?
+Does it explain node size selection for different workloads?
+Does it cover the --wait flag and provisioning verification commands?
+Improve Your Skill​
+
+If you found gaps:
+
+My multi-cloud-deployer skill is missing DOKS provisioning patterns.
+Update it to include:
+- doctl kubernetes cluster create with all common options
+- doctl kubernetes cluster kubeconfig save for credential management
+- kubectl config use-context for cluster switching
+- Verification commands (kubectl get nodes, kubectl cluster-info)
+- Cost awareness and teardown procedures

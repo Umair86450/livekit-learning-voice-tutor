@@ -1,0 +1,300 @@
+Context Architecture: The Complete System
+
+You learned HOW to create CLAUDE.md files, Skills, Subagents, and Hooks in Chapter 14. This lesson teaches WHY each exists and WHEN to use each one,as parts of a complete context management system.
+
+Four Tools, Four Loading Patterns​
+
+Each tool has a different relationship with your context window:
+
+Tool	When It Loads	What Loads	Context Cost
+CLAUDE.md	Session start	Full content	Every request
+Skills	Descriptions at start; content when invoked	~100 tokens per description; full content on use	Low until needed
+Subagents	When spawned	Fresh, isolated context	Zero in main session
+Hooks	On trigger	Nothing (runs externally)	Zero
+
+Understanding this table is understanding context architecture.
+
+The Loading Timeline​
+
+At session start, Claude loads:
+
+System prompt (you don't control this)
+Your CLAUDE.md (full content)
+Skill descriptions (names and one-line summaries)
+MCP tool definitions (if any)
+Git status and workspace info
+
+During the session, Claude loads:
+
+Skill full content (when you invoke /skill-name or Claude decides it's relevant)
+Subagent results (summaries returned, not full work)
+Hook output (only if the hook returns messages)
+
+What this means: CLAUDE.md consumes context from turn 1. Skills consume context only when needed. Subagents never consume your main context. Hooks run outside the context entirely.
+
+The Decision Framework​
+
+Use this framework to choose the right tool:
+
+Information Type	Best Tool	Why
+Always needed, stable	CLAUDE.md	Pay the cost once, available everywhere
+Sometimes needed, stable	Skill	On-demand loading saves context
+Needs fresh analysis	Subagent	Isolated context prevents pollution
+Must happen every time	Hook	Deterministic, no LLM variance
+When to Use CLAUDE.md​
+
+Put information in CLAUDE.md when:
+
+Claude needs it for EVERY task (project conventions, build commands)
+It rarely changes (architectural decisions, team agreements)
+Removing it would cause Claude to make mistakes
+
+Examples:
+
+pnpm, not npm (always relevant)
+Run tests with pytest -v (needed whenever testing)
+Use snake_case for Python, camelCase for JavaScript (affects all code)
+When to Use Skills​
+
+Put information in Skills when:
+
+Claude needs it SOMETIMES (domain-specific workflows)
+It's substantial (more than a few lines)
+You might invoke it manually (/skill-name)
+
+Examples:
+
+Code review checklist (only when reviewing)
+Deployment procedures (only when deploying)
+API documentation (only when integrating)
+When to Use Subagents​
+
+Use Subagents when:
+
+Work requires reading many files or extensive research
+You need a fresh perspective without accumulated bias
+The work should happen in parallel
+
+Examples:
+
+Research task: "Find all usages of deprecated API"
+Analysis task: "Review security across all auth files"
+Parallel work: Three agents tackle three modules simultaneously
+When to Use Hooks​
+
+Use Hooks when:
+
+Something must happen EVERY time, no exceptions
+It's deterministic (no LLM judgment needed)
+It should run externally without consuming context
+
+Examples:
+
+Lint check after every file edit
+Format validation before every commit
+Logging for audit purposes
+Context Architecture in Practice​
+Example: A Marketing Consultant​
+
+A marketing consultant uses Claude Code for campaign analysis:
+
+CLAUDE.md (~50 lines, always loaded):
+
+# Project Context
+
+- Client: TechStartup Inc.
+- Brand voice: Professional but approachable
+- Avoid: Industry jargon, corporate speak
+
+# Workflow
+
+- All reports in Markdown
+- Include metrics with sources
+- Weekly summary format: Executive → Details → Recommendations
+
+
+Skills (loaded when relevant):
+
+/competitor-analysis. Framework for analyzing competitor campaigns
+/metrics-dashboard. Standard metrics definitions and benchmarks
+/campaign-brief. Template for new campaign proposals
+
+Subagent (isolated, returns summary):
+
+Research agent scans 50 competitor social posts, returns "Top 5 patterns"
+Main context never sees 50 posts, just the summary
+
+Hook (zero context cost):
+
+After every report edit, hook validates required sections exist
+Returns only pass/fail, doesn't consume context
+The Math​
+
+Without architecture (everything in CLAUDE.md):
+
+500-line CLAUDE.md = ~4,000 tokens
+Competitor analysis framework = ~1,500 tokens
+Metrics definitions = ~1,000 tokens
+Campaign template = ~800 tokens
+Total baseline: ~7,300 tokens every request
+
+With architecture:
+
+50-line CLAUDE.md = ~400 tokens (always)
+3 skill descriptions = ~150 tokens (always)
+Skill content = ~3,300 tokens (only when invoked)
+Research via subagent = 0 tokens in main context
+Total baseline: ~550 tokens every request
+
+Result: 13x reduction in baseline context load. The saved tokens go to your actual work instead of always-loaded content.
+
+Common Architecture Mistakes​
+Mistake 1: Everything in CLAUDE.md​
+
+Symptom: 300+ line CLAUDE.md, Claude ignores important instructions
+
+Problem: Attention diluted across content that's only sometimes relevant
+
+Fix: Move domain-specific content to Skills, keep CLAUDE.md under 60 lines
+
+Mistake 2: Never Using Subagents​
+
+Symptom: Context fills quickly during research tasks, quality degrades
+
+Problem: All file reads and searches accumulate in main context
+
+Fix: Delegate research to Subagents, receive summaries instead of raw data
+
+Mistake 3: Skills for Everything​
+
+Symptom: Many skills exist but Claude rarely invokes them correctly
+
+Problem: Skill descriptions don't clearly signal when to use them
+
+Fix: Write clear descriptions, or set disable-model-invocation: true for manual-only skills
+
+Mistake 4: Forgetting Hooks Exist​
+
+Symptom: Repetitive validation tasks consume LLM calls
+
+Problem: Using Claude for deterministic checks it doesn't need to reason about
+
+Fix: Move deterministic validations to Hooks, save context for actual reasoning
+
+Lab: Map Your Context Architecture​
+
+Objective: Design a context architecture for your project or domain.
+
+Step 1: Inventory Your Information
+
+List everything Claude needs to know for your work:
+
+# Information Inventory
+
+## Always Needed
+
+- [List items Claude needs every single time]
+
+## Sometimes Needed
+
+- [List domain-specific workflows, templates, procedures]
+
+## Research-Heavy
+
+- [List tasks requiring extensive file reading or analysis]
+
+## Deterministic Checks
+
+- [List validations that don't require reasoning]
+
+
+Step 2: Apply the Framework
+
+For each item, assign the appropriate tool:
+
+Information	Tool	Rationale
+[Item 1]	CLAUDE.md / Skill / Subagent / Hook	[Why this tool]
+[Item 2]	...	...
+
+Step 3: Calculate the Cost
+
+Estimate token impact:
+
+# Context Cost Analysis
+
+## Without Architecture
+
+- All content in CLAUDE.md: ~[X] tokens every request
+
+## With Architecture
+
+- CLAUDE.md baseline: ~[Y] tokens
+- Skill descriptions: ~[Z] tokens
+- Average skill invocation: ~[W] tokens (only when needed)
+
+## Savings
+
+- Baseline reduction: [percentage]
+- Context available for work: [additional tokens]
+
+
+Step 4: Implement One Piece
+
+Choose the highest-impact change and implement it:
+
+Move one section from CLAUDE.md to a Skill, OR
+Create one Subagent for research tasks, OR
+Add one Hook for deterministic validation
+What You Learned​
+Four tools have four loading patterns: CLAUDE.md always loads, Skills load on-demand, Subagents use isolated context, Hooks run externally
+The decision framework maps information type to appropriate tool; always-needed → CLAUDE.md, sometimes-needed → Skill, fresh-analysis → Subagent, deterministic → Hook
+Context architecture dramatically reduces baseline load: 10x+ reduction is achievable by distributing information appropriately
+Common mistakes include overloading CLAUDE.md, avoiding Subagents, unclear skill descriptions, and forgetting Hooks
+Try With AI​
+Prompt 1: Architecture Audit​
+Review my current context setup:
+- CLAUDE.md has [X] lines
+- I have [Y] skills
+- I never use subagents
+- I have no hooks
+
+Analyze where I'm wasting context.
+What should I move to Skills?
+What should become Subagent tasks?
+What deterministic checks could be Hooks?
+
+
+What you're learning: Identifying architecture inefficiencies in your own setup.
+
+Prompt 2: Design Challenge​
+I'm a [your profession] working on [your project type].
+My recurring tasks are:
+1. [Task 1]
+2. [Task 2]
+3. [Task 3]
+
+Design a context architecture:
+- What goes in CLAUDE.md (under 60 lines)?
+- What Skills should I create?
+- What Subagent patterns would help?
+- What Hooks would reduce context waste?
+
+
+What you're learning: Applying the framework to your actual work.
+
+Prompt 3: Migration Plan​
+I have a 400-line CLAUDE.md that I need to refactor.
+Here's the current content: [paste content]
+
+Create a migration plan:
+1. What stays in CLAUDE.md? (under 60 lines)
+2. What becomes Skills? (list with descriptions)
+3. What changes to Subagent patterns?
+4. What becomes Hooks?
+
+Include rationale for each decision.
+
+
+What you're learning: Practical migration from overloaded setup to proper architecture.
+
+Flashcards Study Aid​

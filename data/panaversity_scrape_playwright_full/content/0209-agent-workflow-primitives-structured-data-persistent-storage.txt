@@ -1,0 +1,140 @@
+Chapter 21: Structured Data & Persistent Storage
+
+SQL: 100% accuracy. $0.51. Forty-five seconds. Bash: 52.7% accuracy. $3.34. Four hundred seconds. Same data. Same questions. Different tools. -- Braintrust/Vercel, "Testing if Bash is All You Need"
+
+Your tax script in Computation & Data Extraction works perfectly -- for one person, one year, one question. Then your boss asks for monthly breakdowns by user and category across three years. You add a loop. She asks for rolling averages. You add another loop. She asks which users overspent in Q3 relative to their Q1 budgets. You stare at your screen and realize you are writing a database engine inside a Python script, one painful for loop at a time.
+
+Here is what that ceiling looks like in code:
+
+# tax-prep.py — works great for one question
+import csv
+
+with open("expenses.csv") as f:
+    total = sum(float(row["amount"]) for row in csv.DictReader(f))
+    print(f"Total: ${total:.2f}")
+
+# Boss asks: "monthly breakdown by category for 3 years?"
+# Now you need nested dicts, date parsing, grouping logic,
+# and a growing pile of loops that nobody wants to maintain.
+
+
+Output:
+
+Total: $14,892.37
+
+
+That script is correct. It is also a dead end. Every new question means new code, new bugs, and new testing -- for a problem that databases solved decades ago.
+
+Teaching Aid​
+🖥️ Fullscreen
+What You Will Learn​
+
+Working script. Broken requirements. Structural solution. Production confidence.
+
+That is the journey. You will take a script that computes correctly and watch it buckle under real-world pressure. Then you will rebuild it on foundations that handle evolving questions, multiple users, and concurrent writes without flinching.
+
+Escalation Contract​
+
+Part 2 tells a constraint-driven escalation story:
+
+You use Bash first for file movement, discovery, and orchestration.
+You escalate to Python when deterministic computation and robust parsing are required.
+You escalate to SQL when persistence, relationships, and query flexibility become the primary concern.
+You add hybrid verification only when output risk justifies the extra cost.
+
+If you can explain that sequence clearly at chapter end, continuity from the File Processing and Computation & Data Extraction chapters is intact.
+
+The Computation & Data Extraction Ceiling​
+
+A Computation & Data Extraction chapter scripts can be excellent and still hit hard limits:
+
+New question, new loop. Every evolving query means rewriting application logic instead of just asking a different question.
+Relationships enforced by convention. Nothing stops you from inserting an expense under a category that does not exist. Correctness depends on memory and discipline.
+Shared state gets fragile. Two users updating the same CSV at the same time? You are one race condition away from corrupted data.
+Concurrency is a time bomb. Multiple writers touching the same logical records will eventually produce silent corruption.
+
+You can keep patching loops and tightening conventions. But when reliability depends on memory and discipline alone, the system will drift. (Ask anyone who has maintained a shared spreadsheet for more than six months.)
+
+The Chapter 21 Promise​
+
+By moving to SQLAlchemy + Neon PostgreSQL, you gain:
+
+Typed schema contracts that reject bad data at the boundary.
+Relational integrity constraints that make impossible states impossible.
+Transaction boundaries that treat multi-step writes as atomic operations.
+Query reuse -- new questions without new code.
+Cloud persistence that survives process restarts, laptop closures, and coffee spills.
+Selective verification policies for high-stakes outputs.
+Escalation Map​
+Stage	Primary Tool	Strength	Breakpoint
+File Processing	Bash	File discovery, batch operations, workflow control	Weak for decimal computation and schema-aware querying
+Computation & Data Extraction	Python	Deterministic parsing and computation	Brittle for long-lived, multi-user, relationship-heavy queries
+Structured Data	SQLAlchemy + PostgreSQL	Persistent structure, relational integrity, safe concurrent writes	High-stakes reports may still need independent verification
+
+This chapter does not replace earlier tools. It adds the right tool when the old tool reaches its boundary.
+
+Running Story​
+
+To keep cognitive load low, every lesson follows one story:
+
+A budget tracker that started as yearly CSV scripts now needs monthly user-level reporting, reliable category relationships, and safe release behavior for financial outputs. Every lesson solves one failure mode in that story.
+
+What You Will Build​
+
+A Neon-backed Budget Tracker you designed, your agent built, and you verified end-to-end.
+
+Chapter Contract​
+
+By chapter end, you should be able to answer these five questions:
+
+Why do Computation & Data Extraction loops become expensive and fragile for evolving structured queries?
+How do schema and constraints prevent silent data corruption?
+Why is a transaction boundary a business correctness boundary?
+When is SQL-only enough, and when is independent verification worth the extra cost?
+What evidence proves a system is release-ready beyond a happy-path demo?
+Seven Principles (Compact)​
+Principle	Chapter 21 Application
+P1 Bash is the Key	Operational glue for environment checks, diagnostics, and run orchestration
+P2 Code as Universal Interface	Model code defines schema contracts that every tool follows
+P3 Verification as Core Step	Commit checks, rollback drills, and risk-based hybrid verification
+P4 Small Reversible Decomposition	Build layer by layer: model, CRUD, relationships, transactions, deployment
+P5 Persisting State in Files	Persistence graduates from local files to managed relational storage
+P6 Constraints and Safety	Foreign keys, constraints, rollback paths, and mismatch block policy
+P7 Observability	SQL visibility, connection diagnostics, and evidence bundles
+Lesson Flow​
+Lesson	Outcome	Fast Visible Win
+L0 From CSV to Databases	Decide when Computation & Data Extraction patterns should escalate to SQL	Name 3 concrete breakpoints in your current workflow
+L1 Build Your Database Skill	Verify data survives after your agent's program exits	Direct agent to prove persistence; read the verification output
+L2 Models as Code	Describe your data model clearly enough for an agent to build	Review agent's schema output against your plain-English description
+L3 Creating and Reading Data	Verify agent-written CRUD is safe and correct	Direct agent to store and retrieve one row; confirm the output
+L4 Relationships and Joins	Ask for linked data in English; verify the result	Describe a join in business terms; verify the agent's query output
+L5 Transactions and Atomicity	Decide when operations need all-or-nothing guarantees	Direct agent to simulate a failed transfer; verify zero partial rows
+L6 Connecting to Neon	Direct the cloud deployment and verify the connection	Verify SELECT 1 → OK after agent configures Neon connection
+L7 Hybrid Patterns	Decide when SQL-only is enough vs when verification is needed	Catch a deliberate mismatch; decide whether to block release
+L8 Capstone	Act as director: describe, verify, and make a release decision	Review agent's evidence bundle and make an explicit release call
+Prerequisites​
+Computation & Data Extraction chapter complete
+Terminal access
+Neon free account
+No Python or SQL knowledge required: your agent writes all the code
+No-Regression Rules​
+
+No simplification is allowed to remove:
+
+Transaction rollback discipline -- every multi-step write must have a rollback path.
+Foreign-key and constraint enforcement -- impossible states stay impossible.
+Secret handling basics -- DATABASE_URL never appears in source code.
+Mismatch policy for high-stakes verification -- when SQL and raw paths disagree, release is blocked.
+
+If a rewrite makes content shorter but drops any of these, it is a regression.
+
+After Chapter 21​
+
+When you finish this chapter, your engineering posture changes:
+
+Treat persistence as a contract. Schema defines what is allowed. Everything else is rejected at the boundary.
+Separate query correctness from release safety. A correct query can still produce a dangerous release if verification is missing.
+Back every readiness claim with evidence. Rollback proof, connection reliability, mismatch policy output -- not just a passing demo.
+Plan for schema evolution. Add migration discipline before your models change in production.
+
+Start with Lesson 0: When Bash and Python Hit the Wall.

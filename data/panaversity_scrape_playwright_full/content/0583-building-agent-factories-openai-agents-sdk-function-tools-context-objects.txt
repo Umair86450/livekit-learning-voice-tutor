@@ -1,0 +1,524 @@
+Function Tools & Context Objects
+
+An agent without tools is just a chatbot. Tools give agents hands.
+
+When you built your first agent in the previous lesson, it could only respond with text. It had no way to check the weather, query a database, send an email, or perform any action in the real world. That changes now. Tools transform your agent from a conversational assistant into an autonomous worker that can actually do things.
+
+But tools alone aren't enough for sophisticated agents. Your Customer Support Digital FTE needs to remember the current user's ID, track which project they're working on, and count how many tasks have been processed in this session. This state needs to persist across multiple tool calls within a single conversation. That's where context objects come in---they're Pydantic models that hold shared state accessible to every tool, handoff, and agent in your system.
+
+By the end of this lesson, you'll have built a TaskManager agent with tools that create, list, and complete tasks, all sharing state through a typed context object. This is the foundation for every production agent you'll build.
+
+Why Tools Matter​
+
+Consider what your Customer Support agent needs to do:
+
+Action	Without Tools	With Tools
+Check order status	"I don't have access to orders"	Queries database, returns real status
+Create support ticket	"Please call our hotline"	Creates ticket, returns ticket number
+Send confirmation email	"I've noted your request"	Sends email, confirms delivery
+Look up documentation	"I think the answer is..."	Retrieves exact documentation
+
+Tools are the bridge between conversation and action. The OpenAI Agents SDK makes tool creation remarkably simple: decorate a Python function, add type hints, and the agent automatically knows how to call it.
+
+Creating Your First Tool​
+
+The @function_tool decorator transforms any Python function into a tool. Here's the simplest possible tool:
+
+from agents import Agent, Runner, function_tool
+
+@function_tool
+def get_current_time() -> str:
+    """Return the current time."""
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M:%S")
+
+agent = Agent(
+    name="time_agent",
+    instructions="You help users with time-related questions.",
+    tools=[get_current_time]
+)
+
+result = Runner.run_sync(agent, "What time is it?")
+print(result.final_output)
+
+
+Output:
+
+The current time is 14:32:17.
+
+
+That's it. The @function_tool decorator:
+
+Inspects your function signature
+Generates a JSON schema the agent can understand
+Extracts the description from your docstring
+Handles calling your function when the agent decides to use it
+Type Hints and Docstrings: How Agents Understand Tools​
+
+The agent doesn't read your code---it reads the schema generated from your type hints and docstring. These aren't optional decorations; they're the API contract that tells the agent what your tool does and how to call it.
+
+@function_tool
+def add_task(title: str, priority: int = 1) -> str:
+    """
+    Add a new task to the task list.
+
+    Args:
+        title: The task description (required)
+        priority: Priority level 1-5 where 5 is highest (optional, defaults to 1)
+
+    Returns:
+        Confirmation message with task ID
+    """
+    task_id = "task_" + str(hash(title))[:8]
+    return f"Created task {task_id}: '{title}' with priority {priority}"
+
+
+When the SDK processes this function, it generates a schema like:
+
+{
+  "name": "add_task",
+  "description": "Add a new task to the task list.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "The task description (required)"
+      },
+      "priority": {
+        "type": "integer",
+        "description": "Priority level 1-5 where 5 is highest (optional, defaults to 1)",
+        "default": 1
+      }
+    },
+    "required": ["title"]
+  }
+}
+
+
+The agent reads this schema and knows:
+
+What the tool does (from description)
+What parameters it needs (from properties)
+Which are required vs optional (from required array)
+What types to provide (from type definitions)
+
+Best Practice: Write docstrings as if explaining the tool to a colleague. The agent literally uses this text to decide when and how to call your tool.
+
+Introducing Context Objects​
+
+Tools are powerful, but they're stateless by default. Each tool call is independent---there's no built-in way to share information between tools or remember state across a conversation.
+
+Context objects solve this. They're Pydantic models that hold shared state and get passed to every component in your agent system.
+
+from pydantic import BaseModel
+
+class TaskManagerContext(BaseModel):
+    """Context for the TaskManager agent."""
+    user_id: str | None = None
+    current_project: str | None = None
+    tasks_added: int = 0
+
+
+This context tracks:
+
+Who is using the agent (user_id)
+What project they're working in (current_project)
+How many tasks have been added this session (tasks_added)
+Connecting Context to Your Agent​
+
+The SDK uses generics to type-check context throughout your agent system. When you declare Agent[TaskManagerContext], TypeScript-style safety ensures your tools receive the correct context type:
+
+from agents import Agent, Runner
+from pydantic import BaseModel
+
+class TaskManagerContext(BaseModel):
+    user_id: str | None = None
+    current_project: str | None = None
+    tasks_added: int = 0
+
+agent = Agent[TaskManagerContext](
+    name="task_manager",
+    instructions="You help users manage their tasks.",
+    tools=[]  # We'll add tools next
+)
+
+# Create context and pass to Runner
+context = TaskManagerContext(
+    user_id="user_123",
+    current_project="Project Alpha"
+)
+
+result = Runner.run_sync(
+    agent,
+    "What's my current project?",
+    context=context
+)
+print(result.final_output)
+
+
+Output:
+
+Your current project is Project Alpha.
+
+
+The context flows through the entire agent run, available to dynamic instructions, tools, guardrails, and handoffs.
+
+Accessing Context in Tools​
+
+To access context within a tool, add RunContextWrapper[YourContextType] as the first parameter:
+
+from agents import function_tool, RunContextWrapper
+
+@function_tool
+def add_task(
+    ctx: RunContextWrapper[TaskManagerContext],
+    title: str,
+    priority: int = 1
+) -> str:
+    """
+    Add a new task to the task list.
+
+    Args:
+        title: The task description
+        priority: Priority level 1-5 where 5 is highest
+
+    Returns:
+        Confirmation message with task ID
+    """
+    # Access context through ctx.context
+    user = ctx.context.user_id or "anonymous"
+    project = ctx.context.current_project or "default"
+
+    task_id = f"task_{hash(title) % 10000:04d}"
+
+    return f"Created task {task_id}: '{title}' (priority {priority}) for {user} in {project}"
+
+
+The RunContextWrapper provides access to:
+
+ctx.context: Your Pydantic model instance
+ctx.usage: Token usage tracking
+Other run metadata
+
+Important: The SDK automatically detects RunContextWrapper as the first parameter and excludes it from the tool's schema. Users never see or provide this parameter---it's injected by the runtime.
+
+Mutating Context​
+
+Context isn't just for reading---tools can modify it to track state across calls:
+
+@function_tool
+def add_task(
+    ctx: RunContextWrapper[TaskManagerContext],
+    title: str,
+    priority: int = 1
+) -> str:
+    """
+    Add a new task to the task list.
+
+    Args:
+        title: The task description
+        priority: Priority level 1-5 where 5 is highest
+
+    Returns:
+        Confirmation message with task ID
+    """
+    # Increment the counter
+    ctx.context.tasks_added += 1
+
+    user = ctx.context.user_id or "anonymous"
+    project = ctx.context.current_project or "default"
+    task_id = f"task_{hash(title) % 10000:04d}"
+
+    return f"Created task {task_id}: '{title}' (priority {priority}) for {user} in {project}. Total tasks this session: {ctx.context.tasks_added}"
+
+@function_tool
+def get_session_stats(ctx: RunContextWrapper[TaskManagerContext]) -> str:
+    """Get statistics for the current session."""
+    return f"Session stats: {ctx.context.tasks_added} tasks added for user {ctx.context.user_id or 'anonymous'}"
+
+
+Now when the agent adds multiple tasks, the counter increments:
+
+result = Runner.run_sync(agent, "Add tasks: 'Review PR', 'Update docs', 'Deploy'", context=context)
+print(result.final_output)
+
+
+Output:
+
+I've added three tasks:
+1. Created task task_2847: 'Review PR' (priority 1) for user_123 in Project Alpha. Total tasks this session: 1
+2. Created task task_9381: 'Update docs' (priority 1) for user_123 in Project Alpha. Total tasks this session: 2
+3. Created task task_0294: 'Deploy' (priority 1) for user_123 in Project Alpha. Total tasks this session: 3
+
+You now have 3 tasks added this session.
+
+Complete TaskManager Example​
+
+Let's put everything together into a working TaskManager agent with tools for creating, listing, and completing tasks:
+
+from agents import Agent, Runner, function_tool, RunContextWrapper
+from pydantic import BaseModel
+from datetime import datetime
+
+# Context Model
+class TaskManagerContext(BaseModel):
+    user_id: str | None = None
+    current_project: str | None = None
+    tasks_added: int = 0
+    tasks: list[dict] = []
+
+# Tools
+@function_tool
+def add_task(
+    ctx: RunContextWrapper[TaskManagerContext],
+    title: str,
+    priority: int = 1
+) -> str:
+    """
+    Add a new task to the task list.
+
+    Args:
+        title: The task description
+        priority: Priority level 1-5 where 5 is highest
+
+    Returns:
+        Confirmation message with task ID
+    """
+    task_id = f"task_{len(ctx.context.tasks) + 1:03d}"
+    task = {
+        "id": task_id,
+        "title": title,
+        "priority": priority,
+        "status": "pending",
+        "created": datetime.now().isoformat(),
+        "project": ctx.context.current_project
+    }
+    ctx.context.tasks.append(task)
+    ctx.context.tasks_added += 1
+
+    return f"Created {task_id}: '{title}' (priority {priority})"
+
+@function_tool
+def list_tasks(ctx: RunContextWrapper[TaskManagerContext]) -> str:
+    """List all tasks for the current project."""
+    project = ctx.context.current_project
+    tasks = [t for t in ctx.context.tasks if t["project"] == project]
+
+    if not tasks:
+        return f"No tasks found for project '{project}'"
+
+    lines = [f"Tasks for '{project}':"]
+    for t in tasks:
+        status = "[ ]" if t["status"] == "pending" else "[x]"
+        lines.append(f"  {status} {t['id']}: {t['title']} (P{t['priority']})")
+
+    return "\n".join(lines)
+
+@function_tool
+def complete_task(
+    ctx: RunContextWrapper[TaskManagerContext],
+    task_id: str
+) -> str:
+    """
+    Mark a task as complete.
+
+    Args:
+        task_id: The ID of the task to complete (e.g., 'task_001')
+
+    Returns:
+        Confirmation message
+    """
+    for task in ctx.context.tasks:
+        if task["id"] == task_id:
+            task["status"] = "complete"
+            return f"Completed task {task_id}: '{task['title']}'"
+
+    return f"Task {task_id} not found"
+
+# Agent
+task_manager = Agent[TaskManagerContext](
+    name="task_manager",
+    instructions="""You are a task management assistant. Help users:
+    - Add new tasks with priorities (1=low, 5=critical)
+    - List their current tasks
+    - Mark tasks as complete
+
+    Always confirm actions and provide helpful summaries.""",
+    tools=[add_task, list_tasks, complete_task]
+)
+
+# Run the agent
+context = TaskManagerContext(
+    user_id="developer_42",
+    current_project="Digital FTE MVP"
+)
+
+result = Runner.run_sync(
+    task_manager,
+    "Add these tasks: 'Design agent architecture' (priority 4), 'Write function tools' (priority 3), 'Test with sample queries' (priority 2). Then show me the list.",
+    context=context
+)
+print(result.final_output)
+
+
+Output:
+
+I've added your tasks and here's the current list:
+
+Tasks for 'Digital FTE MVP':
+  [ ] task_001: Design agent architecture (P4)
+  [ ] task_002: Write function tools (P3)
+  [ ] task_003: Test with sample queries (P2)
+
+You have 3 tasks added this session. Would you like to complete any of them or add more?
+
+
+Now complete a task:
+
+result = Runner.run_sync(
+    task_manager,
+    "I finished the architecture design. Mark it done.",
+    context=context
+)
+print(result.final_output)
+
+
+Output:
+
+Completed task task_001: 'Design agent architecture'
+
+Here's your updated list:
+
+Tasks for 'Digital FTE MVP':
+  [x] task_001: Design agent architecture (P4)
+  [ ] task_002: Write function tools (P3)
+  [ ] task_003: Test with sample queries (P2)
+
+Great progress! You have 2 remaining tasks.
+
+
+The context persists across both calls because we're using the same context object. In production, you'd persist this to a database between sessions.
+
+Progressive Project: Support Desk Assistant​
+
+Let's continue building our Support Desk Assistant by adding function tools that let it actually DO things---create tickets, look up orders, and check account status.
+
+Adding Real Capabilities​
+
+Now it's your turn to extend the Support Desk from Lesson 1. Using the patterns you learned above, add tools that give your agent real capabilities.
+
+Step 1: Create a context model
+
+Using the Context Objects section as reference, create a SupportContext class with Pydantic's BaseModel:
+
+customer_id: string for tracking the customer
+customer_name: string for personalization
+account_tier: string with default "standard" (could be "premium")
+tickets: list of dictionaries to store created tickets
+
+Step 2: Create a simulated orders database
+
+Create a simple dictionary called ORDERS_DB with 3-4 fake orders. Each order should have:
+
+A key like "ORD-001"
+Values for product, status, and date
+
+Step 3: Create the lookup_order tool
+
+Using the Creating Your First Tool section as reference:
+
+Decorate with @function_tool
+Take an order_id parameter
+Return order details from your database (or "not found" message)
+Include a proper docstring---the SDK uses it to tell the agent what the tool does
+
+Step 4: Create the create_ticket tool
+
+This tool needs context access. Refer to Accessing Context in Tools:
+
+First parameter: ctx: RunContextWrapper[SupportContext]
+Additional parameters: subject, description, priority
+Generate a random ticket ID
+Append the ticket to ctx.context.tickets
+Return confirmation with ticket ID
+
+Step 5: Create the check_account_status tool
+
+Another context-aware tool that returns customer information:
+
+Access ctx.context to read customer data
+Return a formatted string with customer details
+
+Step 6: Update your agent with tools
+
+Modify your agent definition to include the tools:
+
+support_agent = Agent[SupportContext](
+    name="SupportDesk",
+    instructions="...",  # Update to mention the new tools
+    tools=[create_ticket, lookup_order, check_account_status]
+)
+
+
+Step 7: Run with context
+
+Pass context when running your agent:
+
+context = SupportContext(customer_id="CUST-42", customer_name="Alex Chen", account_tier="premium")
+result = Runner.run_sync(support_agent, "Check order ORD-001", context=context)
+
+Success Criteria​
+
+Your Support Desk Assistant can now:
+
+✅ Create support tickets with priorities
+✅ Look up real order status
+✅ Check customer account information
+✅ Track context across the conversation
+What's Next​
+
+Your agent handles everything itself. But what if you want specialists? In Lesson 3, you'll add sub-agents that your main agent can delegate to---a researcher to gather information and a writer to draft responses.
+
+Try With AI​
+
+Use Claude Code, Gemini CLI, or ChatGPT to explore these patterns:
+
+Prompt 1: Create a Simple Tool​
+Create a @function_tool for an OpenAI Agents SDK agent that:
+1. Takes a location string as input
+2. Returns mock weather data (temperature, conditions)
+3. Has proper type hints and docstring
+
+Show the complete tool code and explain how the SDK generates the schema from it.
+
+
+What you're learning: How the SDK transforms Python functions into agent-callable tools through type hints and docstrings.
+
+Prompt 2: Add Context for State​
+I have this weather tool. Now I want to track:
+- How many times the user has checked weather
+- The last location they checked
+- Whether they prefer Celsius or Fahrenheit
+
+Design a Pydantic context model for this, update the tool to use RunContextWrapper, and show how to pass context to Runner.run_sync().
+
+
+What you're learning: How context objects enable state sharing across tool calls within an agent session.
+
+Prompt 3: Build a Tool for Your Domain​
+I'm building a [YOUR DOMAIN] agent. I need tools for [YOUR USE CASE].
+
+Help me design:
+1. A Pydantic context model with relevant state
+2. 2-3 function tools that read/write context
+3. An agent that uses these tools
+
+Use proper type hints and docstrings throughout.
+
+
+What you're learning: Applying the tool and context patterns to your specific domain problem.
+
+Safety Note​
+
+Context objects live in memory during an agent run. Never store sensitive information like passwords, API keys, or personal identification numbers in context. For sensitive data, use secure storage services and access them through tools with proper authentication.

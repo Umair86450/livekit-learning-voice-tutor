@@ -1,0 +1,433 @@
+Multi-Pass Review Architecture
+
+You finish a 14-file pull request at 11 PM. You are tired, but the deadline is tomorrow. You re-read your own code, see nothing wrong, and merge. The next morning, a teammate spots a null pointer dereference in file 12 that you looked straight at and missed. Why? Because when you re-read your own code, your brain fills in what you intended to write rather than what you actually wrote. A fresh reviewer, with no memory of your reasoning, reads what is actually on the screen.
+
+Claude has the same problem. When a Claude Code session generates code and then reviews it in the same conversation, the session retains the entire reasoning context that produced the code. Claude is less likely to question decisions it just made. The review becomes a confirmation exercise rather than a genuine search for problems.
+
+This lesson teaches you how to build review workflows that avoid this trap. You will use independent Claude instances for review, split large PRs into per-file passes plus a cross-file integration pass, write specific review criteria instead of vague instructions, and add confidence self-reporting so you know where to focus your human attention.
+
+EXAM CONNECTION
+
+Task Statement 4.6 tests multi-pass review architecture. Q12 on the exam directly asks about the correct approach to reviewing a large PR. The correct answer is: per-file local analysis passes plus a separate cross-file integration pass. This lesson covers every concept Q12 tests.
+
+Why Self-Review Fails​
+
+When Claude generates code in a session, the conversation history contains every reasoning step: why it chose this data structure, why it handled the edge case this way, why it skipped input validation here. When you then ask "review this code for bugs" in the same session, Claude reads the code through the lens of its own reasoning. It already "knows" why each decision was made, so it is less likely to flag something as suspicious.
+
+This is not a flaw in Claude. It is how context works. A reviewer who has seen the reasoning behind every decision provides less value than a reviewer who sees only the code. The fresh reviewer asks "why is there no null check here?" because they do not have the context that the author considered it and decided it was unnecessary. Sometimes the author was right. Sometimes they were wrong. The fresh reviewer catches both.
+
+The fix is simple: use a different Claude session for review.
+
+The Writer/Reviewer pattern uses two separate sessions:
+
+Session	Role	Context
+Session A (Writer)	Generates the code	Full reasoning history, design decisions, failed attempts
+Session B (Reviewer)	Reviews the code	Only the code itself, no access to the writer's reasoning
+
+Session B has clean context. It reads the code the same way your teammate would: without knowing why you wrote it that way, without being biased toward confirming the approach.
+
+Here is what this looks like in practice:
+
+# Terminal 1: Session A writes the code
+claude
+
+Implement a rate limiter middleware for our Express API.
+Use a sliding window algorithm with Redis for distributed state.
+Write tests, then commit when everything passes.
+
+# Terminal 2: Session B reviews the code (separate session, no shared context)
+claude
+
+Review the rate limiter implementation in @src/middleware/rateLimiter.ts.
+Look for:
+- Race conditions in the Redis sliding window logic
+- Edge cases where the window boundary causes off-by-one errors
+- Missing error handling if Redis is unavailable
+- Consistency with our existing middleware patterns in @src/middleware/
+
+
+Session B has never seen the writer's reasoning. It reads rateLimiter.ts cold, the same way a human reviewer would open a PR diff.
+
+The Attention Dilution Problem​
+
+Session isolation solves the bias problem. But there is a second problem: attention dilution. When you paste a 14-file diff into a single prompt, Claude's attention is spread across thousands of lines. Findings in files reviewed later in the sequence tend to be shallower than findings in files reviewed first. Important issues in file 12 get missed because Claude's "attention budget" was spent on files 1 through 6.
+
+The solution is the same one human reviewers use instinctively: break the review into smaller pieces.
+
+Multi-pass review splits the work into two kinds of passes:
+
+Pass	Scope	What It Catches
+Per-file passes	One file at a time, full attention	Local bugs: null dereferences, SQL injection, missing error handling, logic errors within a single file
+Cross-file integration pass	All files together, but only reviewing inter-file interactions	Integration issues: inconsistent interfaces, broken contracts between modules, missing imports, data flow errors across boundaries
+
+The per-file passes are where you catch the detailed bugs. Each file gets Claude's full attention because nothing else is competing for context. The cross-file pass is where you catch the issues that only appear when files interact: a function signature changed in module A, but module B still calls it with the old arguments.
+
+Why Not Just Use a Bigger Context Window?​
+
+A larger context window does not solve attention dilution. The problem is not that Claude cannot fit 14 files; it is that reviewing 14 files in sequence causes later files to receive less careful analysis. Research on LLM attention patterns shows that relevance scoring degrades as context length increases, even when all content fits within the window. Breaking the review into passes is the structural fix.
+
+Building a Multi-Pass Review Script​
+
+Here is a complete workflow that implements multi-pass review for a pull request. You can run this as a shell script in CI or from your terminal.
+
+Step 1: Get the Changed Files​
+# Get list of files changed in this PR vs the base branch
+changed_files=$(git diff --name-only main...HEAD)
+echo "$changed_files"
+
+Step 2: Per-File Review Passes​
+
+Run an independent Claude instance for each file. Each instance sees only that file and the review criteria. No shared context between passes.
+
+#!/bin/bash
+# review-per-file.sh
+
+BASE_BRANCH="${1:-main}"
+OUTPUT_DIR="review-results"
+mkdir -p "$OUTPUT_DIR"
+
+# Get changed files
+changed_files=$(git diff --name-only "$BASE_BRANCH"...HEAD)
+
+# Review each file independently
+for file in $changed_files; do
+  echo "Reviewing: $file"
+
+  claude -p "You are a code reviewer. Review this file for bugs, security
+issues, and error handling problems.
+
+FILE: $file
+$(cat "$file")
+
+REVIEW CRITERIA:
+- Null/undefined dereferences
+- SQL injection or command injection
+- Unvalidated user input reaching sensitive operations
+- Missing error handling for I/O operations
+- Logic errors (off-by-one, incorrect comparisons, unreachable code)
+
+SKIP (do not report):
+- Style preferences (naming, formatting)
+- Minor suggestions that do not affect correctness
+- TODOs or missing documentation
+
+For each finding, output JSON:
+{
+  \"file\": \"$file\",
+  \"line\": <line_number>,
+  \"severity\": \"critical|high|medium\",
+  \"category\": \"bug|security|error-handling|logic\",
+  \"description\": \"<what is wrong>\",
+  \"suggestion\": \"<how to fix it>\",
+  \"confidence\": \"high|medium|low\"
+}
+
+If no issues found, output: {\"file\": \"$file\", \"status\": \"clean\"}" \
+    --output-format json > "$OUTPUT_DIR/$(echo "$file" | tr '/' '_').json"
+done
+
+echo "Per-file review complete. Results in $OUTPUT_DIR/"
+
+
+Each invocation of claude -p starts a fresh session. No file review is contaminated by context from reviewing a different file.
+
+Step 3: Cross-File Integration Pass​
+
+After all per-file reviews complete, run a single integration pass that focuses on how files interact. This pass does not re-review individual files for local bugs; it looks at the boundaries.
+
+#!/bin/bash
+# review-cross-file.sh
+
+BASE_BRANCH="${1:-main}"
+OUTPUT_DIR="review-results"
+
+# Get the full diff (we want to see how files relate)
+full_diff=$(git diff "$BASE_BRANCH"...HEAD)
+
+# Collect per-file findings for context
+per_file_findings=$(cat "$OUTPUT_DIR"/*.json 2>/dev/null)
+
+claude -p "You are a code reviewer performing a CROSS-FILE integration review.
+
+The per-file reviews have already checked each file for local bugs.
+Your job is ONLY to find issues that span multiple files.
+
+CHANGED FILES DIFF:
+$full_diff
+
+PER-FILE FINDINGS (already reported, do not duplicate):
+$per_file_findings
+
+CROSS-FILE CRITERIA:
+- Inconsistent interfaces: function signature changed in one file but callers
+  in other files still use the old signature
+- Broken data contracts: a type or schema changed but consumers were not updated
+- Missing imports or exports after refactoring
+- Circular dependencies introduced by the changes
+- Race conditions between modules (e.g., module A writes state that module B
+  reads without synchronization)
+
+Output JSON for each finding with the same schema as per-file reviews,
+but set category to \"integration\".
+If no cross-file issues found, output: {\"status\": \"integration-clean\"}" \
+  --output-format json > "$OUTPUT_DIR/cross-file.json"
+
+echo "Cross-file review complete."
+
+Step 4: Combine and Report​
+#!/bin/bash
+# review-report.sh
+
+OUTPUT_DIR="review-results"
+
+claude -p "Combine these review results into a summary report.
+Group by severity (critical first), then by file.
+Include a confidence distribution: how many findings are high/medium/low confidence.
+
+REVIEW RESULTS:
+$(cat "$OUTPUT_DIR"/*.json)
+
+Output a markdown summary suitable for a PR comment." \
+  --output-format text > "$OUTPUT_DIR/summary.md"
+
+cat "$OUTPUT_DIR/summary.md"
+
+Writing Specific Review Criteria​
+
+The review scripts above include explicit criteria. This is not optional. Vague instructions produce vague reviews.
+
+Compare these two approaches:
+
+Vague (what not to do):
+
+Review this code. Be conservative and only report high-confidence findings.
+
+
+This instruction fails in two ways. First, "be conservative" does not tell Claude what to look for, so it defaults to a generic scan that catches obvious issues and misses subtle ones. Second, "only report high-confidence findings" tells Claude to self-filter based on confidence, which suppresses real findings that happen to be subtle. A SQL injection that requires tracing data flow through three functions might be "low confidence" but critical if real.
+
+Specific (what to do):
+
+Review this code for the following categories:
+
+REPORT (always flag these):
+- SQL injection: any user input reaching a query without parameterization
+- Null dereferences: accessing properties on values that could be null/undefined
+- Authentication bypass: any code path that skips auth checks
+- Resource leaks: opened connections, file handles, or streams not closed in error paths
+
+SKIP (do not report):
+- Naming conventions or style preferences
+- Missing JSDoc comments
+- Minor performance suggestions (unless it is an O(n^2) or worse in a hot path)
+- Code that matches existing patterns in the codebase, even if you would write it differently
+
+SEVERITY DEFINITIONS:
+- critical: crashes, data loss, security vulnerabilities that are exploitable
+- high: incorrect behavior that affects users but does not crash or leak data
+- medium: defensive improvements that prevent future bugs
+
+
+Specific criteria give Claude categorical targets. Instead of deciding "is this important enough to report?", Claude checks "does this match one of the REPORT categories?" That is a much simpler and more reliable judgment.
+
+The False Positive Problem​
+
+When review categories have high false positive rates, developers stop trusting the entire review. If 8 out of 10 "style" findings are noise, developers start ignoring all findings, including the 2 real bugs.
+
+The fix: temporarily disable high false-positive categories while you improve the prompts for those categories. Better to have 4 trustworthy categories than 8 categories where half the findings are noise.
+
+Confidence Self-Reporting​
+
+Each finding in the scripts above includes a confidence field. This is not Claude grading its own work; it is a signal you use for triage.
+
+{
+  "file": "src/auth/login.ts",
+  "line": 47,
+  "severity": "critical",
+  "category": "security",
+  "description": "User-supplied email is interpolated directly into SQL query without parameterization",
+  "suggestion": "Use parameterized query: db.query('SELECT * FROM users WHERE email = $1', [email])",
+  "confidence": "high"
+}
+
+{
+  "file": "src/utils/cache.ts",
+  "line": 112,
+  "severity": "medium",
+  "category": "bug",
+  "description": "TTL calculation may overflow for values exceeding 24 days due to millisecond precision",
+  "suggestion": "Add a bounds check or use BigInt for TTL values above Number.MAX_SAFE_INTEGER / 1000",
+  "confidence": "low"
+}
+
+
+How to use confidence for routing:
+
+Confidence	Action
+High	Likely real. Auto-comment on the PR or fix automatically.
+Medium	Probably real but needs human judgment. Flag for reviewer.
+Low	Might be real or might be a false positive. Batch these for periodic review rather than commenting on every PR.
+
+Confidence is not accuracy. A "high confidence" finding means Claude is fairly certain the issue exists, but it could still be wrong. A "low confidence" finding means Claude is uncertain, but the issue could still be critical if it turns out to be real. Use confidence for prioritization, not for deciding whether to look at all.
+
+Putting It All Together​
+
+Here is the complete multi-pass review workflow as a single orchestration script:
+
+#!/bin/bash
+# multi-pass-review.sh
+# Usage: ./multi-pass-review.sh [base-branch]
+
+set -e
+
+BASE_BRANCH="${1:-main}"
+OUTPUT_DIR="review-results"
+rm -rf "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR"
+
+echo "=== Multi-Pass Review: $(git log --oneline -1 HEAD) ==="
+echo "Base: $BASE_BRANCH"
+echo ""
+
+# Phase 1: Per-file passes (parallel)
+changed_files=$(git diff --name-only "$BASE_BRANCH"...HEAD | grep -E '\.(ts|js|py|go|rs)$')
+file_count=$(echo "$changed_files" | wc -l | tr -d ' ')
+echo "Phase 1: Per-file review of $file_count files..."
+
+for file in $changed_files; do
+  echo "  Reviewing: $file"
+  claude -p "Review this file. Report bugs, security issues, error handling gaps.
+FILE: $file
+$(cat "$file")
+
+REPORT: null dereferences, injection, auth bypass, resource leaks, logic errors
+SKIP: style, naming, docs, minor perf
+SEVERITY: critical (crash/security) | high (incorrect behavior) | medium (defensive)
+
+Output JSON array. Each finding: {file, line, severity, category, description, suggestion, confidence}.
+No issues? Output: [{\"file\": \"$file\", \"status\": \"clean\"}]" \
+    --output-format json > "$OUTPUT_DIR/$(echo "$file" | tr '/' '_').json" &
+done
+wait
+echo "  Per-file review complete."
+echo ""
+
+# Phase 2: Cross-file integration pass
+echo "Phase 2: Cross-file integration review..."
+full_diff=$(git diff "$BASE_BRANCH"...HEAD)
+per_file_results=$(cat "$OUTPUT_DIR"/*.json 2>/dev/null)
+
+claude -p "Cross-file integration review. Per-file bugs already found.
+ONLY check: inconsistent interfaces, broken contracts, missing imports,
+circular deps, cross-module race conditions.
+
+DIFF:
+$full_diff
+
+ALREADY REPORTED (do not duplicate):
+$per_file_results
+
+Output JSON array with category: \"integration\"." \
+  --output-format json > "$OUTPUT_DIR/cross-file.json"
+echo "  Cross-file review complete."
+echo ""
+
+# Phase 3: Summary
+echo "Phase 3: Generating summary..."
+all_results=$(cat "$OUTPUT_DIR"/*.json 2>/dev/null)
+
+claude -p "Summarize these review findings as a markdown PR comment.
+Group by severity (critical first). Show confidence distribution.
+$all_results" \
+  --output-format text > "$OUTPUT_DIR/summary.md"
+
+echo "=== Review Complete ==="
+echo ""
+cat "$OUTPUT_DIR/summary.md"
+
+
+The key design decisions in this script:
+
+Per-file passes run in parallel (& and wait). Each is an independent claude -p invocation with its own context.
+The cross-file pass receives per-file findings so it does not duplicate them.
+The summary pass combines everything into a human-readable report.
+File type filtering (grep -E '\.(ts|js|py|go|rs)$') avoids reviewing non-code files.
+Try With AI​
+
+Exercise 1: The Self-Review Experiment (Observe + Compare)
+
+Open two terminals. In Terminal 1, start a Claude Code session and ask it to write a function:
+
+Write a Python function called parse_config that reads a YAML config file
+and returns a dictionary. Handle the case where the file doesn't exist,
+but don't handle any other errors. Do NOT add type hints.
+
+
+Now, in the same session, ask Claude to review the code:
+
+Review the parse_config function you just wrote. List every issue you find.
+
+
+Note how many issues it finds. Now switch to Terminal 2 and start a fresh Claude Code session (no shared history). Point it at the file:
+
+Review the parse_config function in @path/to/your/file.py.
+Report every issue: missing error handling, type safety problems,
+edge cases, and anything else wrong.
+
+
+Compare the two review outputs. The fresh session should find issues the self-review missed (likely: no handling for malformed YAML, no type hints, no handling for permission errors, no validation of the returned dictionary structure).
+
+What you're learning: The concrete difference between self-review and independent review. The generator session has context about why it wrote the code the way it did and is less likely to question those decisions. The fresh session reads only the code and evaluates it on its merits.
+
+Exercise 2: Build a Per-File Review Script (Build + Run)
+
+Pick a project with at least 3-4 changed files (or create a branch with changes to several files). Write a shell script based on the per-file review pattern from this lesson:
+
+#!/bin/bash
+# my-review.sh
+BASE="${1:-main}"
+files=$(git diff --name-only "$BASE"...HEAD)
+
+for f in $files; do
+  echo "--- Reviewing $f ---"
+  claude -p "Review $f for bugs and security issues.
+$(cat "$f")
+Report JSON: {file, line, severity, category, description, confidence}.
+No issues? {file: \"$f\", status: \"clean\"}" --output-format text
+  echo ""
+done
+
+
+Run it and examine the output. Then modify the script to add a cross-file integration pass that receives the per-file findings. Did the integration pass catch anything the per-file passes missed?
+
+What you're learning: How to structure a multi-pass review workflow. The per-file passes give Claude full attention on each file. The integration pass looks at how files interact. Together, they catch more issues than a single-pass review of the entire diff.
+
+Exercise 3: Vague vs Specific Criteria (Compare + Improve)
+
+Start a Claude Code session and review any file in your project with a vague prompt:
+
+Review this file. Be conservative and only report high-confidence findings.
+
+
+Count the findings and note their quality. Now review the same file with specific criteria:
+
+Review @path/to/file for these specific categories:
+
+REPORT:
+- Any variable accessed without a null/undefined check when the value could be absent
+- Any user input that reaches a database query, file system operation, or shell command
+- Any error from an async operation that is swallowed (caught but not logged or re-thrown)
+- Any resource (connection, stream, handle) opened but not closed in error paths
+
+SKIP:
+- Style, naming, formatting
+- Missing comments or documentation
+- Performance unless O(n^2) or worse in a likely hot path
+
+For each finding include: line number, category, description, and confidence (high/medium/low).
+
+
+Compare the two outputs. Which found more actionable issues? Which had more false positives?
+
+What you're learning: Specific criteria outperform vague instructions because they give Claude categorical targets instead of asking it to make subjective judgments about what is "conservative" or "high-confidence." This is a general principle for all Claude Code prompting: tell it what to look for, not how confident to be.
+
+Flashcards Study Aid​

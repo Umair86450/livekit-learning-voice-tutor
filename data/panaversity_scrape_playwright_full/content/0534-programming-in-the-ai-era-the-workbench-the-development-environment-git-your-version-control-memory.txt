@@ -1,0 +1,377 @@
+Git -- Your Version Control Memory
+
+In Lesson 6, James wrote his first test with pytest and watched it pass. His code is verified three ways now -- ruff checks style, pyright checks types, pytest checks behavior. Three tools, three green outputs. The SmartNotes project has never been in better shape.
+
+But all of it exists on one machine. In one directory. With no history.
+
+James is still working on format_title, a piece of code that capitalizes the first letter of each word in a note title. He typed it carefully, verified it with pytest, and watched it produce the right result. Then he decides the approach is wrong. He selects everything, deletes it, and starts rewriting. Halfway through the rewrite, he realizes the original version was better. He reaches for Ctrl+Z. Nothing. He closed the file between versions. The undo history is gone.
+
+James stares at an empty file. He cannot remember the exact logic. He has a test that documents what the code is supposed to do -- assert format_title("hello world") == "Hello World" -- but the implementation that passed that test no longer exists anywhere. The test tells him what "correct" means. It cannot tell him what the code looked like.
+
+Emma finds him rewriting code he already wrote. "How long have you been doing this?"
+
+James sighs. "Twenty minutes. And I am not sure this version is as good as the one I deleted."
+
+"Have you considered version control?"
+
+"I will just be more careful next time," James says. "I will copy the file before I start rewriting. Or I will use cloud sync -- OneDrive, Google Drive, whatever. The file gets backed up automatically."
+
+"What does cloud sync tell you about why you changed the file?" Emma asks. "If you have three copies from three different hours, which one has the working format_title? Which one broke it? What changed between them?"
+
+James thinks about it. Cloud sync saves versions by timestamp. It does not say what changed in each version, or why, or which version passed the tests. Finding the right one means opening each copy and reading through the code until he recognizes the version he wants.
+
+"Cloud sync saves files," James says. "It does not save the story of what happened to them."
+
+"There is one more tool in the discipline stack," Emma says. "It exists for exactly this problem."
+
+The Problem Without Version Control​
+
+James's tests can prove his code is correct. Ruff can prove his code is clean. Pyright can prove his types are right. But none of these tools can answer a simple question: what did the code look like yesterday?
+
+Scenario	What Happens Without Version Control
+James deletes working code and rewrites	The original is gone permanently -- no undo, no recovery
+James edits a function and introduces a bug	He cannot compare to the previous version to see what changed
+The laptop crashes mid-session	Unsaved work is lost; even saved work has no history
+James wants to try a risky approach	He cannot "bookmark" the current state and return to it if the experiment fails
+
+The common thread: every change is permanent. There is no undo beyond the editor's buffer. There is no way to see what the project looked like an hour ago, a day ago, or before a specific change. Code that passes all three tools today can be destroyed by a single bad edit tomorrow -- and without version control, the verified version is gone.
+
+Git Defined​
+
+Git is a version control system that records every change you make to your project. Each git commit is a snapshot -- a checkpoint you can return to at any time. Git does not prevent mistakes. It makes them reversible.
+
+Aspect	Detail
+What it records	Every file in your project, at the moment you commit
+Smallest unit	A single commit (one snapshot of the entire project)
+How you create a snapshot	git add . then git commit -m "description"
+How you view history	git log --oneline
+How you compare versions	git diff (shows what changed since last commit)
+Axiom VIII in Action​
+
+In Axiom VIII from Chapter 43, you learned that version control is memory. Human memory is unreliable -- James could not remember the exact logic of his deleted format_title code after twenty minutes. Git memory is permanent -- every commit records the complete state of every file in the project.
+
+This matters even more when working with AI assistants. An AI can generate fifty lines of code in seconds. If you experiment with that code, rewrite it, and lose the working version, the AI cannot reproduce the exact same output -- each generation is different. Git solves this by recording every version permanently.
+
+James's lost code was a small problem -- twenty minutes of rewriting. But the pattern scales dangerously. A team of developers working without version control has no way to answer basic questions: Who changed this file? When did this bug appear? What did the project look like before the refactor? These are not edge cases. They are daily questions on any project larger than a single file.
+
+If James had committed his working format_title code before rewriting it, recovery would have taken seconds. One command to see the history (git log), one command to see the difference (git diff), and the original code is back. That is the promise of Axiom VIII: mistakes become reversible, and the project's history becomes a permanent, searchable record.
+
+Practical Application​
+Step 1: Initialize Git​
+
+Your SmartNotes project already has a .gitignore file -- uv init created it in Lesson 2. That file tells Git to ignore the .venv/ directory and __pycache__/ folders, which should never be committed. The lockfile uv.lock, however, should be committed -- it ensures every developer and every CI server gets exactly the same dependency versions.
+
+Initialize the repository:
+
+git init
+
+
+Output:
+
+Initialized empty Git repository in /path/to/smartnotes/.git/
+
+IF GIT SAYS "NOT A COMMAND" OR "NOT RECOGNIZED"
+
+Git may not be installed. On macOS, run xcode-select --install. On Windows, download from git-scm.com. On Linux, run sudo apt install git (Ubuntu/Debian) or sudo dnf install git (Fedora).
+
+Git is now tracking the SmartNotes directory. But it has not recorded anything yet. An initialized repository with no commits is like a notebook with no entries -- the infrastructure exists, but the memory is empty.
+
+Step 2: Stage and Commit​
+
+Git uses a two-step process: stage the files you want to record, then commit them as a snapshot.
+
+git add .
+git commit -m "Initial SmartNotes project with discipline stack"
+
+
+The git add . command stages every file in the directory. In SmartNotes, this is safe because .gitignore already excludes .venv/ and __pycache__/. In future projects, you may want to stage specific files by name (like git add main.py pyproject.toml) to avoid accidentally including files that should stay private.
+
+Output:
+
+[main (root-commit) a1b2c3d] Initial SmartNotes project with discipline stack
+ 8 files changed, 47 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 .python-version
+ create mode 100644 README.md
+ create mode 100644 main.py
+ create mode 100644 pyproject.toml
+ create mode 100644 tests/test_main.py
+ create mode 100644 uv.lock
+
+
+Every file in the project is now recorded. If James deletes main.py tomorrow, he can recover it from this commit with a single command:
+
+git checkout HEAD -- main.py
+
+
+That command tells Git: "restore main.py from the most recent commit." The file reappears exactly as it was when James committed it. If he rewrites format_title and regrets it, he can compare the current version to this snapshot with git diff and restore what he had. The twenty minutes James lost at the start of this lesson? With Git, recovery takes seconds.
+
+Verify the commit exists:
+
+git log --oneline
+
+
+Output:
+
+a1b2c3d Initial SmartNotes project with discipline stack
+
+
+One commit. One checkpoint. The project's memory has begun.
+
+CHECKPOINT: YOUR SMARTNOTES PROJECT SHOULD NOW LOOK LIKE THIS
+smartnotes/
+├── .git/               ← created by git init
+├── .gitignore
+├── .python-version
+├── .venv/
+├── README.md
+├── main.py             ← returns "Hello from smartnotes!"
+├── pyproject.toml      ← all tools configured
+├── tests/
+│   └── test_main.py    ← one passing test
+└── uv.lock
+
+
+Run git log --oneline -- you should see one commit. Run uv run pytest -- you should see one passing test. If both are true, you are ready for the final step.
+
+Step 3: Run the Complete Pipeline​
+
+This is the moment the entire chapter has been building toward. Five tools, five axioms, one command chain. Run ruff, pyright, and pytest in sequence -- each step must pass before the next one starts:
+
+uv run ruff check . && uv run pyright && uv run pytest
+
+
+Output (all passing):
+
+0 errors, 0 warnings, 0 informations
+tests/test_main.py .                                             [100%]
+1 passed in 0.12s
+
+
+Ruff produced no output -- silence means zero issues. Pyright reported zero errors. Pytest showed one passing test. Three tools, three clean results. The && operator is doing the critical work here: it ensures that if ruff finds a lint error, the pipeline stops. Pyright never runs. Pytest never runs. The problem is clear and isolated. If ruff passes but pyright finds a type error, the pipeline stops at pyright. Only when all three tools pass do you have a verified, clean project.
+
+You might notice that ruff format is not in the pipeline. The pipeline checks for problems -- ruff check finds bugs, pyright finds type errors, pytest finds wrong behavior. Formatting is a pre-step: run uv run ruff format . before the pipeline to make your code consistent, then run the pipeline to verify it is correct.
+
+This is Axiom IX in its purest form: verification as a pipeline, not a checklist you remember to run. The command runs the same way every time, regardless of whether you are tired, distracted, or in a rush.
+
+This is also the same pipeline that runs automatically on every pull request in production Python projects. In Part 7, when you deploy SmartNotes as a Digital FTE, a CI server will execute this exact command chain on every code change. The difference between your laptop and production is not the tools -- it is where they run. You are already practicing production habits.
+
+Read and Predict: Imagine James introduces a type error in main.py -- he changes the return type label from str to int but keeps the function returning text. He runs the full pipeline command. Which tool stops the pipeline? Does pytest ever run? What would James see in the terminal?
+
+Check your predictions
+
+And now that the pipeline passes, the natural next step is to commit the result:
+
+git add . && git commit -m "Verified: all tools pass"
+
+
+That is the complete cycle: write code, verify it with the pipeline, commit the verified result. Every chapter from here forward follows this pattern.
+
+Commit Granularity When Working With AI​
+
+James has a question. "How often should I commit? After every function? Every file? Every feature?"
+
+Emma considers it. "Honestly, I do not have a clean rule for that. I have seen teams that commit every twenty minutes and teams that commit once a day, and both shipped good software. It depends on the project and the team."
+
+"That is the first time you have not had a definitive answer," James says.
+
+"Because there is not one," Emma says. "What I can tell you is what happens at the extremes, and you need to watch for one extreme in particular."
+
+When James writes code himself, he adds features gradually -- a few lines at a time. A commit naturally captures one small change. But when James asks Claude Code to implement a feature, the AI may produce thirty files and four hundred lines in a single response. If James runs the pipeline, everything passes, and he makes one giant commit called "Add user authentication," he has lost something important: the ability to understand or reverse parts of what the AI built.
+
+The professional habit is to break AI-generated work into logical commits even when the AI delivered it all at once. Review the output, identify the natural seams -- data models, API routes, tests, configuration -- and commit each piece separately with a descriptive message. This means git log still tells a story a month from now. It means if the authentication logic needs to be replaced, James can do it without disturbing the test infrastructure the AI also built. Small commits are not just good hygiene -- they are the mechanism that keeps you in control of a codebase that AI is helping you build faster than any one person could review at once.
+
+Anti-Patterns​
+
+James now understands both Git and the pipeline. Here are the patterns Emma warned him to avoid:
+
+Anti-Pattern	The Mistake	The Cost	The Fix
+"Not committing early"	James works for three hours without a single commit. The code is half-finished.	The laptop's battery dies, a forced restart clears unsaved changes, or he takes a wrong turn and cannot remember what the project looked like when it worked. Three hours of progress exist only in memory.	Commit after every meaningful change -- small commits are better than large ones.
+"Skipping the pipeline"	James runs pytest but not ruff, or runs ruff but not pyright.	The tools catch different categories of problems. A codebase that passes tests but fails type checking has undiscovered bugs hiding in type mismatches.	Always run the full pipeline: uv run ruff check . && uv run pyright && uv run pytest
+Try With AI​
+Prompt 1: Reading Git History​
+I just initialized a Git repository for a Python project called SmartNotes
+and made my first commit with the message "Initial SmartNotes project with
+discipline stack".
+
+I am new to Git and version control. Show me what commands I would use to:
+1. See the list of all commits (git log --oneline)
+2. See what files were included in the commit
+3. See the actual content that was committed
+
+For each command, explain the output in simple terms. I want to understand
+what Git recorded and how to read its memory.
+
+
+What you're learning: You are building the skill of reading Git's memory. The commit you just made recorded every file in your project. By asking AI to walk you through git log, git show, and git diff, you learn to navigate the history that Git keeps -- the same history that would have saved James's deleted code.
+
+Prompt 2: Writing Good Commit Messages​
+I am learning Git for the first time. My first commit message was:
+"Initial SmartNotes project with discipline stack"
+
+My teammate's recent commits say:
+- "wip"
+- "fix stuff"
+- "asdf"
+
+Explain why commit messages matter by showing me:
+1. What happens when someone runs git log on my teammate's project
+   vs mine -- which history tells a story?
+2. Give me 5 examples of good commit messages for common changes
+   (adding a feature, fixing a bug, updating config, adding tests,
+   refactoring code)
+3. What is the one-line rule for commit messages and why does it matter?
+
+
+What you're learning: This prompt connects directly to Axiom VIII -- version control as memory. Good commit messages are the difference between a useful history and a useless one. James's story from Chapter 43 began with "wip" and "fix stuff" commits that told him nothing when he needed them. By studying good vs bad messages now, you build the habit before it costs you.
+
+Prompt 3: Generate Code, Then Verify With the Full Pipeline​
+Write a Python function called `count_words` that takes a string
+and returns a dictionary mapping each word to how many times it
+appears. Include type annotations for strict pyright mode.
+Also write one pytest test for this function.
+
+
+After the AI responds, do not just read the code. Run it through your complete workbench:
+
+Paste the function into main.py
+Paste the test into tests/test_main.py
+Run the full pipeline: uv run ruff check . && uv run pyright && uv run pytest
+If all three pass, commit: git add . && git commit -m "Add count_words with test"
+
+What you're learning: This is the entire thesis of this chapter in action. AI generates code fast. Your job is not to read every line hoping to spot problems -- your job is to run the tools and then commit the verified result. Did ruff find unused imports? Did pyright catch a missing type annotation? Did pytest reveal an edge case? The workbench catches what reading alone cannot. And Git records the result so you never lose it. This is how professional developers work with AI: generate, verify, commit.
+
+PRIMM-AI+ Practice: Git -- Your Version Control Memory​
+Predict [AI-FREE]​
+
+You just initialized a Git repository and made your first commit. Predict: what will git log --oneline show -- how many lines, and what will the message say? Write your prediction and a confidence score from 1 to 5 before running the command.
+
+Run​
+
+Run git log --oneline and compare to your prediction. Now ask your AI assistant to generate a small function with a test:
+
+Write a simple Python function and one pytest test for it.
+Include type annotations for strict pyright mode.
+
+
+You do not need to understand the generated code. Paste it into the right files, then run the full pipeline:
+
+Run: uv run ruff check . && uv run pyright && uv run pytest
+If all three pass: git add . && git commit -m "feat: add function with test"
+
+This is the core workflow: AI generates code, tools verify it, you commit the verified result.
+
+Investigate​
+
+Compare these two commit histories:
+
+History A: "wip", "fix stuff", "asdf", "done"
+
+History B: "feat: add greeting function", "fix: handle empty name edge case", "test: add tests for greeting"
+
+In your own words, write why History B is better. What information is lost in History A? Then ask your AI assistant: "Which history helps me find a bug six months from now? Why?" Compare the AI's answer to yours.
+
+Parsons Problem: Reconstruct the Professional Workflow​
+
+Here are the steps of a complete development cycle, in scrambled order. Put them in the correct sequence:
+
+git add . && git commit -m "feat: add function with test"
+uv run pyright
+uv run pytest
+uv run ruff check .
+# Ask AI to generate the code
+# Paste code into the right files
+
+
+Your task: Arrange these in order. Then answer: why does ruff run before pyright? Why does pyright run before pytest? What goes wrong if you commit before running the pipeline? Write your answers and a confidence score.
+
+Modify​
+
+Ask your AI assistant to modify the code it generated earlier (add a small feature or change behavior). Paste the updated code and run the full pipeline again. Before committing, write a commit message that explains why you made the change, not just what changed. Check git log --oneline -- does the history tell a clear story?
+
+Make​
+
+Self-check: answer these without looking back at the lesson.
+
+Write the full chained pipeline command from memory. It has three tools connected by && in a specific order. Run it in SmartNotes to confirm all three pass.
+Write a commit message for "added a greet function to main.py." Now evaluate it: does it explain why the change was made, or only what changed? Rewrite it to include the "why."
+What command shows your commit history as a one-line-per-commit summary? Run it and confirm you see your SmartNotes commits.
+What happens if ruff check fails in the pipeline? Name the operator that prevents pyright and pytest from running, and explain why this ordering saves time.
+
+Verification Ladder checkpoint: This lesson completes Rung 4 (Pipeline) of the Verification Ladder -- the chained pipeline (ruff check && pyright && pytest) running as coordinated verification. Rung 1 (Prediction) was introduced in Chapter 42. Rung 2 (Types) was pyright in Lesson 5. Rung 3 (Tests) was pytest in Lesson 6. Rung 4 (Pipeline) is the chained command in this lesson. Rung 5 (Observability) comes in a later chapter.
+
+Operational Takeaways​
+
+Git makes every change reversible. git init creates the repository. git add . stages files. git commit -m "message" records a snapshot. Every commit is a checkpoint you can return to.
+
+The verification pipeline runs tools in order: lint, type check, test. The && operator stops at the first failure. Fix the simplest problem first (style), then types, then behavior. This is Axiom IX -- verification as infrastructure.
+
+Your workbench is now complete. Five tools -- uv, ruff, pyright, pytest, Git -- each enforcing a specific axiom. Together, they automate what used to depend on memory and good intentions. Every chapter from here forward starts with this workbench.
+
+Command Reference​
+
+Every command from this chapter in one place. You can copy any command directly into your terminal.
+
+# Project setup (Lesson 2: Installing uv and Creating SmartNotes)
+uv init smartnotes              # Create a new project
+uv run main.py                  # Run a file inside the project environment
+
+# Dependencies (Lesson 3: The pyproject.toml and the Discipline Stack)
+uv add --dev pytest pyright ruff  # Install dev tools (updates pyproject.toml + uv.lock + .venv)
+uv sync                          # Sync environment from lockfile (for teammates)
+
+# Linting and formatting (Lesson 4: Ruff -- Your Code Quality Guardian)
+uv run ruff check .              # Find bugs and style violations
+uv run ruff check --fix .        # Auto-fix safe issues
+uv run ruff format .             # Format code consistently
+uv run ruff format --check .     # Check formatting without changing files
+
+# Type checking (Lesson 5: Pyright -- Your Type Safety Net)
+uv run pyright                   # Check all type annotations
+
+# Testing (Lesson 6: Testing With pytest)
+uv run pytest                    # Run all tests
+
+# Version control (Lesson 7: Git -- Your Version Control Memory)
+git init                         # Initialize a repository
+git add .                        # Stage all files
+git commit -m "message"          # Record a snapshot
+git log --oneline                # View commit history
+
+# The complete verification pipeline (Lesson 7: Git -- Your Version Control Memory)
+uv run ruff check . && uv run pyright && uv run pytest
+
+Looking Ahead​
+
+Your workbench is built. uv manages your project. pyproject.toml holds your configuration. ruff checks your style. pyright checks your types. pytest checks your behavior. Git records your history. Five tools, five axioms, one unified system protecting your code from the moment you start writing it.
+
+In Chapter 45, James and Emma will start reading Python -- learning how to store values, label their types, and combine them into expressions. Every line of code will be checked by ruff, type-checked by pyright, and tested by pytest. The workbench is no longer something you are building. It is something you are using.
+
+Chapter-End Rubric: Self-Assessment​
+
+Before proceeding to the quiz and the next chapter, score yourself honestly on the five dimensions of the PRIMM-AI+ chapter-end rubric. This rubric is not a grade -- it is a mirror. It exists so you can see where you stand and direct your practice to the dimensions that need the most work.
+
+Prediction Accuracy: How often were your predictions correct during this chapter? Could you predict what uv init would create, what ruff would flag, what pyright would catch, and what pytest output would look like -- before running the commands?
+
+Developing	Competent	Fluent
+Predictions were often wrong; tool behavior and output format need more practice	Predictions were mostly correct for straightforward cases; some surprises with strict mode or edge cases	Predictions were consistently accurate; could predict tool output for novel code without running it
+
+Trace Quality: Were your trace artifacts -- line-by-line explanations of pyproject.toml sections, "why this fails" notes for tool errors, and pipeline order explanations -- accurate and complete?
+
+Developing	Competent	Fluent
+Trace artifacts were incomplete; needed heavy AI assistance to explain tool output	Trace artifacts were mostly accurate; occasional gaps in understanding tool error formats or rule codes	Trace artifacts were thorough; could explain ruff codes, pyright errors, and pytest output independently
+
+Explanation Quality: Can you explain why each tool exists, which axiom it enforces, and what category of bugs it catches -- in your own words, without referring to the lesson?
+
+Developing	Competent	Fluent
+Can name the five tools but struggles to explain the axiom connection or what each catches	Can explain each tool's purpose and axiom mapping; some difficulty articulating the Verification Ladder connection	Can teach the discipline stack to someone else with examples, explaining why removing any tool leaves a gap
+
+Modification Quality: Were you able to modify pyproject.toml configurations, ruff rules, and test specifications on your own -- without AI generating the modification? Were Parsons reconstructions correct?
+
+Developing	Competent	Fluent
+Needed significant AI help for configuration changes; Parsons problems required multiple attempts	Completed most modifications independently; Parsons reconstructions were mostly correct on first attempt	Modified configurations confidently; immediately understood which sections controlled which behavior
+
+Independent Make Quality: Did you produce the Make challenges -- writing pyproject.toml from memory, writing tests before implementations, completing the full professional cycle -- without AI assistance for the first attempt?
+
+Developing	Competent	Fluent
+Needed AI to start most Make challenges; produced work only after seeing examples	Started Make challenges independently; needed AI review for completeness	Produced complete, accurate Make artifacts on first attempt; AI review confirmed rather than corrected

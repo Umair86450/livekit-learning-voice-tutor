@@ -1,0 +1,314 @@
+How Your Employee Works
+
+Try something right now. Open your messaging channel and send your employee this message:
+
+Describe your own architecture. What components make up your system? How does a message get from my phone to you and back? What files on disk define who you are?
+
+Your employee will answer. It will describe a Gateway that routes messages, a Channel Layer that connects to WhatsApp, workspace files like SOUL.md and USER.md that define its identity, a Memory Layer that tracks conversations across sessions, and a Tools Layer that gives it the ability to read, write, and execute. It will trace the end-to-end flow: your phone sends a WhatsApp message, the Gateway receives it, attaches metadata, invokes the agent session with your history and context files, generates a response, and sends it back through the same channel.
+
+The employee is not guessing. It is reading its own configuration and describing what it finds. That description is your roadmap for this lesson.
+
+Understanding how your employee works matters for three reasons. First, when something breaks, you need to know where to look. Is the gateway down? Did the model provider reject your request? Is a session stuck? Second, when you want to extend capabilities, you need to know which component to modify. Third, and most important: these same patterns appear in every agent framework. Claude Code, CrewAI, LangGraph, AutoGen -- they all solve the same problems with the same architectural patterns, just with different names. Master the patterns once here, recognize them everywhere.
+
+The Gateway -- Your Employee's Brain Stem​
+
+Every message your employee sends or receives passes through a single process: the Gateway. It is a long-running TypeScript/Node.js daemon that binds a WebSocket server to 127.0.0.1:18789 and stays alive as a background service. When you ran openclaw onboard --install-daemon in Lesson 02, you installed this process.
+
+The Gateway is the single coordination point for your entire AI Employee. It performs five jobs:
+
+Function	What It Does
+Message Routing	Receives messages from every connected channel, normalizes them, and routes them to the agent
+Session Management	Tracks every conversation, maintains transcript history, controls session resets
+Authentication	Verifies pairing codes, enforces allowlists, decides who can talk to your employee
+Skill Loading	Discovers skills from workspace, managed, and bundled directories at session start
+Queue Coordination	Serializes agent runs to prevent race conditions (more on this below)
+
+One gateway per host. That is the design. It owns all messaging connections -- WhatsApp, Telegram, Discord, everything. Think of it as a switchboard operator. Every call goes through the switchboard. No call bypasses it. This centralization is intentional: it means adding a new channel requires zero changes to your agent's logic.
+
+The pattern: Orchestration.
+
+CLAUDE CODE FOR GATEWAY TROUBLESHOOTING
+
+If you have Claude Code from Chapter 14, you can ask it to diagnose gateway issues: "Read my OpenClaw gateway logs and tell me why the last message failed" or "Check if my gateway service is running and restart it if needed." The manual commands in this lesson are what you need to understand -- Claude Code accelerates the operational work once you do.
+
+Channels -- Your Employee's Communication Layer​
+
+Each messaging platform your employee connects to is a channel. Telegram uses grammY. WhatsApp uses Baileys. Discord uses its Bot API. Each is an adapter that translates platform-specific messages into a common internal format.
+
+Here are four representative channels:
+
+Channel	Library/Protocol	Best For
+Telegram	grammY (Bot API)	Quick personal setup
+WhatsApp	Baileys (Web API)	Business communication
+Discord	Carbon (Discord API)	Teams and communities
+Slack	Bolt SDK	Enterprise workspaces
+
+OpenClaw supports 30+ channels including Signal, iMessage, Matrix, and Microsoft Teams. The number does not matter. What matters is the design principle.
+
+When a message arrives from WhatsApp or Telegram, the channel adapter strips away platform-specific formatting, extracts the text, user identity, and conversation context, then passes a normalized message to the Gateway. When a response comes back, the adapter translates it into the channel's native format -- respecting message length limits, markdown rendering, and media handling. The agent never knows which channel the message came from. It processes a clean, channel-agnostic payload.
+
+Adding a new channel means writing one adapter. No agent logic changes. No skill modifications. No model configuration updates.
+
+The pattern: I/O Adapters. The adapter pattern decouples intelligence from communication.
+
+Sessions -- Your Employee's Context Windows​
+
+Every conversation with your AI Employee gets an isolated session. Sessions prevent cross-contamination -- what you discuss in a private DM never leaks into a group chat, and what one user asks never bleeds into another user's conversation.
+
+Sessions are identified by keys that encode their origin:
+
+Session Type	Key Pattern	Example
+Main (default)	agent:<id>:main	All your DMs share one continuous session
+Per-channel-peer	agent:<id>:<channel>:dm:<peerId>	Each person on each platform gets their own session
+Group	agent:<id>:<channel>:group:<groupId>	Each group chat is isolated
+
+Each session persists as an append-only JSONL file (one JSON object per line) at:
+
+~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
+
+
+Every message you send, every response the agent generates, every tool call and its result -- all appended to this file. The JSONL format means the file is always consistent (no partial writes corrupt earlier entries) and you can read raw transcripts with any text editor.
+
+When sessions grow long, auto-compaction kicks in. The system summarizes older conversation history into a compact summary, keeps recent messages intact, and persists the compaction in the JSONL file. This means your employee can have day-long conversations without exceeding the model's context window.
+
+Sessions also reset on a schedule. By default, daily at 4:00 AM local time. You can also reset manually with /new or /reset, or configure idle timeouts. The reset policy is configurable per session type -- your private DMs might persist for days while group chats reset after two hours of inactivity.
+
+The pattern: State Isolation. Skip this pattern and private data leaks between users.
+
+The Agent Loop -- Your Employee's Thinking Process​
+
+When a message reaches the Gateway and gets routed to the agent, the agent loop takes over. This is the core cycle that transforms a message into a response. Every time your employee processes a request, it executes six phases:
+
+Message In
+    |
+    v
+[1. Ingestion] --> Channel adapter receives message, normalizes format
+    |
+    v
+[2. Access Control] --> Check pairing, allowlists, permissions
+    |
+    v
+[3. Context Assembly] --> Load session history + memory + skills + system prompt
+    |
+    v
+[4. Model Invocation] --> Send assembled context to LLM (Kimi, Claude, Gemini, local)
+    |
+    v
+[5. Tool Execution] --> Agent calls tools (bash, browser, file operations, MCP servers)
+    |                    May loop back to step 4 if model requests more tools
+    v
+[6. Response Delivery] --> Format result, route back through Gateway and channel
+    |
+    v
+Message Out
+
+
+Let's trace a concrete example. You message your employee through your messaging channel: "Summarize the key trends in AI agents for 2026."
+
+Phase 1 -- Ingestion: Your channel's adapter receives your message, normalizes it into OpenClaw's internal format, and hands it to the Gateway.
+
+Phase 2 -- Access Control: The Gateway checks your pairing status and permissions; unpaired users get a pairing code instead of a response.
+
+Phase 3 -- Context Assembly: The agent builds the full context the LLM will see -- session transcript, workspace bootstrap files, eligible skills, and memory files -- assembled into a single prompt.
+
+The bootstrap files define your agent's identity and behavior before any conversation begins:
+
+File	Purpose
+AGENTS.md	Configures agent behavior, personality traits, and response style
+SOUL.md	Defines the agent's core identity, values, and communication principles
+USER.md	Stores information about you (the operator) for personalized interactions
+IDENTITY.md	Sets the agent's name, role description, and public-facing persona
+MEMORY.md	Curated long-term facts and preferences (covered in the Memory section)
+HEARTBEAT.md	Instructions for periodic autonomous check-ins (see Autonomous Invocation below)
+BOOT.md	Startup instructions executed at the beginning of every new session
+
+These files live in your workspace directory (~/.openclaw/workspace/). Together, they give your agent a persistent identity that survives session resets. When you customize SOUL.md, you are not tweaking a setting -- you are defining who your employee is.
+
+You can inspect these files yourself at any time:
+
+cat ~/.openclaw/workspace/MEMORY.md
+cat ~/.openclaw/workspace/USER.md
+
+
+To browse raw session transcripts (every message, tool call, and response as JSON):
+
+ls ~/.openclaw/agents/*/sessions/
+# Pick a session file and inspect it:
+tail -20 ~/.openclaw/agents/*/sessions/*.jsonl
+
+
+Phase 4 -- Model Invocation: The assembled context goes to your configured LLM, which reasons about your question and generates a response -- potentially requesting tool calls.
+
+Phase 5 -- Tool Execution: If the model needs tools (web search, file reads, code execution), it calls them and feeds results back, looping until satisfied.
+
+Phase 6 -- Response Delivery: The final response flows back through the Gateway to the channel adapter and onto your device.
+
+The pattern: Autonomous Execution Loop.
+
+The Lane Queue -- Why Your Employee Doesn't Trip Over Itself​
+
+What happens when two messages arrive at the same time? If both try to run the agent loop simultaneously on the same session, they could corrupt the transcript, produce garbled responses, or race for tool access.
+
+OpenClaw solves this with a lane-aware FIFO queue. Every agent run gets serialized through lanes:
+
+Lane	Default Concurrency	Purpose
+Per-session	1	Only one agent run touches a given session at a time
+Main	4	Overall parallelism cap for inbound messages
+Subagent	8	Background agent tasks can run in parallel
+
+Here is how it works in practice:
+
+Your message arrives and gets placed in the queue for your session lane.
+If no other run is active for your session, it starts immediately.
+If a previous run is still active, your message waits until it finishes.
+Messages from different sessions can run in parallel (up to the main lane cap of 4).
+
+The queue supports multiple modes for handling bursts of messages:
+
+Collect (default): Coalesce all queued messages into a single followup turn. If you send three messages while the agent is thinking, it processes all three together.
+Steer: Inject the new message into the current run (cancels pending tool calls at the next boundary).
+Followup: Queue for the next agent turn after the current run ends.
+
+Typing indicators fire immediately when your message enters the queue, so you see the "thinking..." indicator in your messaging app even while waiting for the queue to drain.
+
+The pattern: Concurrency Control. Skip concurrency control and two tasks writing to the same file will corrupt it.
+
+Memory -- Your Employee's Long-Term Brain​
+
+Your employee's LLM has no persistent memory. Every model invocation starts from scratch -- the model only "knows" what is in the current prompt. Memory is how your employee overcomes this limitation.
+
+OpenClaw implements memory in two layers:
+
+Layer 1: Curated Long-Term Memory (MEMORY.md)
+
+A single Markdown file in the workspace that stores durable facts, preferences, and decisions. The agent reads this file at session start, but only in private sessions (never in group chats, to prevent leaking personal information).
+
+# MEMORY.md (example)
+
+## Preferences
+
+- Prefers bullet-point summaries over paragraphs
+- Working on Project Atlas (Q1 deadline)
+- Timezone: EST
+
+## Key Facts
+
+- Company uses Next.js + Supabase stack
+- Budget approved for GPT-4o tier in March
+
+
+Layer 2: Daily Activity Logs (memory/YYYY-MM-DD.md)
+
+Append-only daily files that capture running context. The agent reads today's and yesterday's logs at each session start. These logs capture what happened during the day without cluttering the curated memory.
+
+~/.openclaw/workspace/
+├── MEMORY.md                  # Curated long-term (loaded in private sessions)
+└── memory/
+    ├── 2026-02-14.md          # Yesterday's log
+    └── 2026-02-15.md          # Today's log (append-only)
+
+
+Layer 3: Vector Search
+
+On top of the Markdown files, OpenClaw builds a vector index using SQLite-backed embeddings. This enables hybrid search -- combining vector similarity (semantic matches, even when wording differs) with BM25 keyword relevance (exact matches for IDs, code symbols, and specific terms). The index auto-updates when memory files change.
+
+When the agent needs to recall something from weeks ago, it does not scroll through every daily log. It searches semantically: "What was the decision about the API migration?" returns relevant snippets even if the original note used different words.
+
+Before auto-compaction, OpenClaw runs a silent memory flush -- a hidden agent turn that reminds the model to write anything important to disk before the session context gets summarized. This prevents information loss during long conversations.
+
+The pattern: Externalized Memory. The LLM's context window is a cache. Disk is the source of truth. Models forget everything between calls, so every framework needs externalized, persistent storage that gets selectively loaded into context.
+
+Skills -- Your Employee's Teachable Abilities​
+
+You built skills in Chapter 14 -- SKILL.md files with YAML frontmatter and Markdown instructions. OpenClaw uses the exact same format. Skills load from three locations with workspace skills (highest priority) overriding managed and bundled defaults:
+
+~/.openclaw/workspace/skills/   # Your custom skills (highest priority)
+~/.openclaw/skills/             # Managed skills shared across agents
+<bundled with OpenClaw>         # Default skills shipped with install
+
+
+At session start, only each skill's name and description enter the system prompt (~24 tokens each). Full instructions load on demand. Twenty skills cost ~480 tokens of overhead until one activates.
+
+The pattern: Capability Packaging.
+
+The Universal Pattern Map​
+
+These six patterns (plus one bonus) appear in every agent framework you will encounter. Four frameworks, one table:
+
+Pattern	OpenClaw	Claude Code	ChatGPT	LangGraph
+Orchestration	Gateway daemon	CLI process	API orchestrator	StateGraph
+I/O Adapters	Channels (30+)	Terminal/MCP	Web UI/API	Input nodes
+State Isolation	Sessions (JSONL)	Conversation context	Thread IDs	State checkpoints
+Capability Packaging	SKILL.md files	SKILL.md files	Custom GPTs/Actions	Tool nodes
+Externalized Memory	MEMORY.md + logs	CLAUDE.md + memory	Memory feature	State persistence
+Concurrency Control	Lane queue	Serialized ops	Rate limiting	Node scheduling
+Autonomous Invocation	Cron + Heartbeat	Cron + hooks	Scheduled actions	Trigger nodes
+
+OpenClaw distinguishes two kinds of autonomous invocation. Cron runs scheduled tasks at fixed times (daily summaries at 8 AM, weekly reports on Fridays). Heartbeat is a continuous pulse -- a periodic agent turn (configurable interval, default every few hours) where the agent checks HEARTBEAT.md for standing instructions and decides whether anything needs attention. Cron is a clock; Heartbeat is a pulse. Both let your employee act without being asked, but Heartbeat enables the kind of ambient awareness that separates a scheduled script from an autonomous colleague.
+
+OpenClaw and Claude Code share the same skill format (SKILL.md). That is not a coincidence. The Markdown-based skill format has emerged as a de facto standard: human-readable, version-controllable, portable across platforms.
+
+Why These Patterns Matter​
+
+Remove any one pattern and the system degrades in predictable ways:
+
+Pattern	What Breaks Without It
+Orchestration	No message routing -- requests arrive but nothing coordinates them
+I/O Adapters	Locked to one channel; adding another means rewriting the agent
+State Isolation	Multi-user deployments impossible -- conversations contaminate each other
+Capability Packaging	Adding abilities means modifying core code; the agent becomes brittle
+Externalized Memory	The agent forgets everything between sessions -- no learning across days
+Concurrency Control	Parallel operations conflict -- two tasks writing the same file corrupt it
+Autonomous Invocation	The agent only responds when spoken to; you have a chatbot, not an employee
+
+You could add patterns (logging, authentication, rate limiting), but those are operational concerns, not architectural requirements. These are not OpenClaw's design decisions -- they are engineering necessities that emerge from fundamental constraints. Any sufficiently capable agent system reinvents them. Your job is to recognize them, regardless of what name they carry.
+
+In Lesson 05, you will put skills to work and explore the security realities of giving AI real autonomy. Then the chapter assessment consolidates everything: the architecture, the patterns, and an honest evaluation of what OpenClaw proved and what remains unsolved across the industry.
+
+Try With AI​
+Prompt 1: Self-Architecture Description​
+
+Setup: Ask your OpenClaw AI Employee directly (via Telegram, WhatsApp, or the Control UI).
+
+Describe your own architecture. What components make up your system?
+How does a message get from my phone to you and back? What files
+on disk define who you are?
+
+
+What you're learning: Your agent has access to its own configuration files and can introspect on its own system. Comparing what it tells you to the architecture in this lesson reveals what the agent understands about itself -- and where its self-knowledge has gaps. This is also a practical way to verify your setup: if it names files that do not exist on your machine, something was misconfigured.
+
+Prompt 2: Race Condition Designer (Advanced)​
+
+Setup: Use Claude Code or any AI assistant.
+
+Design 3 scenarios where removing a lane queue from an AI Employee
+causes race conditions. Then design a 4th scenario the lane queue
+CANNOT prevent -- one that requires a different solution entirely.
+
+
+What you're learning: Concurrency is where most agent projects fail silently. By designing failure scenarios yourself, you build intuition for where race conditions hide. The 4th scenario forces you beyond the textbook answer into genuine architectural thinking -- exactly what you need when building your own agent.
+
+Prompt 3: Memory Retrieval Trace​
+
+Setup: Use Claude Code or any AI assistant.
+
+An AI Employee has 3 memory layers: MEMORY.md, daily logs, and
+vector search. A user asks "What did we decide about the API
+migration 6 weeks ago?" Trace the query through all 3 layers,
+then design a scenario where all 3 fail. What went wrong?
+
+
+What you're learning: Memory retrieval is where theory meets reality. Tracing a concrete query through each layer builds intuition for how externalized memory actually works -- and where it breaks. The failure scenario forces you to think about memory architecture limitations before you encounter them in your own builds.
+
+Prompt 4: Agent Autopsy​
+
+Setup: Use Claude Code or any AI assistant.
+
+Find an abandoned AI agent project on GitHub (many stars, no recent
+commits). Using the 6 universal patterns as a diagnostic framework,
+perform an autopsy: which missing pattern was the likely cause of death?
+
+
+What you're learning: The 6 patterns are not just a classification scheme. They are a diagnostic tool. Learning to identify which missing pattern killed a project is the fastest way to internalize why each pattern matters. This forensic skill transfers directly to evaluating any agent framework you encounter.
+
+Flashcards Study Aid​

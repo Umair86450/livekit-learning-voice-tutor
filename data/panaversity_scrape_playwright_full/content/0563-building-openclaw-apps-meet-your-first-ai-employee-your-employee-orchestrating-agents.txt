@@ -1,0 +1,313 @@
+Your Employee Orchestrating Agents
+
+Your employee has been handling tasks on its own: creating files, setting up morning briefings, doing research, managing your schedule. For tasks like "create weekly-goals.md" or "design a daily routine," it uses its own built-in tools and does fine.
+
+But what happens when you need actual code written? A Python script, a data processing tool, a file organizer? Your employee is not a coding specialist. It will try -- and it may produce something -- but it is not the right tool for the job.
+
+You already have the right tool. Claude Code is on your machine from Chapter 14. Before continuing, confirm it is still working:
+
+claude --version
+
+
+If you get a version number, you are ready. If you get "command not found," revisit the Claude Code installation in Chapter 14 before proceeding.
+
+In this lesson, you will teach your employee to delegate coding work to external coding harnesses through the Agent Client Protocol (ACP) -- then verify the delegation is real.
+
+Why Delegation Needs to Be Explicit​
+
+Your employee will not discover coding harnesses on its own. Without ACP configured, if you ask it to "build a Python calculator," it will try to write code itself or, worse, claim it delegated the work when it did not. It may give you a plausible-sounding session ID and a working directory that does not exist. This is not a bug -- it is how language models work.
+
+The fix is a protocol. Let's set it up and get something working.
+
+Setting Up ACP​
+PREREQUISITES
+
+You need at least one coding harness installed on your machine. If you have Claude Code from Chapter 14, you are ready. If you have Codex, Gemini CLI, or another harness, that works too.
+
+WHY YOU RUN SETUP, NOT YOUR EMPLOYEE
+
+ACP setup is operator-side infrastructure -- you run these commands in your terminal, not through your messaging channel. This is a bootstrap problem: ACP is what enables your employee to delegate, so the employee cannot set up its own delegation protocol. Once ACP is enabled, everything switches to conversational. Setup is yours; usage is your employee's.
+
+Open the TUI first, then ask your employee what needs to be done:
+
+openclaw tui
+
+
+Inside the TUI, type:
+
+/acp install
+
+
+Your employee prints the exact commands you need to run. This is the first agentic pattern: your employee tells you what to set up. Open a separate terminal and run the commands it gives you:
+
+# Install the ACP backend plugin
+openclaw plugins install @openclaw/acpx
+
+# Enable the plugin
+openclaw config set plugins.entries.acpx.enabled true
+
+# Set a default harness so NLP dispatch knows where to send tasks
+# Use "claude" if you installed Claude Code in Chapter 14
+openclaw config set acp.defaultAgent "claude"
+
+# Restart the gateway to load everything
+openclaw gateway restart
+
+
+If plugins install says "Package not found on npm" but you see acpx already discovered in the output, that means the plugin shipped with your OpenClaw install. Skip that command and just enable it.
+
+If the restart warns about a token mismatch, run openclaw gateway install --force first, then restart.
+
+Verify and Test​
+
+Back in the TUI, run the doctor check:
+
+/acp doctor
+
+
+If it reports connected | idle, ACP is ready. If anything is wrong, it tells you exactly what to fix.
+
+Now test NLP dispatch with a simple task. Type this in the TUI:
+
+Run this as a one-shot ACP session: create a file called hello.py
+that prints "ACP works!"
+
+
+Your employee should dispatch to your default harness (Claude Code), create the file, and report back. If you see a confirmation like ✅ ACP one-shot complete, your setup is working end-to-end. Check the file:
+
+python hello.py   # Should print "ACP works!"
+
+
+If your employee does not dispatch automatically, use the explicit command /acp spawn claude --mode oneshot and then send the task. Once you have confirmed the test works, delete hello.py and move on to the exercises.
+
+Exercise 1: Run Claude Code in Your Project (One-Shot)​
+
+A one-shot run sends a single task to a coding harness, gets the result, and the session closes automatically. The harness runs in headless, non-interactive mode -- no terminal UI, no human approval prompts. Your employee dispatches the task, Claude Code executes it, and the result comes back to your messaging channel.
+
+THE KILLER FEATURE: PROJECT TARGETING
+
+The real power of ACP delegation is the cwd (current working directory) parameter. When you specify a project folder, the coding harness runs inside that folder -- it can read your existing code, understand your project structure, and write files in the right place. This is the difference between a chatbot guessing about code and a harness that works with your actual codebase.
+
+From your messaging channel:
+
+Run a one-shot Claude Code session in ~/Documents/code/my-project:
+add a README.md with a project description based on the existing code.
+
+
+Replace the path with a real project folder on your machine. Your employee sets the working directory (cwd) to that folder, so Claude Code can read your existing files and write new ones in the right place.
+
+If your employee does not dispatch automatically, use the explicit command:
+
+/acp spawn claude --mode oneshot
+
+
+Then send your task.
+
+What you should see: Your employee confirms it is dispatching to ACP. The harness runs (this may take 30 seconds to a minute), then your employee reports back with a summary of what was created.
+
+Check the result in your project folder -- the README.md should reference your actual code, not a generic template. That is the difference between a harness that reads your codebase and a chatbot that guesses.
+
+WHAT IF IT FAILS?
+ACP agent "claude" is not allowed by policy → The harness is not in the allowed list. Ask your employee: "add claude to the ACP allowed agents and restart."
+ACP runtime backend is not configured → Run /acp install then /acp doctor for the exact fix.
+Harness command not found → That coding tool is not installed on your machine. Make sure Claude Code (Chapter 14), Codex, or another harness is installed.
+No response after a minute → Run /acp status to check if a session started. If not, try the explicit /acp spawn claude --mode oneshot command instead of NLP dispatch.
+Exercise 2: Persistent Sessions (TUI or Discord)​
+CHECK YOUR CHANNEL FIRST
+
+Which channel are you on? Persistent sessions require thread binding, which only works on Discord and the TUI. If you are on WhatsApp or Telegram, skip to the "On WhatsApp and Telegram" section below -- those channels only support one-shot mode.
+
+One-shot runs are fire-and-forget. Persistent sessions stay alive across multiple turns -- you can send follow-ups, iterate, and steer without re-explaining context. But persistent sessions need a way to route your messages to the right session.
+
+On Discord (thread binding)​
+
+Discord supports threads natively. Spawn with --thread auto and all messages in that thread route to the ACP session automatically:
+
+/acp spawn claude --mode persistent --thread auto
+
+
+Now type your task directly in the thread. Follow-ups go to the same session. When done:
+
+/acp close
+
+On the TUI (focus binding)​
+
+The TUI does not have threads, so after spawning, the session starts unbound. Your messages still go to your main employee, not to the ACP session. You need to bind it:
+
+/acp spawn claude --mode persistent
+
+
+You will see something like:
+
+✅ Spawned ACP session agent:claude:acp:1c8840e3-...
+   Session is unbound (use /focus <session-key> to bind)
+
+
+Copy the session key and focus it:
+
+/focus agent:claude:acp:1c8840e3-...
+
+
+Now your messages route to Claude Code. Send a task that benefits from follow-ups:
+
+Review the code in this project and list the top 3 things
+you would improve. Do not make changes yet.
+
+
+Check status (it now targets the focused session):
+
+/acp status
+
+
+Steer with a follow-up -- this is where persistent sessions shine:
+
+/acp steer Go ahead and implement improvement #1. Show me the diff.
+
+
+When done, close and unfocus:
+
+/acp close
+
+On WhatsApp and Telegram​
+
+These channels do not support thread binding. Persistent ACP sessions will not work -- you will get an error like:
+
+Can't do that on WhatsApp: ACP persistent sessions require a thread binding, and WhatsApp doesn't support threads here.
+
+Use one-shot mode instead. Each task is a single fire-and-forget run. For multi-context work on WhatsApp and Telegram, use separate groups -- each group gets its own isolated session (see L02's section on organizing with groups).
+
+Run this as a one-shot Claude Code ACP session: [YOUR TASK]
+
+
+Or explicitly:
+
+/acp spawn claude --mode oneshot
+
+
+One-shot mode works on every channel because it does not need message routing -- it runs the task once and returns.
+
+The ACP Command Reference​
+Command	What It Does
+/acp spawn <agent>	Start a session (--mode persistent|oneshot, --thread auto|here|off)
+/acp status	Show session state, harness, runtime options
+/acp steer <instruction>	Send guidance without replacing context
+/acp model <id>	Override the model for the current session
+/acp permissions <profile>	Set approval policy (what the harness can do without asking)
+/acp timeout <seconds>	Configure turn timeout
+/acp cancel	Stop the current in-flight turn
+/acp close	End session and unbind threads
+/acp sessions	List all recent ACP sessions
+/acp doctor	Backend health check with actionable fixes
+/acp install	Print install and enable steps
+The Five Available Harnesses​
+
+The acpx backend ships with five built-in harness targets:
+
+Harness	What It Is
+claude	Claude Code -- the same tool you used in Chapter 14
+codex	OpenAI's Codex CLI
+pi	Pi coding assistant
+opencode	Open-source coding agent
+gemini	Google's Gemini CLI
+
+The /acp spawn command and session lifecycle work identically regardless of which harness runs underneath. Your employee can delegate to any of them through the same protocol.
+
+ACP vs Sub-Agents​
+
+ACP is not the only way your employee can delegate. OpenClaw also has a native sub-agent runtime for delegated runs within OpenClaw itself. The difference:
+
+Aspect	ACP Session	Sub-Agent Run
+Runtime	External harness (Claude Code, Codex, etc.)	OpenClaw-native agent
+Best for	Coding tasks, multi-file work	Research, analysis, non-coding
+Commands	/acp ...	/subagents ...
+Session key	agent:<id>:acp:<uuid>	agent:<id>:subagent:<uuid>
+
+Use ACP when you want an external coding harness. Use sub-agents when you want OpenClaw-native delegated runs.
+
+Why ACP Exists: The Hallucination Problem​
+
+Before ACP, users would tell their employee to "use Claude Code for coding tasks" through natural language. The employee would improvise shell commands -- sometimes correctly, sometimes not. The dangerous failure mode: your employee claims it delegated work, gives you a plausible session name and working directory, but none of it exists. It hallucinated the entire delegation.
+
+ACP solves this structurally. A protocol cannot hallucinate. When /acp status shows a session running, the backend has a real process tracked. When it shows nothing, no session exists.
+
+Verification Still Matters​
+
+/acp status confirms the session ran -- it does not confirm the code is correct. Always check that:
+
+The output files exist
+The code runs without errors
+The results match what you asked for
+
+ACP eliminates the "did delegation happen?" question. You still own the "is the work good?" question.
+
+Exercise 3: Research Then Build​
+
+This exercise combines what your employee does well with what a coding harness does well:
+
+I want to automate [A REPETITIVE TASK FROM YOUR WORK].
+First, research the best approach -- what tools exist, what method
+would work for my situation. Give me a summary of your research.
+
+Then, once I approve, delegate the coding via ACP.
+
+
+Notice the two phases. Your employee does the research first -- it has your context from MEMORY.md, it knows your work patterns, it can use web search. When you approve the approach, it spawns an ACP session and delegates the coding. Two different capabilities, one result.
+
+Common Errors and Fixes​
+Error Message	Cause	Fix
+ACP runtime backend is not configured	Backend plugin missing or disabled	Run /acp install then /acp doctor
+ACP is disabled by policy	acp.enabled=false	openclaw config set acp.enabled true + restart
+ACP agent "<id>" is not allowed by policy	Harness not in allowlist	Ask employee: "add claude to ACP allowed agents"
+Status check fails or shows no session	/acp status ran against main session	Focus the ACP session first (/focus <session-key>)
+Persistent session refused on WhatsApp/Telegram	Persistent mode on threadless channel	Use --mode oneshot or switch to Discord/TUI
+What Just Happened​
+
+You built a real delegation chain:
+
+Layer	Who	What They Did
+You	Manager	Gave high-level instructions through your messaging channel
+Your Employee (OpenClaw)	Coordinator	Routed coding tasks through ACP to the right harness
+Coding Harness (via ACP)	Coder	Wrote actual code in a managed, verifiable session
+
+This is the two-tier delegation pattern from Chapter 12. You managed, your employee coordinated, and the harness executed.
+
+What Transfers​
+Concept	What You Experienced
+Protocol-based delegation	ACP manages sessions, state, and lifecycle -- no ad-hoc shell commands
+Harness-agnostic interface	Same /acp spawn works across Claude, Codex, Pi, OpenCode, and Gemini
+Verification over trust	/acp status and output file checks prove work is real
+Channel-aware delegation	Persistent on Discord/TUI (threads/focus), one-shot on WhatsApp/Telegram
+Context stays with employee	Research and intent live with your employee, coding goes to the harness
+NLP dispatch	"Run this as a one-shot ACP session" works without slash commands
+Try With AI​
+Prompt 1: One-Shot on Your Channel​
+Run this as a one-shot ACP session: build a Python script that
+[SOMETHING USEFUL FOR YOUR WORK].
+
+
+What you're learning: NLP dispatch. You described what you wanted in plain language, and your employee routed it to ACP without slash commands. This works on every channel including WhatsApp.
+
+Prompt 2: Steer a Persistent Session​
+
+If you are on Discord or TUI:
+
+/acp spawn codex --mode persistent --thread auto
+
+
+Then send your task, review the output, and iterate:
+
+/acp steer Change the output format to JSON instead of plain text.
+
+
+What you're learning: Iteration through /acp steer. The harness receives your feedback with full context from the original task. No re-explaining.
+
+Prompt 3: Explain the Chain​
+Describe in plain language what happened in these exercises.
+What tasks did you handle yourself? What tasks did the coding
+harness handle via ACP? Why does a protocol matter more than
+just telling you to "use Claude Code"?
+
+
+What you're learning: Getting your employee to articulate the delegation pattern -- protocols over improvisation, the right tool for the right job, and verification to confirm work actually happened.
+
+Flashcards Study Aid​

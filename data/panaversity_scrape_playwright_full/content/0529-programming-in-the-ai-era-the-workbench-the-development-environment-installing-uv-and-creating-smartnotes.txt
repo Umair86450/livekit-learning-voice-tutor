@@ -1,0 +1,345 @@
+Installing uv and Creating SmartNotes
+
+In Lesson 1, James learned why the discipline stack exists and which axiom each tool enforces. Now it is time to install the first tool and create the project that will evolve across every remaining chapter. The tool is uv. The project is SmartNotes.
+
+James opens his terminal, ready to install Python. Every tutorial he has ever read starts the same way: go to python.org, download the installer, add Python to PATH, cross your fingers. He types the URL into his browser. Emma stops him before he hits Enter.
+
+"There is a faster way," she says. "One tool handles Python installation, virtual environments, and packages. It is called uv."
+
+James is skeptical. He has heard of pip, conda, poetry, pipenv. Each promised to simplify things. Each added complexity. "Why should I trust another tool? The python.org installer is the official way. It is maintained by the Python team itself."
+
+Emma does not argue. She opens her own terminal, types one command, and waits three seconds. "Done. Python installed, virtual environment ready, project scaffolded. One tool. One command."
+
+James crosses his arms. "That is a demo. Show me what happens when I need a specific Python version for one project and a different version for another. Show me what happens when two projects need different versions of the same library."
+
+Emma types two more commands. Two projects, two different Python versions, two isolated sets of dependencies. No conflicts. No PATH manipulation. No activation scripts.
+
+James is quiet for a moment. "The python.org installer is the official way," he says again, but slower this time. "It just does not handle any of those problems."
+
+The Problem Without uv​
+
+Before uv existed, setting up a Python project required coordinating multiple tools that knew nothing about each other. Each tool handled one piece of the puzzle, and the pieces did not fit together cleanly. This fragmentation matters even more when you work with AI assistants -- an AI can scaffold a project in seconds, but if the environment is not reproducible, the code it generates will only work on the machine that generated it.
+
+Task	Without uv	With uv
+Install Python	Download from python.org, manage PATH manually	uv python install 3.12
+Create virtual environment	python -m venv .venv, then activate it per-platform	Automatic on first uv run
+Install packages	pip install requests, no lockfile	uv add requests (updates pyproject.toml + lockfile + venv)
+Pin Python version	Create .python-version by hand, hope pyenv reads it	uv init creates it automatically
+Reproducible environments	pip freeze > requirements.txt, pray versions match	uv.lock generated automatically, cross-platform
+Run project code	Activate venv first, then python main.py	uv run main.py (handles everything)
+
+The old workflow required five separate tools: python.org installer, venv, pip, pip-tools (for lockfiles), and pyenv (for version management). Each maintained by different teams, with different release schedules, different configuration formats, and different assumptions about where files should live. When something broke, the debugging started with the question: "Which tool caused this?"
+
+uv replaces all five. One binary, written in Rust, maintained by Astral (the same company that builds ruff). It installs Python, creates virtual environments, manages dependencies, generates lockfiles, and runs project code. All through a single command-line interface.
+
+IF YOU'RE NEW TO PROGRAMMING
+
+A virtual environment is like a private toolbox for one project. The tools in one toolbox do not interfere with tools in another. Without it, installing a library for one project can break a different project that needs a different version. You never need to manage this toolbox yourself -- uv creates it and keeps it organized automatically.
+
+Installing uv​
+
+Installation takes one command. The command differs by platform. For the latest instructions, see the official uv installation guide.
+
+WINDOWS (POWERSHELL)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+MACOS / LINUX (CURL)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+MACOS (HOMEBREW ALTERNATIVE)
+brew install uv
+
+WINDOWS (WINGET ALTERNATIVE)
+
+Requires Windows App Installer (pre-installed on Windows 11, may need manual install on Windows 10).
+
+winget install --id=astral-sh.uv -e
+
+ANY PLATFORM: PIP FALLBACK
+
+If you already have Python installed, you can bootstrap uv with pip. You are using pip to install the tool that replaces pip, and this is fine as a one-time bootstrap.
+
+pip install uv
+
+
+After installation, verify it worked:
+
+uv --version
+
+
+Output:
+
+uv 0.10.4 (ce3ebd06b 2026-02-17)
+
+
+Your version number will likely be different from the one shown here -- and that is expected. uv releases frequently, so a newer version is normal. The commands in this chapter work the same across versions. What matters is that you see a version number, not "command not found." If you see "command not found," close and reopen your terminal. The PATH update requires a new shell session.
+
+IF YOU SEE "COMMAND NOT FOUND"
+
+Close your terminal and open a new one. The installer added uv to your PATH, but the current terminal session does not see it yet. On Windows, you may need to restart your computer.
+
+Axiom I in Action​
+
+In Chapter 43, you learned Axiom I: Shell as Orchestrator. The shell coordinates programs; programs do computation. uv is this axiom made concrete for Python development.
+
+Before uv, orchestrating Python required a chain of unrelated commands:
+
+# OLD WAY: Five tools, five commands, five chances for something to break
+pyenv install 3.12.0
+pyenv local 3.12.0
+python -m venv .venv
+source .venv/bin/activate    # Different on Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+
+With uv, the shell orchestrates a single tool that handles everything:
+
+# NEW WAY: One tool, one command
+uv run main.py
+
+
+That single command verifies the Python version, creates or syncs the virtual environment, installs any missing dependencies, and runs the file. Five responsibilities, one orchestrator. This is what Axiom I looks like in practice: the shell does not manage Python versions or parse dependency files; it calls uv, and uv handles the computation.
+
+Practical Application​
+Creating the SmartNotes Project​
+
+SmartNotes is the project you will build across every chapter from here forward. It starts as a single file. By the end of the course, it will be a full application with types, tests, a database, an API, and deployment configuration. Right now, you create its foundation.
+
+It is worth knowing where SmartNotes is going. In later chapters, SmartNotes will grow into an AI-powered agent: one that can ingest your notes, reason over them, surface connections you did not notice, and eventually run without you present. In Part 7, you will see what it takes to package a project like this into a Digital FTE -- an autonomous agent you can deploy, monitor, and sell as a managed product. The pyproject.toml you are about to configure is the same file that will declare your agent's dependencies in production. The test suite you will write with pytest is the same mechanism that will verify your agent's behavior before you give it autonomous access to a user's data. This is not a toy project you will discard after this chapter. Build it carefully.
+
+Open your terminal and run:
+
+uv init smartnotes
+
+
+Output:
+
+Initialized project `smartnotes` at `/home/user/smartnotes`
+
+
+Now look at what uv created:
+
+cd smartnotes
+ls -la
+
+
+Output:
+
+.gitignore
+.python-version
+README.md
+main.py
+pyproject.toml
+
+
+Five files. Each has a specific purpose. No file is optional.
+
+File-by-File Explanation​
+
+.python-version pins the Python version for this project. Open it:
+
+3.12
+
+
+One line. One number. Every developer who clones this project will use Python 3.12, regardless of what other versions they have installed. uv reads this file and automatically uses the correct Python version. No manual management required.
+
+pyproject.toml is the project's identity document. It tells every tool (uv, pyright, ruff, pytest) what this project is and how it should be treated.
+
+[project]
+name = "smartnotes"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+
+The [project] section contains the project name, version, a description placeholder, and the minimum Python version required. The dependencies list is empty because SmartNotes has no external packages yet. You will add dependencies in Lesson 3.
+
+main.py is the entry point: the file that runs when you execute the project.
+
+def main():
+    print("Hello from smartnotes!")
+
+
+if __name__ == "__main__":
+    main()
+
+
+This file uses two Python features (def and the if __name__ guard) that you will learn about in later chapters. For now, the only line that matters is print("Hello from smartnotes!"). That is the line that produces the greeting you see in the terminal. When you run uv run main.py, Python executes this file and prints the message. You will understand every line of this file in later chapters.
+
+.gitignore tells Git which files to exclude from version control. uv generates a default that excludes virtual environments and Python cache files, which should never be committed to a repository.
+
+README.md is a placeholder documentation file. Every professional project has one. You will update it as SmartNotes grows.
+
+Running the Project​
+
+Now run SmartNotes for the first time:
+
+uv run main.py
+
+
+Output:
+
+Hello from smartnotes!
+
+IF YOU SEE "NO PYTHON FOUND" OR VERSION ERRORS
+
+Run uv python install to let uv download Python automatically. If your system Python is too old, uv handles the download for you.
+
+Notice what happened behind the scenes. uv checked .python-version to confirm the correct Python version, created a .venv directory (the virtual environment), and ran main.py inside that environment. You did not activate anything. You did not install anything. You typed one command.
+
+After this first run, two new items appear in the project:
+
+smartnotes/
+├── .gitignore
+├── .python-version
+├── .venv/              <-- Created automatically by uv run
+├── README.md
+├── main.py
+├── pyproject.toml
+└── uv.lock             <-- Created automatically by uv run
+
+
+.venv/ is the virtual environment: an isolated copy of Python and any packages your project needs. uv manages it entirely. You never need to activate it, deactivate it, or think about it. The .gitignore file already excludes it from version control.
+
+uv.lock is the lockfile: a precise record of every dependency and its exact version. Right now it is nearly empty because SmartNotes has no dependencies. As you add packages in Lesson 3, this file will grow. It should be committed to Git so that every developer gets identical dependency versions.
+
+Quick Check: After running uv run main.py, two new items appeared: .venv/ and uv.lock. One should be committed to Git and the other should not. Which is which, and why?
+
+Check your answer
+CHECKPOINT: YOUR SMARTNOTES PROJECT SHOULD NOW LOOK LIKE THIS
+smartnotes/
+├── .gitignore
+├── .python-version
+├── .venv/              ← created by uv run
+├── README.md
+├── main.py
+├── pyproject.toml
+└── uv.lock             ← created by uv run
+
+
+If you see all seven items, you are on track. If anything is missing, re-read the steps above before continuing.
+
+Anti-Patterns​
+
+The anti-patterns from Lesson 1 (global installs, no virtual environment, no linter, test later) still apply. Here are two additional traps specific to project setup that uv eliminates:
+
+Anti-Pattern	What It Looks Like	Why It Fails	The Fix
+Installing Python from python.org	Downloading the installer, running it, adding Python to PATH manually	Different developers end up with different Python versions. PATH conflicts cause mysterious errors. No way to pin a version per project.	Let uv manage Python. uv python install 3.12 if needed, but uv init and uv run handle versioning automatically.
+Activating virtual environments manually	source .venv/bin/activate on Mac/Linux or .venv\Scripts\activate on Windows	Platform-specific commands that students forget or get wrong. Leads to "it works on my machine" problems when someone forgets to activate.	Use uv run instead. It runs commands inside the project environment automatically. No activation required, no platform differences.
+Try With AI​
+Prompt 1: Explain the Project Structure​
+
+What you're learning: How to use AI as an explainer for project structure. You ran the commands yourself and saw the output. Now you are asking AI to deepen your understanding of what each file does and why it exists. This builds the habit of running first, then asking AI to explain, not asking AI to do the work for you.
+
+I just ran `uv init smartnotes` and got these files:
+- .gitignore
+- .python-version (contains "3.12")
+- README.md
+- main.py
+- pyproject.toml
+
+Then I ran `uv run main.py` and two more items appeared:
+- .venv/ directory
+- uv.lock file
+
+Explain what each file and directory does. For each one, tell me:
+1. What it contains
+2. Who reads it (humans, tools, or both)
+3. Whether it should be committed to Git
+
+Prompt 2: Compare uv run to Direct Python Execution​
+
+What you're learning: How to ask AI to reveal the mechanics behind a command you already use. You know uv run main.py works. Now you are learning what it does under the hood, which helps you understand why uv run is preferred over calling Python directly. This is the difference between using a tool and understanding a tool.
+
+What is the difference between running:
+  uv run main.py
+and running:
+  python main.py
+
+Explain what uv does behind the scenes before executing the file.
+Include what happens with the virtual environment, dependency
+checking, and Python version verification.
+
+Prompt 3: Explore, Then Ask AI to Explain​
+
+Before prompting, look inside the .venv/ directory that uv created:
+
+ls .venv/
+
+
+You will see folders like bin/ (or Scripts/ on Windows), lib/, and a configuration file. You do not need to understand these yet. Now ask AI:
+
+What you're learning: The habit of observing before asking. You looked at real files on your machine first, then asked AI to explain what you saw. This is the opposite of asking AI to explain something abstract: you have concrete evidence to anchor the explanation. The AI's response will connect the folders you saw to the concept of environment isolation, which is more memorable than a definition alone.
+
+I ran `ls .venv/` inside my Python project and saw these folders:
+[paste what you saw]
+
+I'm new to Python. Explain:
+1. What is this .venv/ directory and why does it exist?
+2. What do the folders inside it contain?
+3. Why does uv create and manage this directory automatically
+   instead of making me create it with python -m venv?
+
+Use an analogy that does not involve programming.
+
+Common Issues​
+TROUBLESHOOTING
+
+"command not found: uv" after installation: Close your terminal and open a new one. The installer adds uv to your PATH, but existing terminals do not pick up the change until restarted.
+
+"No Python found" when running uv run: uv needs a Python installation. Run uv python install to let uv download and manage Python for you.
+
+.python-version mismatch: If your project requires Python 3.12 but you only have 3.11, run uv python install 3.12. uv will download the correct version automatically.
+
+Permission errors on macOS/Linux: The install script may need sudo. If curl ... | sh fails with permission errors, try curl ... | sudo sh or install to a user-local directory with --install-dir ~/.local/bin.
+
+Windows: "execution policy" error in PowerShell: Run Set-ExecutionPolicy -Scope CurrentUser RemoteSigned first, then retry the install command.
+
+PRIMM-AI+ Practice: Installing uv and Creating SmartNotes​
+Predict [AI-FREE]​
+
+Before running uv init smartnotes, predict: how many files will it create, and can you name them? Also predict: what is the difference between uv run main.py and python main.py? Write your guesses and a confidence score from 1 to 5.
+
+Run​
+
+Run uv init smartnotes, then list the files. Compare to your prediction -- what surprised you? Now run uv run main.py and check: did .venv/ and uv.lock appear? One of these should be committed to Git and the other should not. Predict which one, then check .gitignore.
+
+Investigate​
+
+For each file in the project directory, write one sentence about what you think it does. Then look inside .venv/ (run ls .venv/ on Mac/Linux or dir .venv on Windows). Ask your AI assistant:
+
+I looked inside .venv/ and saw: [paste what you saw].
+What is this directory? Why does uv create it automatically?
+
+
+Compare the AI's explanation to your own notes. Try running python main.py directly (without uv run) -- does it work the same way? If not, that difference is exactly what uv protects you from.
+
+Modify​
+
+Change .python-version to a Python version you do not have installed. Predict what will happen before running uv run main.py again. Does uv install the missing version, or does it show an error? Change it back when you are done.
+
+Make​
+
+Self-check: answer these without looking back at the lesson.
+
+Can you run uv init practice-project and explain what each of the five generated files does? Create the project, then list the files. If you can name all five and their purposes, you have the structure down.
+Can you run uv run main.py in your new project and explain what happens at each step? The command does four things before your code executes. Name them.
+What file controls which Python version the project uses, and how does uv enforce it? If you can name the file and describe the enforcement mechanism, you understood the pinning concept.
+What single command replaces pip install, python -m venv, and python main.py? If your answer starts with uv, you are on track.
+Operational Takeaways​
+
+uv replaces five tools. It handles Python version management, virtual environment creation, dependency installation, lockfile generation, and script execution, all through one interface.
+
+uv init creates a complete project structure. Five files, each with a clear purpose: .gitignore (what to exclude from Git), .python-version (which Python to use), README.md (documentation), main.py (entry point), and pyproject.toml (project identity).
+
+uv run is the only command you need to execute code. It verifies the Python version, syncs the virtual environment, installs missing dependencies, and runs your file. No activation step required.
+
+.python-version ensures consistency. Every developer working on SmartNotes uses the same Python version, enforced by uv automatically.
+
+This is Axiom I in practice. One shell command (uv run) orchestrates Python versioning, environment management, dependency resolution, and script execution. The shell coordinates; uv computes.
+
+Looking Ahead​
+
+SmartNotes exists. It has a clean structure, a pinned Python version, and a working entry point. But pyproject.toml is still basic: it has no tool configurations, no development dependencies, and no way to run quality checks. In Lesson 3, you will install the rest of the discipline stack (pyright, ruff, and pytest) and configure pyproject.toml as the single source of truth for the entire project.

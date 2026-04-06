@@ -1,0 +1,316 @@
+Context Window Management
+
+Every LLM has a limit—a maximum number of tokens it can process at once. This is the context window, and managing it effectively is one of the most important skills in building memory-augmented agents.
+
+The context window seems large. GPT-4 offers 128,000 tokens. Claude offers 200,000 tokens. That's roughly 100,000 words—a full novel. But in practice, you'll find it fills up fast. System prompts, conversation history, retrieved memories, tools definitions—they all compete for space.
+
+This lesson teaches you how to manage that space wisely: where to inject memories, how to compress old information, and when to summarize versus retrieve in full.
+
+Understanding Context Windows​
+Size Comparison​
+Model	Context Window	Approximate Words
+GPT-4o	128,000 tokens	~100,000 words
+Claude 3.5 Sonnet	200,000 tokens	~150,000 words
+GPT-4o-mini	128,000 tokens	~100,000 words
+Gemini 1.5 Pro	1,000,000 tokens	~750,000 words
+Why Large Isn't Enough​
+
+Even with 128k tokens, you face constraints:
+
+Context Window Allocation (128k tokens)
+├── System Prompt (instructions, persona)       3,000 tokens
+├── Tool Definitions (function calling)         2,000 tokens
+├── Conversation History (recent messages)     10,000 tokens
+├── Retrieved Memories                          4,000 tokens
+├── Current User Message                        1,000 tokens
+├── Reserved for Response                       4,000 tokens
+└── TOTAL USED: 24,000 tokens
+
+Problems:
+1. Cost: You pay per token. 100k tokens x $0.01/1k = $1 per call
+2. Latency: More tokens = slower response (roughly linear)
+3. Attention: LLMs struggle with very long contexts (lost in middle)
+
+The "Lost in the Middle" Problem​
+
+Research shows LLMs attend less to information in the middle of long contexts. Information at the beginning and end gets more attention.
+
+Implication: Put your most important memories at the beginning or end of the injected context, not buried in the middle.
+
+Memory Injection Strategies​
+
+Where you place memories in the prompt affects how the LLM uses them.
+
+1. Pre-Prompt Injection​
+
+Inject memories before the user's message, typically after the system prompt.
+
+def build_prompt_with_memory(system_prompt: str, memories: list, user_message: str) -> str:
+    """Pre-prompt memory injection."""
+    memory_context = format_memories(memories)
+
+    return f"""{system_prompt}
+
+## Relevant Context from Previous Interactions
+
+{memory_context}
+
+## Current Conversation
+
+User: {user_message}
+"""
+
+
+When to use: Most common approach. Works well for background context.
+
+2. Mid-Prompt Injection​
+
+Inject memories after the user's message but before the assistant response.
+
+def build_prompt_mid_injection(system_prompt: str, user_message: str, memories: list) -> str:
+    """Mid-prompt memory injection."""
+    memory_context = format_memories(memories)
+
+    return f"""{system_prompt}
+
+User: {user_message}
+
+[System note: Relevant context for responding:
+{memory_context}]
+"""
+
+
+When to use: Query-specific context that shouldn't influence other parts of the conversation.
+
+3. Dynamic Injection​
+
+Retrieve and inject memories during reasoning, based on what the LLM discovers it needs.
+
+async def dynamic_retrieval_agent(user_message: str, user_id: str):
+    """Agent that retrieves memories on-demand during reasoning."""
+
+    # Tool that agent can call to retrieve memories
+    @function_tool
+    async def recall_memory(query: str) -> str:
+        """Search memories for relevant context."""
+        results = memory.search(query, filters={"user_id": user_id}, limit=3)
+        return format_memories(results['results'])
+
+    agent = Agent(
+        name="MemoryAgent",
+        instructions="You can recall memories about the user when needed.",
+        tools=[recall_memory]
+    )
+
+    return await Runner.run(agent, user_message)
+
+
+When to use: Complex queries where the agent needs to discover what context it needs.
+
+Summarization Chains​
+
+Old detailed memories consume tokens. Summarization chains compress them hierarchically.
+
+The Hierarchy​
+Detailed Events (hours old)
+    ↓ (daily summarization)
+Daily Summaries
+    ↓ (weekly summarization)
+Weekly Summaries
+    ↓ (monthly summarization)
+Monthly Summaries
+
+Implementation​
+async def run_summarization_chain(user_id: str):
+    """Hierarchical summarization of old memories."""
+
+    # Daily: Summarize events older than 24 hours
+    await summarize_tier(
+        user_id=user_id,
+        older_than_hours=24,
+        source_type="event",
+        target_type="daily_summary"
+    )
+
+    # Weekly: Summarize daily summaries older than 7 days
+    await summarize_tier(
+        user_id=user_id,
+        older_than_days=7,
+        source_type="daily_summary",
+        target_type="weekly_summary"
+    )
+
+    # Monthly: Summarize weekly summaries older than 30 days
+    await summarize_tier(
+        user_id=user_id,
+        older_than_days=30,
+        source_type="weekly_summary",
+        target_type="monthly_summary"
+    )
+
+async def summarize_tier(user_id, older_than_days=None, older_than_hours=None,
+                         source_type=None, target_type=None):
+    """Summarize memories at one tier into the next."""
+
+    # Calculate cutoff
+    if older_than_hours:
+        cutoff = datetime.now() - timedelta(hours=older_than_hours)
+    else:
+        cutoff = datetime.now() - timedelta(days=older_than_days)
+
+    # Get memories to summarize
+    old_memories = memory.search(
+        query="",
+        filters={
+            "user_id": user_id,
+            "type": source_type,
+            "created_at": {"lte": cutoff.isoformat()}
+        }
+    )['results']
+
+    if len(old_memories) < 3:  # Don't summarize small groups
+        return
+
+    # Group by date/week/month
+    grouped = group_by_period(old_memories, target_type)
+
+    for period, memories in grouped.items():
+        # Generate summary using LLM
+        summary_prompt = f"""
+        Summarize these memories into a single concise paragraph:
+
+        {format_memories(memories)}
+
+        Focus on: key events, decisions, patterns, and outcomes.
+        """
+        summary = await llm.generate(summary_prompt)
+
+        # Store summary
+        memory.add([{
+            "role": "system",
+            "content": summary
+        }], user_id=user_id, metadata={
+            "type": target_type,
+            "period": period,
+            "source_count": len(memories)
+        })
+
+        # Delete original memories
+        for mem in memories:
+            memory.delete(mem['id'])
+
+Example​
+
+Before (10 daily events):
+
+- Jan 15: Created task "Review PR #123"
+- Jan 15: Completed task "Review PR #123"
+- Jan 16: Created task "Fix login bug"
+- Jan 16: Updated task priority to high
+- Jan 17: Completed "Fix login bug"
+- Jan 18: Created 3 tasks for Phoenix project
+- Jan 19: Completed 2 Phoenix tasks
+- Jan 20: Had meeting about deadline
+- Jan 20: Extended deadline to Feb 15
+- Jan 21: Started working on auth migration
+
+
+After (1 weekly summary):
+
+Week of Jan 15-21: User completed 4 tasks including PR review and login bug fix.
+Created multiple Phoenix project tasks. Had planning meeting that resulted in
+deadline extension to Feb 15. Began auth migration work.
+
+When to Retrieve vs. Summarize​
+Decision Framework​
+Scenario	Approach	Reason
+User asks about recent event	Retrieve full	Details matter
+User asks about patterns	Inject summary	Patterns, not details
+Reference to specific date	Retrieve full	Specific lookup
+Background context	Inject summary	General awareness
+User says "exactly what I said"	Retrieve full	Verbatim needed
+Agent needs general knowledge	Inject summary	Token efficiency
+Decision Tree​
+def decide_retrieval_strategy(query: str, age_days: int) -> str:
+    """Decide whether to retrieve full memories or summaries."""
+
+    # Recent events: always full retrieval
+    if age_days < 7:
+        return "full_retrieval"
+
+    # Specific date reference: full retrieval
+    if contains_date_reference(query):
+        return "full_retrieval"
+
+    # Pattern or trend questions: summary
+    pattern_keywords = ["usually", "typically", "pattern", "trend", "often"]
+    if any(kw in query.lower() for kw in pattern_keywords):
+        return "summary"
+
+    # Very old events: summary
+    if age_days > 30:
+        return "summary"
+
+    # Default: full retrieval
+    return "full_retrieval"
+
+Try With AI​
+
+Use these prompts to practice context window management with Claude or your preferred AI assistant.
+
+Prompt 1: Compression Strategy​
+You have an agent with 1000 memories but only 4000 tokens of context budget for memory injection.
+
+Memory distribution:
+- 500 memories from last week (avg 50 tokens each = 25,000 tokens)
+- 300 memories from last month (avg 40 tokens each = 12,000 tokens)
+- 200 memories from last year (avg 30 tokens each = 6,000 tokens)
+
+Design a compression strategy that:
+1. Stays within the 4000 token budget
+2. Prioritizes recent over old
+3. Preserves important patterns from older memories
+4. Includes specific counts and token allocations
+
+Show your budget allocation and explain the trade-offs.
+
+
+What you're learning: Token budgets force hard choices. You can't include everything, so you must prioritize ruthlessly while preserving essential patterns through summarization.
+
+Prompt 2: Hierarchical Summarization​
+Design a hierarchical summarization system for an agent that's been running for 1 year.
+
+The agent handles customer support tickets and has accumulated:
+- 50,000 individual interaction memories
+- Average 100 tokens per memory = 5 million tokens total
+
+Create a 4-tier summarization hierarchy:
+1. What goes in each tier?
+2. What triggers promotion to the next tier?
+3. What information is preserved vs lost at each compression?
+4. How would you reconstruct detailed information if needed later?
+
+Include example memories at each tier level.
+
+
+What you're learning: Hierarchical summarization is lossy compression. The art is choosing what to preserve at each level so patterns remain visible even as details fade.
+
+Prompt 3: Retrieve vs. Summarize Decision​
+For each of these user queries, decide: should the agent retrieve full memories or inject summaries?
+
+1. "What did we discuss about the API yesterday?"
+2. "What's my typical task completion rate?"
+3. "Who was in that meeting last Tuesday?"
+4. "How have my priorities changed over time?"
+5. "What exactly did I say about the deadline?"
+6. "What projects am I usually working on?"
+7. "When did we first discuss the Phoenix migration?"
+8. "What are my general preferences for task scheduling?"
+
+For each:
+- State your decision (retrieve/summarize)
+- Explain why
+- Describe what the retrieved/summarized content would look like
+
+
+What you're learning: The decision isn't always obvious. Some queries need precision (full retrieval), others need patterns (summarization). The key is matching retrieval strategy to query intent.

@@ -1,0 +1,234 @@
+Error Recovery & Resilience
+
+We're about to do something most tutorials would never let you do. You're going to deliberately destroy the organization you just built. On purpose. With your real files.
+
+Look at your organized/ folder. That structure took you the last three lessons to build: survey, backup, categorization rules, batch moves. You're about to flatten it back to chaos in 5 seconds.
+
+The goal isn't to get good at fixing mistakes. The goal is to stop being afraid of making them. Fire drills don't teach you to fight fires. They teach you to stop freezing when the alarm goes off. By the end of this lesson, the word "oops" will be followed by a recovery workflow, not a panic response.
+
+Exercise: The Deliberate Mistake​
+
+You're going to intentionally run a bad organization command and then recover from it. This is safe because you have a verified backup from Lesson 2.
+
+Step 1: Confirm Your Safety Net​
+
+First, verify that the backup you created in Lesson 2 still exists and is complete:
+
+You: Check my file-organizer/backup/ folder. Is my backup from Lesson 2
+still there? How many files does it contain? Compare it against what's
+currently in file-organizer/organized/.
+
+Claude Code:
+[Runs: ls file-organizer/backup/]
+[Runs: find file-organizer/backup/ -type f | wc -l]
+[Runs: find file-organizer/organized/ -type f | wc -l]
+
+Your backup contains 136 files across 5 categories.
+Your organized/ folder currently has 486 files.
+The backup covers your important files (PDFs and recent files).
+Safety net confirmed.
+
+Step 2: Run a Deliberately Wrong Reorganization​
+
+Ready? Look at your organized/ folder one more time. Five categories. 486 files, each in its place. You built that. You're about to destroy it in one command.
+
+You: Take everything in file-organizer/organized/ and merge all the
+category folders back into a single flat folder. Dump all files from
+documents/, spreadsheets/, images/, code/, and misc/ into organized/
+directly. Remove the empty category folders.
+
+Claude Code:
+[Runs: mv file-organizer/organized/documents/* file-organizer/organized/]
+[Runs: mv file-organizer/organized/spreadsheets/* file-organizer/organized/]
+[Runs: mv file-organizer/organized/images/* file-organizer/organized/]
+... (moves all files, removes empty folders)
+
+Done. All 486 files are now in a single flat folder.
+The category structure from Lesson 3 is gone.
+
+Step 3: Watch the Structure Collapse​
+
+Check what happened to the organization you built in Lesson 3:
+
+You: Show me what file-organizer/organized/ looks like now.
+Is there any way to tell which files were documents vs images
+vs spreadsheets?
+
+Claude Code:
+[Runs: ls file-organizer/organized/ | head -20]
+
+organized/ now contains 486 files in a single flat list.
+report.pdf sits next to photo.jpg sits next to budget.xlsx.
+There's no way to tell which category they belonged to —
+the folder structure was the only metadata, and it's gone.
+
+Step 4: Discover the Problem​
+
+The damage is done. Now diagnose it:
+
+You: Compare what's in file-organizer/organized/ now against my
+backup. Show me what I lost and what changed.
+
+Claude Code:
+[Runs: ls file-organizer/organized/ | wc -l]
+[Runs: ls -d file-organizer/organized/*/  2>/dev/null]
+
+organized/ now has 486 files in a flat list.
+No subdirectories remain — all category folders are gone.
+
+The files themselves are intact, but the STRUCTURE is destroyed.
+Your rules.md still describes the categories, but the folders
+that implemented those categories no longer exist.
+
+
+The "mistake" here is real: you lost the entire organization from Lesson 3. In real workflows, this kind of destructive flatten could also overwrite files with the same name across categories, break relative paths, or mix incompatible file types.
+
+Step 5: Recover from Backup​
+
+Here's the payoff. You have a backup. But more importantly, you have rules.md. Recovery means re-applying your documented rules:
+
+You: That reorganization was wrong. I want to restore my organized/
+folder structure. Use the backup to recover any files that were lost,
+and re-apply the rules from rules.md to recreate the category folders.
+
+Claude Code: Restoring organization...
+
+[Runs: # Recreates category folders from rules.md]
+[Runs: # Re-sorts files by extension into proper categories]
+
+Error: Permission denied on 3 files in organized/ — they're
+marked read-only.
+
+I'll adjust permissions and retry those files.
+
+[Runs: chmod u+w organized/restricted-report.pdf organized/budget-locked.xlsx organized/template.docx]
+[Runs: # Re-sorts the 3 failed files]
+
+Second attempt successful. All 486 files sorted.
+
+[Runs: # Compares against backup to verify no files lost]
+
+Restored. organized/ now has 5 category folders matching rules.md.
+486 files sorted back into their categories.
+Verified against backup — no files missing.
+
+
+Notice the recovery wasn't clean. Permission errors on 3 files. The agent adjusted and retried. Real recovery is like this: messy, iterative, but it gets there. The point isn't perfection on the first try. The point is having a process that converges on the right answer.
+
+You're back to where you started. The careless flatten is undone. No data lost.
+
+Common Recovery Scenarios​
+
+Here are real situations where recovery saves you, and the prompt patterns to handle them:
+
+"I organized files with the wrong rules"
+
+The organization rules were wrong — financial files ended up in misc/
+instead of spreadsheets/. Restore from backup and let's fix the rules
+before re-organizing.
+
+
+"The rename script mangled filenames"
+
+The rename script produced garbled filenames. Show me the rename log,
+then restore the original filenames from backup.
+
+
+"I accidentally deleted files I needed"
+
+I deleted some files from misc/ that I actually needed. Check my backup
+for these files: [list filenames]. Copy them back to their original
+location.
+
+
+"I'm not sure what went wrong"
+
+Something is off — my organized/ folder has fewer files than it should.
+Compare the current state against the backup and show me what's missing
+or different.
+
+
+That last pattern (comparing current state against backup) is the most powerful recovery tool. When you're not sure what went wrong, a systematic comparison reveals exactly what changed.
+
+Building Recovery Into Your Workflow​
+
+The lesson from this exercise isn't just "backups are useful." It's that recovery should be a planned step, not an emergency response.
+
+Here's how to build recovery thinking into every workflow:
+
+When	What to Do
+Before you start	Ask: "What's my recovery plan if this goes wrong?"
+Before destructive ops	Create or verify backup
+After batch operations	Compare results against expectations
+When something's off	Compare current state vs backup
+After recovery	Verify the restoration is complete
+The Agent is Ephemeral, Code is Eternal​
+
+Notice something about this lesson. Every time you needed recovery, you typed a prompt and the agent ran commands. That works. But what happens next month when you need to recover again? You'll describe the same thing from scratch. The agent might interpret your request slightly differently. It might use different flags, skip the verification step, or restore to the wrong location.
+
+Now look at Try With AI Prompt 3 below: it asks you to create restore.sh. That script is fundamentally different from asking the agent to "restore my files." Here's why:
+
+Approach	Today	Next Month
+Ask the agent	Agent interprets your request, picks commands, runs them	Agent may interpret differently, pick different commands, produce different results
+Run a script	Script executes the exact same steps every time	Script executes the exact same steps every time
+
+This is Principle 2: Code as the Universal Interface in action. When you ask the agent to do something, you get a one-time result that depends on the agent's interpretation in that moment. When you ask the agent to write code that does something, you get a deterministic tool that works the same way every time, even without the agent.
+
+The agent is ephemeral. Your conversation ends, context resets, and the next session starts fresh. But a script saved to disk? That persists. It captures the exact recovery workflow you verified today and makes it repeatable forever.
+
+The pattern: Whenever you find yourself asking the agent to do the same task twice, stop and ask it to write a script instead. You've traded a conversation for a tool.
+
+✅ Checkpoint: Do This Now​
+
+Stop reading. Open Claude Code and run the recovery exercise.
+
+Verify your backup from Lesson 2 is still intact
+Deliberately flatten your organized/ folder (merge all categories into one)
+Compare the damage against your backup
+Restore using your backup and rules.md
+Verify the restoration matches the original structure
+
+This should take less than 5 minutes. But the muscle memory you build will save you hours when a real mistake happens.
+
+You can now break things and fix them. That's a superpower most people never develop. But there's one category of file problem where backups and recovery aren't enough: when you can't find the file in the first place. You know it exists. You downloaded it months ago. The filename is something your bank auto-generated. Where is it?
+
+🔄 Session Management Note​
+
+You've now completed five lessons of file processing work. If your Claude Code context is getting long, or if responses feel slower or less focused: this is a natural point to start fresh.
+
+Why now: Recovery exercises generate a lot of back-and-forth. Combined with Lessons 1-4, your context may be carrying exploration, organization, batch operations, and recovery all at once. That's the Kitchen Sink pattern from the Seven Principles chapter.
+
+How to reset: Commit your work, then start a new session for Lesson 6. Your rules.md, FILE-INVENTORY.md, backups, and scripts are all saved in files: your progress carries forward across sessions.
+
+Try With AI: Extended Practice​
+
+Prompt 1: Selective Recovery
+
+I organized my Downloads folder but only the spreadsheet categorization
+was wrong. Help me restore JUST the spreadsheet files from backup
+without undoing the rest of the organization.
+
+
+What you're practicing: Surgical recovery. Sometimes you don't want to undo everything, just fix the part that went wrong.
+
+Prompt 2: Recovery Audit
+
+Compare my organized/ folder against my backup/ folder. Show me:
+- Files that exist in backup but not in organized (lost files)
+- Files that exist in organized but not in backup (new files)
+- Files that changed size (possible corruption)
+Create an audit report.
+
+
+What you're practicing: Systematic comparison. This is the detective work that tells you exactly what changed and what might be wrong.
+
+Prompt 3: Recovery Script
+
+Create a script called restore.sh that takes a backup folder and a
+target folder as arguments and restores the target from the backup.
+Include verification that the restoration was complete.
+
+
+What you're practicing: Automating recovery. Just like you created scripts for organization, you can create scripts for recovery. The pattern is the same.
+
+Flashcards Study Aid​

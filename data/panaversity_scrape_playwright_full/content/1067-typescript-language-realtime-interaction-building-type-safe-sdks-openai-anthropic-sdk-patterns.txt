@@ -1,0 +1,632 @@
+OpenAI/Anthropic SDK Patterns
+
+When you look under the hood of production AI applications, you'll find they're all solving the same problems: streaming responses token by token, calling tools when the model needs external data, accumulating partial messages into complete responses, and configuring clients that handle retries and timeouts gracefully. The OpenAI and Anthropic TypeScript SDKs have evolved sophisticated patterns for each of these challenges.
+
+Understanding these patterns matters because they're not just implementation details. They define the mental model for building AI applications. When you build your own SDK for your FastAPI backend (this chapter's capstone), you'll follow these same patterns. When you evaluate new AI providers, you'll recognize which patterns they implement well and which they're missing. These aren't arbitrary API choices—they're battle-tested solutions to problems every AI application faces.
+
+In this lesson, you'll learn the core patterns that both SDKs share: async iterator streaming, tool calling with typed parameters, message accumulation strategies, and client configuration. By the end, you'll understand not just how to use these SDKs, but why they're designed the way they are.
+
+Client Configuration: The Foundation​
+
+Both SDKs follow the same configuration pattern: create a client instance with your API key and optional settings for timeouts, retries, and base URLs.
+
+OpenAI Client Configuration​
+import OpenAI from "openai";
+
+// Basic configuration
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Production configuration with all options
+const openaiProduction = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: "https://api.openai.com/v1",  // Can override for proxies
+  timeout: 60000,  // 60 second timeout
+  maxRetries: 3,   // Retry failed requests up to 3 times
+  defaultHeaders: {
+    "X-Custom-Header": "my-app",
+  },
+});
+
+console.log("OpenAI client configured");
+
+
+Output:
+
+OpenAI client configured
+
+Anthropic Client Configuration​
+import Anthropic from "@anthropic-ai/sdk";
+
+// Basic configuration
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+// Production configuration
+const anthropicProduction = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  baseURL: "https://api.anthropic.com",
+  timeout: 60000,
+  maxRetries: 3,
+  defaultHeaders: {
+    "anthropic-beta": "max-tokens-3-5-sonnet-2024-07-15",
+  },
+});
+
+console.log("Anthropic client configured");
+
+
+Output:
+
+Anthropic client configured
+
+
+The pattern is identical: instantiate with API key, optionally provide timeouts, retries, and custom headers. This consistency means your configuration code looks nearly the same regardless of provider.
+
+Streaming with Async Iterators​
+
+Both SDKs use the same fundamental pattern for streaming: you enable streaming on your request, and the SDK returns something you can iterate over with for await. The chunks arrive as Server-Sent Events (SSE) under the hood, but the SDK abstracts that into typed TypeScript objects.
+
+OpenAI Streaming​
+import OpenAI from "openai";
+
+const openai = new OpenAI();
+
+async function streamOpenAI(): Promise<void> {
+  const stream = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "user", content: "Count from 1 to 5 slowly" }
+    ],
+    stream: true,
+  });
+
+  // The stream implements AsyncIterable<ChatCompletionChunk>
+  for await (const chunk of stream) {
+    // Each chunk contains an array of choices
+    const content = chunk.choices[0]?.delta?.content;
+    if (content) {
+      process.stdout.write(content);
+    }
+  }
+  console.log("\n[Stream complete]");
+}
+
+streamOpenAI();
+
+
+Output:
+
+1... 2... 3... 4... 5...
+[Stream complete]
+
+
+The key insight: chunk.choices[0].delta.content contains partial text. The word "delta" signals this is an increment, not the full message. You accumulate these deltas to build the complete response.
+
+Anthropic Streaming (Low-Level)​
+
+Anthropic offers two streaming approaches. The low-level approach gives you raw events:
+
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic();
+
+async function streamAnthropic(): Promise<void> {
+  const stream = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    messages: [
+      { role: "user", content: "Count from 1 to 5 slowly" }
+    ],
+    stream: true,
+  });
+
+  // The stream implements AsyncIterable<MessageStreamEvent>
+  for await (const event of stream) {
+    // Anthropic uses typed events - filter for text deltas
+    if (event.type === "content_block_delta" &&
+        event.delta.type === "text_delta") {
+      process.stdout.write(event.delta.text);
+    }
+  }
+  console.log("\n[Stream complete]");
+}
+
+streamAnthropic();
+
+
+Output:
+
+1... 2... 3... 4... 5...
+[Stream complete]
+
+
+Notice the structural difference: OpenAI puts content in choices[0].delta.content, while Anthropic uses explicit event types (content_block_delta) with nested delta objects. Both achieve the same result, but Anthropic's event-based approach makes it easier to distinguish between different types of updates.
+
+Anthropic Streaming (High-Level)​
+
+Anthropic's .stream() helper provides convenience methods and automatic message accumulation:
+
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic();
+
+async function streamAnthropicHighLevel(): Promise<void> {
+  const stream = anthropic.messages
+    .stream({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      messages: [
+        { role: "user", content: "Count from 1 to 5 slowly" }
+      ],
+    })
+    .on("text", (text) => {
+      // Event handler fires for each text delta
+      process.stdout.write(text);
+    });
+
+  // Wait for the complete message
+  const finalMessage = await stream.finalMessage();
+  console.log("\n[Stream complete]");
+  console.log(`Total tokens: ${finalMessage.usage.input_tokens} in, ${finalMessage.usage.output_tokens} out`);
+}
+
+streamAnthropicHighLevel();
+
+
+Output:
+
+1... 2... 3... 4... 5...
+[Stream complete]
+Total tokens: 15 in, 42 out
+
+
+The high-level .stream() method does three things the low-level approach doesn't:
+
+Provides typed event handlers (.on("text", ...))
+Accumulates all chunks into a final message object
+Gives you finalMessage() to await the complete response
+
+Choose low-level when you want minimal memory usage (don't accumulate the full message). Choose high-level when you need both streaming output and the final complete message.
+
+Message Accumulation Patterns​
+
+When streaming, you receive fragments. For UI display, you write each fragment immediately. But for logging, analytics, or tool handling, you need the complete message. Both SDKs handle this differently.
+
+OpenAI: Manual Accumulation​
+
+OpenAI's streaming doesn't automatically accumulate. You build the message yourself:
+
+import OpenAI from "openai";
+
+const openai = new OpenAI();
+
+async function accumulateOpenAI(): Promise<string> {
+  const stream = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "Say hello briefly" }],
+    stream: true,
+  });
+
+  // Accumulate content manually
+  let fullContent = "";
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta?.content || "";
+    fullContent += delta;
+    process.stdout.write(delta);  // Stream to user
+  }
+
+  console.log("\n---");
+  console.log(`Accumulated: "${fullContent}"`);
+  return fullContent;
+}
+
+accumulateOpenAI();
+
+
+Output:
+
+Hello! How can I assist you today?
+---
+Accumulated: "Hello! How can I assist you today?"
+
+Anthropic: SDK-Managed Accumulation​
+
+The high-level Anthropic stream accumulates for you:
+
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic();
+
+async function accumulateAnthropic(): Promise<string> {
+  const stream = anthropic.messages.stream({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "Say hello briefly" }],
+  });
+
+  // Stream to user via event handler
+  stream.on("text", (text) => process.stdout.write(text));
+
+  // SDK accumulates automatically - get final message
+  const message = await stream.finalMessage();
+
+  console.log("\n---");
+  // The message object contains the complete content
+  const fullContent = message.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+
+  console.log(`Accumulated: "${fullContent}"`);
+  return fullContent;
+}
+
+accumulateAnthropic();
+
+
+Output:
+
+Hello! How can I help you today?
+---
+Accumulated: "Hello! How can I help you today?"
+
+
+Anthropic messages can contain multiple content blocks (text, tool use, thinking blocks), so the final message is an array you need to process. This design supports multi-modal responses where a single message might include text, images, and tool calls.
+
+Tool Calling: The Agentic Pattern​
+
+Tool calling (also called function calling) lets the model request external actions. Both SDKs follow the same pattern:
+
+Define available tools with JSON schemas
+Send a message that might need tools
+Detect tool call requests in the response
+Execute the tool and send results back
+Continue until the model produces a final response
+OpenAI Tool Calling​
+import OpenAI from "openai";
+
+const openai = new OpenAI();
+
+// Define tools with JSON schema
+const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "get_weather",
+      description: "Get the current weather for a location",
+      parameters: {
+        type: "object",
+        properties: {
+          location: {
+            type: "string",
+            description: "City name, e.g., 'San Francisco'",
+          },
+          unit: {
+            type: "string",
+            enum: ["celsius", "fahrenheit"],
+            description: "Temperature unit",
+          },
+        },
+        required: ["location"],
+      },
+    },
+  },
+];
+
+// Simulated tool execution
+function executeGetWeather(location: string, unit = "celsius"): string {
+  // In production, this would call a weather API
+  return JSON.stringify({
+    location,
+    temperature: unit === "celsius" ? 22 : 72,
+    unit,
+    condition: "sunny",
+  });
+}
+
+async function toolCallingLoop(): Promise<void> {
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: "user", content: "What's the weather in Tokyo?" },
+  ];
+
+  // First call - model may request a tool
+  let response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages,
+    tools,
+    tool_choice: "auto",  // Let model decide when to use tools
+  });
+
+  let assistantMessage = response.choices[0].message;
+
+  // Check if model wants to call a tool
+  while (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+    console.log("Model requested tool calls:");
+
+    // Add assistant's message to conversation
+    messages.push(assistantMessage);
+
+    // Execute each tool call
+    for (const toolCall of assistantMessage.tool_calls) {
+      console.log(`  - ${toolCall.function.name}(${toolCall.function.arguments})`);
+
+      // Parse arguments and execute
+      const args = JSON.parse(toolCall.function.arguments);
+      let result: string;
+
+      if (toolCall.function.name === "get_weather") {
+        result = executeGetWeather(args.location, args.unit);
+      } else {
+        result = JSON.stringify({ error: "Unknown tool" });
+      }
+
+      // Add tool result to conversation
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: result,
+      });
+      console.log(`  Result: ${result}`);
+    }
+
+    // Continue conversation with tool results
+    response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages,
+      tools,
+    });
+    assistantMessage = response.choices[0].message;
+  }
+
+  // Final response (no more tool calls)
+  console.log("\nFinal response:", assistantMessage.content);
+}
+
+toolCallingLoop();
+
+
+Output:
+
+Model requested tool calls:
+  - get_weather({"location":"Tokyo"})
+  Result: {"location":"Tokyo","temperature":22,"unit":"celsius","condition":"sunny"}
+
+Final response: The weather in Tokyo is currently sunny with a temperature of 22°C.
+
+Anthropic Tool Calling​
+
+Anthropic's tool calling follows the same pattern with slightly different types:
+
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = new Anthropic();
+
+// Define tools with Anthropic's schema format
+const tools: Anthropic.Tool[] = [
+  {
+    name: "get_weather",
+    description: "Get the current weather for a location",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        location: {
+          type: "string",
+          description: "City name, e.g., 'San Francisco'",
+        },
+        unit: {
+          type: "string",
+          enum: ["celsius", "fahrenheit"],
+          description: "Temperature unit",
+        },
+      },
+      required: ["location"],
+    },
+  },
+];
+
+// Same execution function
+function executeGetWeather(location: string, unit = "celsius"): string {
+  return JSON.stringify({
+    location,
+    temperature: unit === "celsius" ? 22 : 72,
+    unit,
+    condition: "sunny",
+  });
+}
+
+async function anthropicToolLoop(): Promise<void> {
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: "What's the weather in Tokyo?" },
+  ];
+
+  let response = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    messages,
+    tools,
+  });
+
+  // Loop while model wants to use tools
+  while (response.stop_reason === "tool_use") {
+    console.log("Model requested tool calls:");
+
+    // Find tool use blocks in the response
+    const toolUseBlocks = response.content.filter(
+      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+    );
+
+    // Build tool results
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+    for (const toolUse of toolUseBlocks) {
+      console.log(`  - ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
+
+      let result: string;
+      if (toolUse.name === "get_weather") {
+        const input = toolUse.input as { location: string; unit?: string };
+        result = executeGetWeather(input.location, input.unit);
+      } else {
+        result = JSON.stringify({ error: "Unknown tool" });
+      }
+
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: toolUse.id,
+        content: result,
+      });
+      console.log(`  Result: ${result}`);
+    }
+
+    // Continue with tool results
+    messages.push({ role: "assistant", content: response.content });
+    messages.push({ role: "user", content: toolResults });
+
+    response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      messages,
+      tools,
+    });
+  }
+
+  // Extract final text response
+  const textBlocks = response.content.filter(
+    (block): block is Anthropic.TextBlock => block.type === "text"
+  );
+  console.log("\nFinal response:", textBlocks.map((b) => b.text).join(""));
+}
+
+anthropicToolLoop();
+
+
+Output:
+
+Model requested tool calls:
+  - get_weather({"location":"Tokyo"})
+  Result: {"location":"Tokyo","temperature":22,"unit":"celsius","condition":"sunny"}
+
+Final response: The weather in Tokyo is currently sunny with a temperature of 22°C.
+
+Comparing Tool Calling Patterns​
+Aspect	OpenAI	Anthropic
+Tool definition	function.parameters	input_schema
+Stop signal	tool_calls array present	stop_reason === "tool_use"
+Tool call location	message.tool_calls[]	content.filter(type === "tool_use")
+Result format	{ role: "tool", tool_call_id, content }	{ type: "tool_result", tool_use_id, content }
+Conversation structure	Separate tool messages	Tool results as user message content
+
+The patterns are structurally similar, but Anthropic embeds tool use and results within content blocks, while OpenAI uses separate message types.
+
+Typed Responses and Type Safety​
+
+Both SDKs provide complete TypeScript types for all API responses. This means you get autocomplete, compile-time checking, and clear documentation of what each field contains.
+
+import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
+
+// OpenAI types
+type OpenAIMessage = OpenAI.Chat.Completions.ChatCompletionMessage;
+type OpenAIChunk = OpenAI.Chat.Completions.ChatCompletionChunk;
+type OpenAIToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
+
+// Anthropic types
+type AnthropicMessage = Anthropic.Message;
+type AnthropicContentBlock = Anthropic.ContentBlock;
+type AnthropicToolUse = Anthropic.ToolUseBlock;
+
+// These types give you autocomplete and type checking
+function processOpenAIMessage(message: OpenAIMessage): void {
+  // TypeScript knows message.content is string | null
+  // TypeScript knows message.tool_calls is array or undefined
+  if (message.tool_calls) {
+    for (const call of message.tool_calls) {
+      // TypeScript knows call.function.name and call.function.arguments
+      console.log(`Tool: ${call.function.name}`);
+    }
+  }
+}
+
+function processAnthropicContent(blocks: AnthropicContentBlock[]): void {
+  for (const block of blocks) {
+    // TypeScript requires you to check block.type before accessing fields
+    if (block.type === "text") {
+      console.log(`Text: ${block.text}`);
+    } else if (block.type === "tool_use") {
+      console.log(`Tool: ${block.name}`);
+    }
+  }
+}
+
+
+Output:
+
+// These functions compile with full type safety
+// IDE provides autocomplete for all properties
+
+
+The type system catches errors at compile time that would otherwise surface as runtime crashes. When the API changes, the SDK types update, and TypeScript shows you exactly what code needs to change.
+
+Common Patterns for Your SDK​
+
+When building your own SDK (this chapter's capstone), apply these patterns:
+
+Pattern	Purpose	Implementation
+Async iterator streaming	Memory-efficient real-time output	Return AsyncIterable<Chunk> from API methods
+Optional message accumulation	Support both streaming and final message access	Provide .stream() helper that accumulates internally
+Typed tool definitions	Type-safe function schemas	Use Zod schemas with z.infer&lt;> for parameters
+Conversation loop	Multi-turn with tool handling	While loop checking for tool calls in response
+Client configuration	Production-ready defaults	Accept apiKey, baseURL, timeout, maxRetries
+
+These patterns aren't specific to OpenAI or Anthropic. They're the vocabulary of AI SDK design. Your FastAPI backend SDK will use the same async iterators, the same tool calling loop, and the same configuration options.
+
+Try With AI​
+Prompt 1: Streaming Implementation​
+I want to build a streaming function that works with OpenAI.
+Show me how to:
+1. Create the stream with proper types
+2. Iterate using for-await
+3. Accumulate the full response while also printing each chunk
+4. Handle the case where the stream errors mid-way
+5. Include proper TypeScript types throughout
+
+Use the pattern from the official SDK documentation.
+
+
+What you're learning: The complete streaming pattern including error handling. This is the foundation for any AI application that needs real-time output.
+
+Prompt 2: Tool Calling Loop​
+I have a tool that searches a database and returns results.
+Help me implement the complete tool calling loop with Anthropic:
+
+1. Define the tool with input_schema
+2. Send a message that will trigger the tool
+3. Detect when the model wants to use the tool
+4. Execute the tool and send results back
+5. Continue until I get a final text response
+
+Include type narrowing for the content blocks.
+
+
+What you're learning: The agentic pattern where models can take actions. This is how you build AI that can interact with external systems.
+
+Prompt 3: Provider-Agnostic Wrapper​
+I want to create a simple wrapper that normalizes the streaming
+interface between OpenAI and Anthropic. The wrapper should:
+
+1. Accept a provider name ("openai" or "anthropic") and message
+2. Return an async iterator that yields { text: string } objects
+3. Handle the different chunk/event structures internally
+4. Work with both providers using the same consuming code
+
+Show me the implementation and how to use it.
+
+
+What you're learning: Abstraction design for AI SDKs. This is exactly the pattern that Vercel AI SDK uses internally, and the pattern you'll use for your FastAPI backend SDK.
+
+Safety Note​
+
+When using tool calling, validate all tool inputs before execution. The model generates JSON that you parse and execute. A malicious prompt could attempt to inject dangerous tool parameters. Always validate that tool names match your allowed list, and that parameters are within expected ranges. Treat tool inputs with the same caution you'd apply to any user-provided data.

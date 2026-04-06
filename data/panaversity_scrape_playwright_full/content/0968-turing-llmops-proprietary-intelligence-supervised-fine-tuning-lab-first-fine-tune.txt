@@ -1,0 +1,509 @@
+Lab - Your First Fine-Tune
+
+This is the lesson where everything comes together. You've learned LoRA theory, hyperparameter selection, Unsloth setup, and training configuration. Now you'll execute a complete fine-tuning workflow on the Task API dataset.
+
+By the end of this 60-minute lab, you'll have a fine-tuned Llama-3.1-8B model that understands task management. Not a checkpoint. Not a half-trained experiment. A working model you can query for task-related questions.
+
+Lab Overview​
+Time Allocation (60 minutes total):
+
+Setup and Dataset:     10 min
+Training Execution:    25 min (mostly waiting)
+Inference Testing:     15 min
+Checkpoint and Export: 10 min
+
+
+This lab is designed for Colab T4. If using a different GPU, adjust batch sizes accordingly.
+
+Step 1: Environment Setup​
+
+Open Google Colab and create a new notebook. Make sure you're connected to a T4 GPU:
+
+Runtime > Change runtime type > GPU > T4
+
+Install Unsloth​
+# Cell 1: Install Unsloth (3-5 minutes)
+%%capture
+!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+!pip install --no-deps trl peft accelerate bitsandbytes
+
+
+Output (captured):
+
+Installing collected packages: unsloth...
+
+Import Libraries​
+# Cell 2: Import libraries
+from unsloth import FastLanguageModel
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from datasets import load_dataset
+import torch
+
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
+
+
+Output:
+
+PyTorch version: 2.4.1+cu121
+CUDA available: True
+GPU: Tesla T4
+
+Load Model​
+# Cell 3: Load Llama-3.1-8B with 4-bit quantization
+max_seq_length = 2048
+dtype = None  # Auto-detect
+load_in_4bit = True
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Llama-3.1-8B-bnb-4bit",
+    max_seq_length=max_seq_length,
+    dtype=dtype,
+    load_in_4bit=load_in_4bit,
+)
+
+print(f"Model loaded: {model.config._name_or_path}")
+print(f"Tokenizer vocab size: {len(tokenizer)}")
+
+
+Output:
+
+Model loaded: unsloth/Llama-3.1-8B-bnb-4bit
+Tokenizer vocab size: 128256
+
+Configure LoRA​
+# Cell 4: Configure LoRA adapters
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,  # Rank
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj"
+    ],
+    lora_alpha=16,
+    lora_dropout=0,  # Unsloth optimized for 0
+    bias="none",
+    use_gradient_checkpointing="unsloth",
+    random_state=42,
+)
+
+# Count trainable parameters
+trainable, total = model.get_nb_trainable_parameters()
+print(f"Trainable parameters: {trainable:,} / {total:,}")
+print(f"Training: {100 * trainable / total:.2f}% of total")
+
+
+Output:
+
+Trainable parameters: 41,943,040 / 8,030,261,248
+Training: 0.52% of total
+
+
+Only 0.52% of parameters are trainable. This is the power of LoRA.
+
+Step 2: Load and Prepare Dataset​
+Create Sample Dataset​
+
+For this lab, we'll create a small sample dataset inline. In production, you'd load from your Chapter 93 dataset.
+
+# Cell 5: Create sample Task API dataset
+sample_data = [
+    {
+        "instruction": "Create a task to review the quarterly budget",
+        "input": "",
+        "output": "I'll create that task for you. Created: 'Review quarterly budget' with normal priority. Would you like to set a specific due date?"
+    },
+    {
+        "instruction": "Mark task 5 as complete",
+        "input": "Task 5: Update documentation",
+        "output": "Done! I've marked 'Update documentation' (Task 5) as complete. You now have 3 remaining tasks."
+    },
+    {
+        "instruction": "What are my high priority tasks?",
+        "input": "Tasks:\n1. Fix login bug (High)\n2. Update docs (Low)\n3. Review PR (High)",
+        "output": "You have 2 high priority tasks:\n1. Fix login bug\n2. Review PR\n\nWould you like me to help you tackle any of these?"
+    },
+    {
+        "instruction": "Delete all completed tasks",
+        "input": "Completed: Task 2, Task 7, Task 9",
+        "output": "I've deleted 3 completed tasks (Task 2, Task 7, Task 9). Your task list is now cleaner. Is there anything else you'd like to organize?"
+    },
+    {
+        "instruction": "Change priority of task 3 to urgent",
+        "input": "Task 3: Prepare presentation",
+        "output": "Updated! 'Prepare presentation' (Task 3) is now marked as urgent priority. It will appear at the top of your task list."
+    },
+]
+
+# Expand to 50 examples with variations
+import random
+expanded_data = []
+templates = [
+    ("Create a task for {item}", "I'll create '{item}' as a new task. What priority should it have?"),
+    ("Add {item} to my tasks", "Added! '{item}' is now in your task list with normal priority."),
+    ("Schedule {item} for tomorrow", "Scheduled: '{item}' with due date tomorrow. I'll remind you in the morning."),
+    ("What's on my list?", "You have {n} tasks. {top} is your top priority. Would you like details on any?"),
+    ("Complete {item}", "Nice work! '{item}' is now marked complete. {n} tasks remaining."),
+]
+items = ["budget review", "team meeting prep", "client call", "code review", "deploy update",
+         "write tests", "update docs", "plan sprint", "fix bug", "design review"]
+
+for _ in range(50):
+    template = random.choice(templates)
+    item = random.choice(items)
+    n = random.randint(1, 10)
+    top = random.choice(items)
+    expanded_data.append({
+        "instruction": template[0].format(item=item, n=n, top=top),
+        "input": "",
+        "output": template[1].format(item=item, n=n, top=top),
+    })
+
+# Combine with original samples
+all_data = sample_data + expanded_data
+
+print(f"Total training examples: {len(all_data)}")
+
+
+Output:
+
+Total training examples: 55
+
+Format for Training​
+# Cell 6: Format dataset with Alpaca prompt template
+alpaca_prompt = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+
+### Instruction:
+{instruction}
+
+### Input:
+{input}
+
+### Response:
+{output}"""
+
+def format_prompts(examples):
+    texts = []
+    for i in range(len(examples["instruction"])):
+        text = alpaca_prompt.format(
+            instruction=examples["instruction"][i],
+            input=examples["input"][i],
+            output=examples["output"][i],
+        )
+        texts.append(text)
+    return {"text": texts}
+
+# Convert to HuggingFace Dataset
+from datasets import Dataset
+dataset = Dataset.from_list(all_data)
+dataset = dataset.map(format_prompts, batched=True)
+
+print(f"Dataset prepared with {len(dataset)} examples")
+print(f"\nExample formatted text (truncated):\n{dataset['text'][0][:300]}...")
+
+
+Output:
+
+Dataset prepared with 55 examples
+
+Example formatted text (truncated):
+Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+
+### Instruction:
+Create a task to review the quarterly budget
+
+### Input:
+
+
+### Response:
+I'll create that task for you. Created: 'Review quarterly budget' with norma...
+
+Step 3: Configure and Run Training​
+Setup Trainer​
+# Cell 7: Configure SFTTrainer
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",
+    max_seq_length=max_seq_length,
+
+    args=TrainingArguments(
+        output_dir="./task-api-model",
+        num_train_epochs=3,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=4,
+        learning_rate=2e-4,
+        warmup_ratio=0.03,
+        weight_decay=0.01,
+        fp16=True,
+        logging_steps=1,  # Log every step for this small dataset
+        save_strategy="epoch",
+        seed=42,
+        report_to="none",  # Disable wandb for simplicity
+    ),
+)
+
+print("Trainer configured successfully")
+print(f"Total training steps: {trainer.state.max_steps}")
+
+
+Output:
+
+Trainer configured successfully
+Total training steps: 12
+
+
+With 55 examples, batch size 4, gradient accumulation 4, we get:
+
+Effective batch = 16
+Steps per epoch = 55 / 16 = ~4
+Total steps = 4 * 3 epochs = 12
+Execute Training​
+# Cell 8: Run training
+print("Starting training...")
+gpu_stats = torch.cuda.get_device_properties(0)
+start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024**3, 2)
+print(f"GPU: {gpu_stats.name}")
+print(f"Starting memory: {start_gpu_memory} GB")
+
+# Train!
+trainer_stats = trainer.train()
+
+# Memory after training
+end_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024**3, 2)
+print(f"\nTraining complete!")
+print(f"Total time: {trainer_stats.metrics['train_runtime']:.1f} seconds")
+print(f"Peak memory: {end_gpu_memory} GB")
+
+
+Output:
+
+Starting training...
+GPU: Tesla T4
+Starting memory: 5.42 GB
+
+{'loss': 2.8123, 'learning_rate': 6.67e-05, 'epoch': 0.25}
+{'loss': 2.3456, 'learning_rate': 0.0001333, 'epoch': 0.5}
+{'loss': 1.9234, 'learning_rate': 0.0002, 'epoch': 0.75}
+{'loss': 1.6789, 'learning_rate': 0.0002, 'epoch': 1.0}
+{'loss': 1.4567, 'learning_rate': 0.000175, 'epoch': 1.25}
+...
+{'loss': 0.8234, 'learning_rate': 5e-05, 'epoch': 2.75}
+{'loss': 0.7123, 'learning_rate': 2.5e-05, 'epoch': 3.0}
+
+Training complete!
+Total time: 45.3 seconds
+Peak memory: 13.84 GB
+
+
+Less than a minute for complete fine-tuning! Watch the loss decrease from ~2.8 to ~0.7.
+
+Step 4: Test Your Fine-Tuned Model​
+Switch to Inference Mode​
+# Cell 9: Enable fast inference mode
+FastLanguageModel.for_inference(model)
+print("Model switched to inference mode")
+
+
+Output:
+
+Model switched to inference mode
+
+Generate Responses​
+# Cell 10: Test the fine-tuned model
+def generate_response(instruction, input_text=""):
+    prompt = alpaca_prompt.format(
+        instruction=instruction,
+        input=input_text,
+        output="",  # Leave empty for generation
+    )
+
+    inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
+
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=128,
+        temperature=0.7,
+        top_p=0.9,
+        do_sample=True,
+    )
+
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Extract just the response part
+    response = response.split("### Response:\n")[-1].strip()
+    return response
+
+# Test 1: Task creation
+print("Test 1: Task Creation")
+print("-" * 40)
+response = generate_response("Create a task for preparing the monthly report")
+print(f"Response: {response}\n")
+
+# Test 2: Task query
+print("Test 2: Task Query")
+print("-" * 40)
+response = generate_response(
+    "What are my high priority tasks?",
+    "Tasks:\n1. Deploy hotfix (High)\n2. Write tests (Normal)\n3. Client meeting (High)"
+)
+print(f"Response: {response}\n")
+
+# Test 3: Task completion
+print("Test 3: Task Completion")
+print("-" * 40)
+response = generate_response("Mark the client meeting as done")
+print(f"Response: {response}\n")
+
+
+Output:
+
+Test 1: Task Creation
+----------------------------------------
+Response: I'll create 'Prepare the monthly report' as a new task. What priority should it have?
+
+Test 2: Task Query
+----------------------------------------
+Response: You have 2 high priority tasks:
+1. Deploy hotfix
+2. Client meeting
+
+Would you like me to help you tackle any of these?
+
+Test 3: Task Completion
+----------------------------------------
+Response: Nice work! 'Client meeting' is now marked complete. 2 tasks remaining.
+
+
+The model has learned our task management patterns! Notice how:
+
+It uses the same response style as training data
+It extracts relevant information from context
+It asks follow-up questions appropriately
+Compare with Base Model​
+# Cell 11: Quick comparison (optional - loads another model)
+# This shows what the base model would say without fine-tuning
+
+base_response = """Without fine-tuning, the base model might say something generic like:
+"I am a large language model and I can help you with various tasks.
+To create a task, you might want to use a task management application..."
+
+The fine-tuned model gives domain-specific, actionable responses."""
+
+print("Base model comparison:")
+print(base_response)
+
+Step 5: Save Your Model​
+Save Checkpoint​
+# Cell 12: Save the fine-tuned model
+model.save_pretrained("./task-api-model-final")
+tokenizer.save_pretrained("./task-api-model-final")
+
+print("Model saved to ./task-api-model-final")
+print("\nSaved files:")
+!ls -la ./task-api-model-final/
+
+
+Output:
+
+Model saved to ./task-api-model-final
+
+Saved files:
+total 168240
+drwxr-xr-x 2 root root     4096 Jan  1 12:00 .
+drwxr-xr-x 5 root root     4096 Jan  1 12:00 ..
+-rw-r--r-- 1 root root      735 Jan  1 12:00 adapter_config.json
+-rw-r--r-- 1 root root 83886080 Jan  1 12:00 adapter_model.safetensors
+-rw-r--r-- 1 root root     2135 Jan  1 12:00 special_tokens_map.json
+-rw-r--r-- 1 root root 17210176 Jan  1 12:00 tokenizer.json
+-rw-r--r-- 1 root root    50979 Jan  1 12:00 tokenizer_config.json
+
+
+The adapter is only 80MB! The full model was 16GB. This is the efficiency of LoRA.
+
+Download to Local (Optional)​
+# Cell 13: Zip and download (for Colab)
+!zip -r task-api-model.zip ./task-api-model-final
+
+from google.colab import files
+files.download('task-api-model.zip')
+
+Lab Success Criteria​
+
+You've successfully completed this lab if:
+
+Criterion	Check
+Model loads without errors	Model loaded with 4-bit quantization
+Training completes	Loss decreased from ~2.8 to <1.0
+Inference works	Model generates task-related responses
+Model saved	adapter_model.safetensors exists
+Troubleshooting​
+OOM During Training​
+
+If you get CUDA out of memory:
+
+Reduce per_device_train_batch_size to 2
+Increase gradient_accumulation_steps to 8
+Reduce max_seq_length to 1024
+Slow Training​
+
+If training is very slow:
+
+Check GPU is T4 (not K80 or P4)
+Verify fp16=True is set
+Check Unsloth installed correctly
+Poor Generation Quality​
+
+If outputs are garbled or off-topic:
+
+Verify dataset format (Alpaca template)
+Check EOS token is added to outputs
+Try reducing temperature to 0.5
+Try With AI​
+Prompt 1: Diagnose Your Training Run​
+I just completed my first fine-tuning run. Here's my training log:
+
+[Paste your training logs from Cell 8]
+
+Analyze this training run:
+1. Did the model converge properly?
+2. What does the loss curve tell us?
+3. Is there any sign of overfitting?
+4. Would you recommend more or fewer epochs for my next run?
+
+
+What you're learning: Training log interpretation. You're developing the skill to extract insights from training metrics and make data-driven decisions about configuration.
+
+Prompt 2: Improve Generation Quality​
+My fine-tuned model generates this response:
+
+[Paste a response from Cell 10 that you're not happy with]
+
+The training data looked like this:
+[Paste an example from the training set]
+
+Why might the generation differ from training examples?
+What parameters should I adjust:
+1. Generation parameters (temperature, top_p)?
+2. Training parameters (epochs, learning rate)?
+3. Data improvements?
+
+
+What you're learning: Generation debugging. You're developing the skill to trace output quality issues back to their causes in training or inference configuration.
+
+Prompt 3: Scale This Workflow​
+I successfully fine-tuned on 55 examples. Now I want to scale to:
+1. 500-row Task API dataset (from Chapter 93)
+2. A100 GPU instead of T4
+3. Add evaluation on held-out test set
+
+What changes to my notebook are needed?
+Walk me through the modifications step by step,
+explaining why each change is necessary.
+
+
+What you're learning: Workflow scaling. You're developing the skill to adapt working prototypes to production requirements.
+
+Safety Note: Before deploying any fine-tuned model, evaluate it thoroughly on held-out test data. Models can learn unintended patterns from training data, including biases and edge case failures. The next lesson covers monitoring and troubleshooting for catching these issues.

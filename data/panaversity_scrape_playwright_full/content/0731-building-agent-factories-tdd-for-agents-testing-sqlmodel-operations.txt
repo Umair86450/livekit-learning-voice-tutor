@@ -1,0 +1,597 @@
+Testing SQLModel Operations
+
+API tests go through HTTP. Model tests go straight to the database.
+
+You've written endpoint tests with httpx and the AsyncClient. Those tests verify that your API handles requests correctly, but they test the entire stack: routing, validation, serialization, and database operations. When a test fails, you don't immediately know which layer caused the problem.
+
+Model tests isolate database operations. They work directly with SQLModel and your database session, skipping the HTTP layer entirely. This gives you faster tests and more precise failure messages. When a model test fails, you know the problem is in your data layer, not your API routing.
+
+This lesson teaches you to set up an isolated test database and write tests for model operations: creating records, testing relationships, verifying cascade deletes, and catching constraint violations.
+
+Why Model Tests Matter​
+
+Consider a failing API test:
+
+@pytest.mark.asyncio
+async def test_create_task(client: AsyncClient):
+    response = await client.post("/api/tasks", json={"title": "Test"})
+    assert response.status_code == 201  # FAILS: 422
+
+
+The failure could come from:
+
+Invalid request validation
+Missing authentication
+Database constraint violation
+Model validation error
+Serialization problem
+
+A model test is more precise:
+
+@pytest.mark.asyncio
+async def test_create_task(session: AsyncSession):
+    task = Task(title="Test")
+    session.add(task)
+    await session.commit()  # FAILS: IntegrityError
+
+
+When this fails, you know the database layer has a problem. No HTTP, no routing, no serialization—just your model and the database.
+
+Test Type	Speed	Precision	Use When
+API Tests	Slower	Lower (tests full stack)	Testing HTTP behavior, auth, response format
+Model Tests	Faster	Higher (tests one layer)	Testing data integrity, relationships, constraints
+In-Memory SQLite Setup​
+
+In-memory SQLite databases exist only in RAM. They're fast and automatically clean up. But they have a quirk: each new connection gets a fresh, empty database.
+
+The Problem​
+
+Standard connection pooling creates new connections as needed. With in-memory SQLite, each connection sees its own empty database:
+
+# This WON'T work reliably
+engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+# Connection 1: Creates tables
+# Connection 2: New connection = empty database!
+
+
+Your tests create tables in one connection, then query from another connection that has no tables.
+
+The Solution: StaticPool​
+
+StaticPool keeps a single connection open for all database operations:
+
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import create_async_engine
+
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    poolclass=StaticPool,
+    connect_args={"check_same_thread": False},
+)
+
+
+Output:
+
+# All operations use the same connection
+# Tables created once, visible to all queries
+
+
+The connect_args={"check_same_thread": False} setting allows SQLite to be used from multiple threads, which pytest needs for async test execution.
+
+Database Fixture​
+
+Create tables before each test, drop them after:
+
+# tests/conftest.py
+import pytest
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    poolclass=StaticPool,
+    connect_args={"check_same_thread": False},
+)
+
+TestAsyncSession = async_sessionmaker(
+    test_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+@pytest.fixture(autouse=True)
+async def setup_database():
+    """Create tables before each test, drop after."""
+    async with test_engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    yield
+    async with test_engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all)
+
+@pytest.fixture
+async def session():
+    """Provide async session for model tests."""
+    async with TestAsyncSession() as session:
+        yield session
+
+
+Output:
+
+# Each test starts with clean tables
+# No data leaks between tests
+
+
+The autouse=True parameter means this fixture runs for every test automatically. You don't need to add it as a parameter.
+
+Basic Model Tests​
+
+Test your model operations directly:
+
+# tests/test_models.py
+import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlmodel import select
+from app.models import Task
+
+@pytest.mark.asyncio
+async def test_create_task(session: AsyncSession):
+    """Test Task model creation."""
+    task = Task(title="Test Task", priority="high")
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    assert task.id is not None
+    assert task.title == "Test Task"
+    assert task.priority == "high"
+    assert task.status == "pending"  # default value
+
+@pytest.mark.asyncio
+async def test_task_defaults(session: AsyncSession):
+    """Test Task default values are applied."""
+    task = Task(title="Minimal Task")
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    assert task.status == "pending"
+    assert task.priority == "medium"
+    assert task.created_at is not None
+
+@pytest.mark.asyncio
+async def test_query_tasks(session: AsyncSession):
+    """Test querying tasks from database."""
+    # Create test data
+    task1 = Task(title="Task 1", status="pending")
+    task2 = Task(title="Task 2", status="completed")
+    session.add_all([task1, task2])
+    await session.commit()
+
+    # Query
+    statement = select(Task).where(Task.status == "pending")
+    result = await session.exec(statement)
+    pending_tasks = result.all()
+
+    assert len(pending_tasks) == 1
+    assert pending_tasks[0].title == "Task 1"
+
+
+Output:
+
+========================= test session starts ==========================
+collected 3 items
+
+tests/test_models.py::test_create_task PASSED                      [ 33%]
+tests/test_models.py::test_task_defaults PASSED                    [ 66%]
+tests/test_models.py::test_query_tasks PASSED                      [100%]
+
+========================== 3 passed in 0.15s ===========================
+
+Testing Relationships​
+
+Test that model relationships work correctly:
+
+# tests/test_models.py (continued)
+from app.models import Task, Project
+
+@pytest.mark.asyncio
+async def test_task_project_relationship(session: AsyncSession):
+    """Test Task belongs to Project relationship."""
+    # Create project first
+    project = Project(name="Test Project")
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
+    # Create task with project
+    task = Task(title="Project Task", project_id=project.id)
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    # Verify relationship
+    assert task.project_id == project.id
+
+    # Load relationship
+    await session.refresh(task, ["project"])
+    assert task.project.name == "Test Project"
+
+@pytest.mark.asyncio
+async def test_project_tasks_relationship(session: AsyncSession):
+    """Test Project has many Tasks relationship."""
+    project = Project(name="Multi-Task Project")
+    session.add(project)
+    await session.commit()
+
+    # Add multiple tasks
+    task1 = Task(title="Task 1", project_id=project.id)
+    task2 = Task(title="Task 2", project_id=project.id)
+    session.add_all([task1, task2])
+    await session.commit()
+
+    # Verify through relationship
+    await session.refresh(project, ["tasks"])
+    assert len(project.tasks) == 2
+    titles = {t.title for t in project.tasks}
+    assert titles == {"Task 1", "Task 2"}
+
+
+Output:
+
+tests/test_models.py::test_task_project_relationship PASSED
+tests/test_models.py::test_project_tasks_relationship PASSED
+
+Cascade Delete Testing​
+
+Test that deleting a parent record cascades to children:
+
+# tests/test_models.py (continued)
+@pytest.mark.asyncio
+async def test_cascade_delete_project_removes_tasks(session: AsyncSession):
+    """Test deleting Project cascades to its Tasks."""
+    # Setup: Project with tasks
+    project = Project(name="Doomed Project")
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
+    task1 = Task(title="Task 1", project_id=project.id)
+    task2 = Task(title="Task 2", project_id=project.id)
+    session.add_all([task1, task2])
+    await session.commit()
+
+    task1_id = task1.id
+    task2_id = task2.id
+
+    # Act: Delete project
+    await session.delete(project)
+    await session.commit()
+
+    # Assert: Tasks are gone
+    remaining_task1 = await session.get(Task, task1_id)
+    remaining_task2 = await session.get(Task, task2_id)
+
+    assert remaining_task1 is None
+    assert remaining_task2 is None
+
+
+Output:
+
+tests/test_models.py::test_cascade_delete_project_removes_tasks PASSED
+
+
+This test verifies your foreign key relationship is configured with ON DELETE CASCADE. Without it, you'd get a foreign key constraint error or orphaned records.
+
+Constraint Violation Testing​
+
+Test that database constraints are enforced:
+
+# tests/test_models.py (continued)
+from sqlalchemy.exc import IntegrityError
+
+@pytest.mark.asyncio
+async def test_unique_constraint_violation(session: AsyncSession):
+    """Test unique constraint on (project_id, title) is enforced."""
+    project = Project(name="Constraint Test Project")
+    session.add(project)
+    await session.commit()
+
+    # First task succeeds
+    task1 = Task(title="Unique Title", project_id=project.id)
+    session.add(task1)
+    await session.commit()
+
+    # Duplicate title in same project should fail
+    task2 = Task(title="Unique Title", project_id=project.id)
+    session.add(task2)
+
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+@pytest.mark.asyncio
+async def test_required_field_violation(session: AsyncSession):
+    """Test NOT NULL constraint on required fields."""
+    # Task without title should fail
+    task = Task(title=None)  # type: ignore
+    session.add(task)
+
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+@pytest.mark.asyncio
+async def test_foreign_key_violation(session: AsyncSession):
+    """Test foreign key constraint prevents invalid references."""
+    # Task with non-existent project
+    task = Task(title="Orphan Task", project_id=99999)
+    session.add(task)
+
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+Output:
+
+tests/test_models.py::test_unique_constraint_violation PASSED
+tests/test_models.py::test_required_field_violation PASSED
+tests/test_models.py::test_foreign_key_violation PASSED
+
+
+Constraint tests catch problems early. If someone removes a database constraint, these tests fail immediately.
+
+SQLite vs PostgreSQL Differences​
+
+SQLite and PostgreSQL handle some types differently. Be aware of these when your production database differs from your test database.
+
+JSON Fields​
+
+PostgreSQL has JSONB (binary JSON). SQLite uses TEXT:
+
+# Model definition works with both
+from sqlmodel import Field
+from typing import Optional
+import json
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    metadata: str | None = None  # Use str, not dict
+
+    def get_metadata(self) -> dict:
+        """Parse metadata JSON."""
+        if self.metadata:
+            return json.loads(self.metadata)
+        return {}
+
+    def set_metadata(self, data: dict):
+        """Store metadata as JSON string."""
+        self.metadata = json.dumps(data)
+
+Testing JSON Fields​
+@pytest.mark.asyncio
+async def test_json_metadata_storage(session: AsyncSession):
+    """Test JSON metadata stored and retrieved correctly."""
+    task = Task(title="Task with Metadata")
+    task.set_metadata({"tags": ["urgent", "review"], "estimate_hours": 4})
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    metadata = task.get_metadata()
+    assert metadata["tags"] == ["urgent", "review"]
+    assert metadata["estimate_hours"] == 4
+
+
+Output:
+
+tests/test_models.py::test_json_metadata_storage PASSED
+
+
+This approach works with both SQLite (tests) and PostgreSQL (production).
+
+Hands-On Exercise​
+
+Create a complete model test file for your Task API.
+
+Step 1: Set Up Test Models​
+
+Create tests/test_models.py:
+
+# tests/test_models.py
+import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.models import Task, Project
+
+# Import TestAsyncSession from conftest if needed
+from tests.conftest import TestAsyncSession
+
+
+@pytest.fixture
+async def session():
+    """Provide async session for model tests."""
+    async with TestAsyncSession() as session:
+        yield session
+
+Step 2: Write CRUD Tests​
+
+Add tests for create, read, update, delete:
+
+@pytest.mark.asyncio
+async def test_create_task(session: AsyncSession):
+    task = Task(title="New Task", priority="high")
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    assert task.id is not None
+    assert task.status == "pending"
+
+@pytest.mark.asyncio
+async def test_update_task(session: AsyncSession):
+    task = Task(title="Original Title")
+    session.add(task)
+    await session.commit()
+
+    task.title = "Updated Title"
+    task.status = "completed"
+    await session.commit()
+    await session.refresh(task)
+
+    assert task.title == "Updated Title"
+    assert task.status == "completed"
+
+@pytest.mark.asyncio
+async def test_delete_task(session: AsyncSession):
+    task = Task(title="To Delete")
+    session.add(task)
+    await session.commit()
+    task_id = task.id
+
+    await session.delete(task)
+    await session.commit()
+
+    result = await session.get(Task, task_id)
+    assert result is None
+
+Step 3: Add Relationship Tests​
+@pytest.mark.asyncio
+async def test_task_project_relationship(session: AsyncSession):
+    project = Project(name="Test Project")
+    session.add(project)
+    await session.commit()
+
+    task = Task(title="Project Task", project_id=project.id)
+    session.add(task)
+    await session.commit()
+
+    await session.refresh(task, ["project"])
+    assert task.project.name == "Test Project"
+
+Step 4: Add Constraint Tests​
+@pytest.mark.asyncio
+async def test_cascade_delete(session: AsyncSession):
+    project = Project(name="Delete Me")
+    session.add(project)
+    await session.commit()
+
+    task = Task(title="Child Task", project_id=project.id)
+    session.add(task)
+    await session.commit()
+    task_id = task.id
+
+    await session.delete(project)
+    await session.commit()
+
+    assert await session.get(Task, task_id) is None
+
+@pytest.mark.asyncio
+async def test_unique_constraint(session: AsyncSession):
+    project = Project(name="Unique Test")
+    session.add(project)
+    await session.commit()
+
+    task1 = Task(title="Same Title", project_id=project.id)
+    session.add(task1)
+    await session.commit()
+
+    task2 = Task(title="Same Title", project_id=project.id)
+    session.add(task2)
+
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+Step 5: Run Tests​
+pytest tests/test_models.py -v
+
+
+Expected Output:
+
+========================= test session starts ==========================
+collected 7 items
+
+tests/test_models.py::test_create_task PASSED                      [ 14%]
+tests/test_models.py::test_update_task PASSED                      [ 28%]
+tests/test_models.py::test_delete_task PASSED                      [ 42%]
+tests/test_models.py::test_task_project_relationship PASSED        [ 57%]
+tests/test_models.py::test_cascade_delete PASSED                   [ 71%]
+tests/test_models.py::test_unique_constraint PASSED                [ 85%]
+tests/test_models.py::test_json_metadata_storage PASSED            [100%]
+
+========================== 7 passed in 0.22s ===========================
+
+Try With AI​
+Prompt 1: Generate Model Tests​
+Here's my Task model:
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    description: str | None = None
+    status: str = "pending"
+    priority: str = "medium"
+    project_id: int | None = Field(foreign_key="project.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+Generate model tests for: create with defaults, update status,
+query by priority, and verify created_at is set.
+
+
+What you're learning: AI generates model-level tests that work directly with the database session, separate from API tests.
+
+Prompt 2: Fix Database Compatibility​
+Your test uses a JSONB query:
+
+result = await session.exec(
+    select(Task).where(Task.metadata["status"].astext == "active")
+)
+
+I'm testing with SQLite. JSONB queries don't work. Suggest an
+alternative that works with both SQLite and PostgreSQL.
+
+
+What you're learning: You catch database-specific patterns that AI might miss. The solution involves storing JSON as text and querying differently.
+
+Prompt 3: Design Constraint Tests​
+My Task model has these constraints:
+- title is required (NOT NULL)
+- (project_id, title) must be unique together
+- project_id must reference existing project
+
+Help me design tests for each constraint. For the unique constraint,
+show me how to verify the exact error message so I know it's the
+right constraint failing.
+
+
+What you're learning: Constraint tests verify database integrity rules are actually enforced.
+
+Reflect on Your Skill​
+Test Your Skill​
+Using my agent-tdd skill, show me how to test SQLModel cascade
+deletes. Does my skill include in-memory SQLite setup with StaticPool?
+
+Identify Gaps​
+
+Review your skill's response:
+
+Does it explain why StaticPool is required for in-memory SQLite?
+Does it show the autouse=True pattern for database setup?
+Does it include IntegrityError handling for constraint tests?
+Does it address SQLite vs PostgreSQL differences?
+Improve Your Skill​
+My agent-tdd skill needs SQLModel testing patterns. Add:
+1. In-memory SQLite setup with StaticPool and explanation
+2. Database fixture with autouse=True for table creation/cleanup
+3. Cascade delete testing pattern
+4. Constraint violation testing with IntegrityError
+5. Note about SQLite vs PostgreSQL JSON differences

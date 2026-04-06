@@ -1,0 +1,354 @@
+Model Export Formats
+
+Your fine-tuned model exists as a collection of weight tensors. To deploy it, you need to package these weights in a format that inference engines can load efficiently. This decision affects memory usage, loading speed, and which platforms you can target.
+
+This lesson covers the three formats you will encounter: GGUF (the modern standard for local inference), safetensors (the Hugging Face standard for cloud and research), and legacy formats (GGML, PyTorch .bin) that you may need to convert from.
+
+The Format Landscape​
+
+Model formats evolved as deployment needs changed. Understanding this history helps you make informed decisions.
+
+Era	Format	Primary Use Case	Status
+2020-2022	PyTorch .bin / .pth	Research, training	Still used for training
+2022-2023	GGML	Early local inference	Deprecated
+2023	safetensors	Safe, fast Hugging Face	Current for cloud
+2023-present	GGUF	Local inference standard	Current for local
+
+The key insight: different formats serve different deployment targets. There is no single "best" format—only the right format for your deployment scenario.
+
+GGUF: The Local Inference Standard​
+
+GGUF (GPT-Generated Unified Format) was designed by Georgi Gerganov for the llama.cpp project. It replaced GGML to address critical limitations that emerged as models grew larger and more diverse.
+
+Why GGUF Exists​
+
+GGML had fundamental problems:
+
+Hardcoded architectures: Adding new model types required code changes
+Limited metadata: No standardized way to store tokenizer, template, or configuration
+Versioning issues: No forward/backward compatibility guarantees
+
+GGUF solves these with a flexible, self-describing format:
+
+┌─────────────────────────────────────────────────────────┐
+│ GGUF File Structure                                     │
+├─────────────────────────────────────────────────────────┤
+│ Header                                                  │
+│   - Magic number (GGUF)                                 │
+│   - Version                                             │
+│   - Tensor count                                        │
+│   - Metadata KV count                                   │
+├─────────────────────────────────────────────────────────┤
+│ Metadata (Key-Value pairs)                              │
+│   - general.architecture: "llama"                       │
+│   - general.name: "task-api-model"                      │
+│   - llama.context_length: 4096                          │
+│   - tokenizer.ggml.model: "llama"                       │
+│   - tokenizer.ggml.tokens: [...]                        │
+│   - (any custom metadata you need)                      │
+├─────────────────────────────────────────────────────────┤
+│ Tensor Data                                             │
+│   - Weight matrices                                     │
+│   - Quantized as specified (Q4_K_M, Q8_0, etc.)         │
+└─────────────────────────────────────────────────────────┘
+
+GGUF Key Properties​
+Property	Value	Implication
+Self-contained	Yes	Single file deployment
+Metadata extensible	Yes	Store tokenizer, template, config
+Architecture agnostic	Yes	LLaMA, Mistral, Qwen, etc.
+Quantization options	Many	Q4_K_M, Q5_K_M, Q8_0, F16
+Memory mapping	Yes	Fast loading, shared memory
+When to Use GGUF​
+
+Use GGUF when:
+
+Deploying to Ollama, llama.cpp, or LM Studio
+Targeting consumer hardware (laptop, desktop)
+Serving models without GPU
+Single-file distribution is important
+
+Do not use GGUF when:
+
+Training or fine-tuning (use safetensors)
+Cloud deployment with GPU (use safetensors + vLLM)
+Need to load into PyTorch/Transformers (use safetensors)
+Safetensors: The Cloud and Research Standard​
+
+Safetensors was developed by Hugging Face to address security and performance issues with PyTorch's pickle-based serialization.
+
+Why Safetensors Exists​
+
+PyTorch's native format uses Python pickle, which:
+
+Allows arbitrary code execution: Security vulnerability
+Loads slowly: Must deserialize entire file
+Wastes memory: Cannot memory-map efficiently
+
+Safetensors solves these:
+
+┌─────────────────────────────────────────────────────────┐
+│ Safetensors File Structure                              │
+├─────────────────────────────────────────────────────────┤
+│ Header (JSON, 8 bytes length prefix)                    │
+│   {                                                     │
+│     "model.layers.0.self_attn.q_proj.weight": {         │
+│       "dtype": "F16",                                   │
+│       "shape": [4096, 4096],                            │
+│       "data_offsets": [0, 33554432]                     │
+│     },                                                  │
+│     ...                                                 │
+│   }                                                     │
+├─────────────────────────────────────────────────────────┤
+│ Tensor Data (raw bytes, memory-mappable)                │
+│   - Continuous byte array                               │
+│   - Zero-copy loading possible                          │
+└─────────────────────────────────────────────────────────┘
+
+Safetensors Key Properties​
+Property	Value	Implication
+Safe	Yes	No code execution
+Fast loading	Yes	Memory mapping, zero-copy
+Hugging Face native	Yes	Direct Hub integration
+Framework agnostic	Partial	PyTorch, TensorFlow, JAX
+Quantization	No	Full precision only
+When to Use Safetensors​
+
+Use safetensors when:
+
+Storing model checkpoints during training
+Uploading to Hugging Face Hub
+Deploying with vLLM, TGI, or cloud inference
+Need to load into PyTorch/Transformers
+
+Do not use safetensors when:
+
+Deploying to Ollama (convert to GGUF)
+Memory-constrained local inference (use quantized GGUF)
+Single-file distribution is required
+Legacy Formats: What You Might Encounter​
+GGML (Deprecated)​
+
+GGML was the original llama.cpp format. You may encounter .ggml files from 2023, but:
+
+No longer supported by current llama.cpp
+Convert to GGUF before use
+Some older tutorials reference GGML patterns
+PyTorch .bin / .pth​
+
+The original PyTorch serialization format:
+
+Still used for training checkpoints
+Security risk due to pickle
+Convert to safetensors for storage and sharing
+Format Selection Decision Tree​
+
+When choosing a format, work through this decision tree:
+
+Start: What is your deployment target?
+│
+├─► Local inference (Ollama, llama.cpp, LM Studio)
+│   └─► Use GGUF with appropriate quantization
+│
+├─► Cloud inference (vLLM, TGI, SageMaker)
+│   └─► Use safetensors with optional quantization
+│
+├─► Training / Fine-tuning
+│   └─► Use safetensors (or PyTorch .bin for legacy)
+│
+├─► Hugging Face Hub distribution
+│   └─► Use safetensors + config.json
+│
+└─► Multiple targets
+    └─► Store as safetensors, convert to GGUF for local
+
+Converting Between Formats​
+Safetensors to GGUF (Most Common)​
+
+When you fine-tune with Unsloth or Transformers, you get safetensors. To deploy on Ollama:
+
+from unsloth import FastLanguageModel
+
+# Load your fine-tuned model
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="./my_finetuned_model",  # safetensors location
+    max_seq_length=2048,
+    load_in_4bit=False,  # Load full precision for export
+)
+
+# Export to GGUF with quantization
+model.save_pretrained_gguf(
+    "task-api-model",
+    tokenizer,
+    quantization_method="q4_k_m"  # Choose quantization
+)
+
+
+Output:
+
+Saving model to task-api-model/...
+Converting to GGUF format...
+Applying q4_k_m quantization...
+Done! File: task-api-model/task-api-model-q4_k_m.gguf
+
+PyTorch to Safetensors​
+
+If you have legacy PyTorch checkpoints:
+
+import torch
+from safetensors.torch import save_file
+
+# Load PyTorch model
+state_dict = torch.load("model.bin", map_location="cpu")
+
+# Remove optimizer state if present
+if "model_state_dict" in state_dict:
+    state_dict = state_dict["model_state_dict"]
+
+# Save as safetensors
+save_file(state_dict, "model.safetensors")
+
+
+Output:
+
+Saved model.safetensors (6.2 GB)
+
+GGML to GGUF (Legacy Conversion)​
+
+If you have old GGML files:
+
+# Use llama.cpp conversion script
+python convert-llama-ggml-to-gguf.py \
+    --input old_model.ggml \
+    --output new_model.gguf
+
+Format Comparison Summary​
+Criterion	GGUF	Safetensors	PyTorch .bin
+Security	Safe	Safe	Unsafe (pickle)
+Loading speed	Fast	Fast	Slow
+Memory efficiency	Excellent	Good	Poor
+Quantization	Built-in	External	External
+Single file	Yes	No (needs config)	No
+Ollama compatible	Yes	No	No
+vLLM compatible	No	Yes	Yes
+Training compatible	No	Yes	Yes
+Reflect on Your Skill​
+
+Update your model-serving skill with format selection guidance:
+
+## Export Format Selection
+
+### Quick Reference
+
+
+|
+ Target 
+|
+ Format 
+|
+ Quantization 
+|
+
+
+|
+--------
+|
+--------
+|
+--------------
+|
+
+
+|
+ Ollama 
+|
+ GGUF 
+|
+ q4_k_m (default) 
+|
+
+
+|
+ vLLM 
+|
+ safetensors 
+|
+ awq or gptq 
+|
+
+
+|
+ Hugging Face 
+|
+ safetensors 
+|
+ none 
+|
+
+
+|
+ Training 
+|
+ safetensors 
+|
+ none 
+|
+
+
+
+### Conversion Commands
+
+Safetensors → GGUF:
+model.save_pretrained_gguf("output", tokenizer, quantization_method="q4_k_m")
+
+PyTorch → Safetensors:
+save_file(state_dict, "model.safetensors")
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Analyze Your Deployment Scenario​
+I have a fine-tuned Task API model (3B parameters) stored as safetensors.
+I want to:
+1. Serve it locally on my laptop (16GB RAM, no GPU)
+2. Also deploy to a cloud GPU for high-traffic API
+
+Help me create a deployment plan:
+- Which format for each target?
+- What quantization level for each?
+- What conversion steps do I need?
+
+
+What you are learning: Multi-target deployment planning. Real applications often need to serve the same model in different environments.
+
+Prompt 2: Troubleshoot Format Issues​
+I'm trying to load a model into Ollama but getting errors. The model was
+downloaded from Hugging Face and has these files:
+- config.json
+- model.safetensors
+- tokenizer.json
+- tokenizer_config.json
+
+What steps do I need to convert this for Ollama? What could go wrong?
+
+
+What you are learning: Format conversion troubleshooting. Many deployment problems stem from format mismatches.
+
+Prompt 3: Evaluate Format Tradeoffs​
+I need to choose between two deployment approaches for my Task API model:
+A) Convert to GGUF Q4_K_M (~4GB) and serve with Ollama
+B) Keep as safetensors and serve with vLLM on cloud GPU
+
+Help me analyze:
+1. What is the quality difference between Q4 and full precision?
+2. What is the cost difference (local vs cloud)?
+3. What is the latency difference?
+4. Which would you recommend for a startup with limited budget?
+
+
+What you are learning: Strategic format decisions. Format choice affects cost, quality, and scalability.
+
+Safety Note​
+
+When converting models, always verify the output works correctly before deploying to production. Run a few test prompts through the converted model to ensure responses match expectations. Conversion bugs can cause subtle quality degradation that is not immediately obvious.

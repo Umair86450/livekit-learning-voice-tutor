@@ -1,0 +1,528 @@
+Actors Observability
+
+Your ChatAgent actors are running in production. Users are chatting. State is persisting. Everything looks fine. Then someone asks: "Why did user-456's conversation take 3 seconds to respond yesterday at 14:32?"
+
+You check the application logs. Nothing unusual. You check the pod status. All healthy. You check Redis. Data is there. But you can't see inside the actor method call. You can't trace the request from HTTP endpoint through actor activation through state store operation. You're debugging blind.
+
+This is the observability gap. Without distributed tracing, you see individual components but not the flow between them. Without metrics, you know something is slow but not which actors or which methods. Without systematic debugging, you're guessing.
+
+Dapr's observability features close this gap. In this lesson, you'll configure OpenTelemetry tracing to follow requests through actor method calls, deploy Prometheus to collect actor metrics, and learn debugging strategies that turn "it's slow somewhere" into "the ProcessMessage method on ChatAgent is slow due to state store latency."
+
+The Observability Stack for Actors​
+
+Dapr integrates with three observability pillars:
+
+Pillar	What It Captures	Tool	Question It Answers
+Tracing	Request flow across services and actors	Zipkin, Jaeger	"What path did this request take and where did it slow down?"
+Metrics	Counters, gauges, histograms over time	Prometheus	"How many actor activations happened? What's the average method duration?"
+Logging	Structured event records	Stdout (JSON)	"What happened in sequence? What were the parameters?"
+
+For actor debugging, tracing and metrics are most powerful. Tracing shows you the flow; metrics show you the patterns.
+
+Configuring Tracing with OpenTelemetry​
+
+Dapr uses OpenTelemetry for distributed tracing. You configure it once in a Dapr Configuration resource, and every actor method call automatically generates spans.
+
+Step 1: Deploy Jaeger​
+
+Jaeger collects and visualizes traces. Deploy it to your Kubernetes cluster:
+
+# kubernetes/jaeger.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:latest
+          ports:
+            - containerPort: 16686  # UI
+            - containerPort: 4317   # OTLP gRPC
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: default
+spec:
+  ports:
+    - port: 16686
+      targetPort: 16686
+      name: ui
+    - port: 4317
+      targetPort: 4317
+      name: otlp
+  selector:
+    app: jaeger
+
+
+Output after applying:
+
+$ kubectl apply -f kubernetes/jaeger.yaml
+deployment.apps/jaeger created
+service/jaeger created
+
+$ kubectl get pods -l app=jaeger
+NAME                      READY   STATUS    RESTARTS   AGE
+jaeger-7d9f8c6b4-x2k9j    1/1     Running   0          30s
+
+Step 2: Configure Dapr Tracing​
+
+Create a Dapr Configuration that enables OpenTelemetry export to Jaeger:
+
+# components/observability.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: observability
+  namespace: default
+spec:
+  tracing:
+    samplingRate: "1"  # 100% sampling for development; reduce in production
+    otel:
+      endpointAddress: "jaeger:4317"
+      isSecure: false
+      protocol: grpc
+  metrics:
+    enabled: true
+
+
+The key settings:
+
+Field	Value	Purpose
+samplingRate	"1"	Trace 100% of requests (use "0.1" for 10% in production)
+endpointAddress	"jaeger:4317"	Where to send traces (Jaeger's OTLP gRPC port)
+protocol	grpc	Use gRPC for efficient trace export
+metrics.enabled	true	Enable Prometheus metrics endpoint
+Step 3: Apply Configuration to Your Deployment​
+
+Your actor service must reference this configuration. Update your deployment annotations:
+
+# kubernetes/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-agent-service
+  namespace: default
+spec:
+  template:
+    metadata:
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "chat-agent-service"
+        dapr.io/app-port: "8000"
+        dapr.io/config: "observability"  # Reference the Configuration
+        dapr.io/log-level: "info"
+        dapr.io/log-as-json: "true"      # Structured logging
+    spec:
+      containers:
+        - name: chat-agent
+          image: chat-agent:latest
+          ports:
+            - containerPort: 8000
+
+
+The critical annotation is dapr.io/config: "observability". This tells Dapr to apply the tracing and metrics configuration to this service's sidecar.
+
+Step 4: View Actor Traces​
+
+After deploying, generate some actor activity:
+
+# Invoke ChatAgent methods
+curl -X POST http://localhost:8000/chat/user1 \
+  -H "Content-Type: application/json" \
+  -d '{"role": "user", "content": "Hello there"}'
+
+curl http://localhost:8000/chat/user1/history
+
+
+Open Jaeger UI at http://localhost:16686. Select service chat-agent-service and find traces:
+
+What you see in the trace:
+
+chat-agent-service: POST /chat/user1
+├── chat-agent-service: actor/ChatAgent/user1/method/ProcessMessage
+│   ├── chat-agent-service: state/get
+│   └── chat-agent-service: state/set
+└── Response: 200 OK (45ms)
+
+
+Each actor method call creates a span. State store operations appear as child spans. You can see exactly where time was spent.
+
+Output in Jaeger UI (simplified):
+
+Trace ID: 4bf92f3577b34da6
+Service: chat-agent-service
+Duration: 45ms
+
+Spans:
+  [45ms] POST /chat/user1
+    [38ms] actor/ChatAgent/user1/method/ProcessMessage
+      [12ms] state/get (statestore)
+      [8ms] state/set (statestore)
+
+Collecting Actor Metrics with Prometheus​
+
+While tracing shows individual requests, metrics show patterns over time. Prometheus scrapes metrics from Dapr sidecars.
+
+Step 1: Deploy Prometheus​
+# kubernetes/prometheus.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:latest
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: default
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+    - job_name: 'dapr'
+      static_configs:
+      - targets: ['chat-agent-service-dapr:9090']
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: default
+spec:
+  ports:
+    - port: 9090
+      targetPort: 9090
+  selector:
+    app: prometheus
+
+
+Output after applying:
+
+$ kubectl apply -f kubernetes/prometheus.yaml
+deployment.apps/prometheus created
+configmap/prometheus-config created
+service/prometheus created
+
+Step 2: Query Actor Metrics​
+
+Open Prometheus UI at http://localhost:9090. Query these actor-specific metrics:
+
+Metric	What It Measures	Example Query
+dapr_actor_invocations_total	Total actor method calls	dapr_actor_invocations_total{actor_type="ChatAgent"}
+dapr_actor_pending_calls	Calls waiting in actor queue	dapr_actor_pending_calls{actor_type="ChatAgent"}
+dapr_actor_operation_duration_seconds	Method execution time	histogram_quantile(0.95, dapr_actor_operation_duration_seconds_bucket)
+dapr_actor_active_count	Currently activated actors	dapr_actor_active_count{actor_type="ChatAgent"}
+
+Example Prometheus Query Output:
+
+# Query: dapr_actor_invocations_total{actor_type="ChatAgent"}
+{actor_type="ChatAgent", app_id="chat-agent-service", method="ProcessMessage"} 142
+{actor_type="ChatAgent", app_id="chat-agent-service", method="GetConversationHistory"} 58
+
+# Query: dapr_actor_active_count{actor_type="ChatAgent"}
+{actor_type="ChatAgent", app_id="chat-agent-service"} 23
+
+
+This tells you: 23 ChatAgent instances are currently active, with 142 ProcessMessage calls and 58 GetConversationHistory calls.
+
+Step 3: Identify Performance Patterns​
+
+Use metrics to answer operational questions:
+
+"Which methods are slowest?"
+
+histogram_quantile(0.95,
+  rate(dapr_actor_operation_duration_seconds_bucket{actor_type="ChatAgent"}[5m])
+) by (method)
+
+
+Output:
+
+{method="ProcessMessage"} 0.045    # 95th percentile: 45ms
+{method="GetConversationHistory"} 0.012  # 95th percentile: 12ms
+
+
+"Are actors accumulating?"
+
+increase(dapr_actor_active_count{actor_type="ChatAgent"}[1h])
+
+
+If active count keeps increasing without decreasing, actors aren't being garbage-collected (check idle timeout configuration).
+
+Debugging Actor Issues​
+
+When something goes wrong with actors, use this systematic approach:
+
+Issue 1: Actor Not Receiving Calls​
+
+Symptoms: Requests to actor methods return 404 or timeout.
+
+Debugging checklist:
+
+Check actor registration:
+# Verify actor types registered with Dapr
+curl http://localhost:3500/v1.0/metadata | jq '.actors'
+
+
+Expected output:
+
+[
+  {
+    "type": "ChatAgent",
+    "count": 5
+  }
+]
+
+
+If your actor type isn't listed, it's not registered. Check your startup code.
+
+Check sidecar logs:
+kubectl logs <pod-name> -c daprd | grep -i actor
+
+
+Look for:
+
+level=info msg="actor runtime started. actor idle timeout: 1h0m0s"
+level=info msg="registered actor type: ChatAgent"
+
+Verify app-id matches: Your actor proxy must use the correct app-id. If deployment has dapr.io/app-id: "chat-agent-service", your proxy must target that ID.
+Issue 2: Actor Method Timeouts​
+
+Symptoms: Actor calls hang or timeout after default 60 seconds.
+
+Debugging approach:
+
+Find slow spans in Jaeger:
+
+Search for traces with duration > 10s
+Identify which child span (state operation, external call) is slow
+
+Check turn-based concurrency:
+
+dapr_actor_pending_calls{actor_type="ChatAgent"}
+
+
+If pending calls are high (> 10), the actor is processing slowly and requests are queuing. This is expected with turn-based concurrency but indicates the actor is overloaded.
+
+Check state store latency:
+histogram_quantile(0.95, dapr_state_latency_seconds_bucket{component="statestore"})
+
+
+High state store latency affects all actor operations.
+
+Issue 3: Actor State Not Persisting​
+
+Symptoms: Actor loses state after deactivation/reactivation.
+
+Debugging approach:
+
+Verify state store configuration:
+kubectl get components statestore -o yaml
+
+
+Check for:
+
+metadata:
+  - name: actorStateStore
+    value: "true"  # Must be "true" for actors
+
+Inspect state in Redis:
+kubectl exec -it redis-0 -- redis-cli
+> KEYS *ChatAgent*
+> GET "chat-agent-service||ChatAgent||user1||history"
+
+
+If keys exist, state is persisting. If not, check StateManager calls in your actor code.
+
+Check _on_activate initialization: Ensure you're using try_get_state, not get_state, to handle first activation:
+async def _on_activate(self) -> None:
+    found, state = await self._state_manager.try_get_state("data")
+    if not found:
+        # Initialize only if no existing state
+        await self._state_manager.set_state("data", default_value)
+
+Complete Observability Setup​
+
+Here's a Tiltfile that deploys the full observability stack:
+
+# Tiltfile
+load('ext://helm_remote', 'helm_remote')
+load('ext://nerdctl', 'nerdctl_build')
+
+# Build your actor service
+nerdctl_build(
+    ref='chat-agent',
+    context='.',
+    dockerfile='Dockerfile',
+)
+
+# Deploy Dapr via Helm
+helm_remote(
+    chart='dapr',
+    repo_url='https://dapr.github.io/helm-charts/',
+    release_name='dapr',
+    namespace='dapr-system',
+    create_namespace=True,
+)
+
+# Deploy Redis, Dapr components, and your service
+k8s_yaml([
+    'components/statestore.yaml',
+    'components/observability.yaml',
+    'kubernetes/jaeger.yaml',
+    'kubernetes/prometheus.yaml',
+    'kubernetes/deployment.yaml',
+])
+
+# Port forwards for UIs
+k8s_resource('jaeger', port_forwards='16686:16686')
+k8s_resource('prometheus', port_forwards='9090:9090')
+k8s_resource('chat-agent-service', port_forwards='8000:8000')
+
+
+After tilt up, you have:
+
+Your actor service at http://localhost:8000
+Jaeger UI at http://localhost:16686
+Prometheus UI at http://localhost:9090
+Dapr Dashboard for Quick Inspection​
+
+For quick actor inspection without querying Prometheus, use Dapr Dashboard:
+
+dapr dashboard
+
+
+Navigate to Actors tab to see:
+
+Registered actor types
+Active instance count per type
+Actor configuration (idle timeout, drain timeout)
+
+This is faster than Prometheus for "How many ChatAgent instances are active right now?"
+
+Reflect on Your Skill​
+
+Your dapr-deployment skill should now include observability configuration. Test it:
+
+Test Your Skill​
+Using my dapr-deployment skill, configure observability for my actor system.
+I need:
+- Traces exported to Jaeger
+- Prometheus metrics enabled
+- JSON-formatted logging
+
+Generate the Dapr Configuration YAML and the deployment annotations I need.
+
+
+Does your skill produce:
+
+Complete observability Configuration with tracing and metrics?
+Correct deployment annotations including dapr.io/config reference?
+JSON logging annotation for structured log parsing?
+Identify Gaps​
+
+Ask yourself:
+
+Can my skill explain what samplingRate: "1" means and when to change it?
+Does it know the key actor metrics (dapr_actor_invocations_total, dapr_actor_active_count)?
+Can it generate Prometheus queries for actor performance analysis?
+Improve Your Skill​
+
+If gaps exist:
+
+My dapr-deployment skill needs better observability coverage. Update it to include:
+- OpenTelemetry tracing configuration with Jaeger endpoint
+- The key actor metrics and what they indicate
+- Debugging checklist for common actor issues (not receiving calls, timeouts, state loss)
+- Sample Prometheus queries for actor performance analysis
+
+Try With AI​
+
+Open your AI companion and explore actor observability scenarios.
+
+Prompt 1: Configure Tracing for Your Actors​
+Help me configure Dapr tracing for my actor system. I have ChatAgent actors
+running on Kubernetes and I want to:
+1. See traces for every actor method call
+2. Include state store operations as child spans
+3. Export to Jaeger running in my cluster
+
+Show me:
+- The Dapr Configuration YAML I need
+- How to reference it in my deployment
+- What I'll see in Jaeger UI after invoking an actor method
+
+Also explain: what does samplingRate do and why would I set it to "0.1" in production?
+
+
+What you're learning: How to configure distributed tracing end-to-end. The AI helps you understand the relationship between Configuration, deployment annotations, and what appears in the tracing UI.
+
+Prompt 2: Diagnose Slow Actor Performance​
+My ChatAgent actors are responding slowly. Average response time jumped from
+50ms to 500ms yesterday. I have Prometheus and Jaeger set up.
+
+Walk me through a systematic debugging approach:
+1. What Prometheus queries should I run first?
+2. What should I look for in Jaeger traces?
+3. How do I determine if the issue is:
+   - Actor method logic
+   - State store latency
+   - Turn-based concurrency (request queueing)
+   - Network/sidecar overhead
+
+Give me specific queries and what the results would indicate.
+
+
+What you're learning: Systematic performance debugging using observability data. The AI guides you through the diagnostic workflow, connecting metrics and traces to root causes.
+
+Prompt 3: Set Up Alerting for Actor Health​
+I want to be notified when my actor system has problems. Help me design
+Prometheus alerting rules for:
+1. Actor method duration exceeding 200ms (95th percentile)
+2. Active actor count exceeding 1000 (possible memory leak)
+3. Pending calls queue exceeding 50 (actor overload)
+4. Actor type not registered (deployment issue)
+
+Show me the Prometheus alerting rules and explain what conditions trigger each.
+
+
+What you're learning: Proactive monitoring with alerting. The AI helps you translate operational concerns into actionable alerting rules that catch problems before users report them.
+
+Safety Note​
+
+Tracing and metrics add overhead. With samplingRate: "1" (100% tracing), every request generates trace data. In high-throughput production systems, this can impact performance and storage. Start with 100% sampling during development, then reduce to 10% or 1% in production. Monitor the observability system itself: if Jaeger or Prometheus can't keep up, you'll lose visibility when you need it most.

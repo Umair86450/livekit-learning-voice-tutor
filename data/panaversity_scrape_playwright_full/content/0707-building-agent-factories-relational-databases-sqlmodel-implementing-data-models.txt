@@ -1,0 +1,466 @@
+Implementing Data Models
+
+Your database engine is ready. Now you need models—Python classes that map to database tables.
+
+SQLModel combines Pydantic's type validation with SQLAlchemy's ORM. You get type safety, automatic validation, and database operations in one class.
+
+The Basic Model Pattern​
+
+A SQLModel table requires table=True:
+
+from sqlmodel import SQLModel, Field
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    status: str = Field(default="pending")
+
+
+Key elements:
+
+Element	Purpose
+table=True	Creates database table (without it, just a Pydantic model)
+id: int | None	Optional because DB assigns on insert
+primary_key=True	Unique identifier for the row
+Field(default=...)	Default value if not provided
+
+Output (table creation):
+
+CREATE TABLE task (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR NOT NULL,
+    status VARCHAR DEFAULT 'pending'
+)
+
+Field Types and Constraints​
+
+SQLModel maps Python types to SQL types:
+
+Python Type	SQL Type	Notes
+str	VARCHAR	Unlimited by default
+int	INTEGER	
+float	FLOAT	
+bool	BOOLEAN	
+datetime	TIMESTAMP	
+str | None	VARCHAR NULL	Nullable field
+
+Add constraints with Field():
+
+from sqlmodel import SQLModel, Field
+from datetime import datetime
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str = Field(max_length=500, min_length=1)
+    description: str | None = Field(default=None)
+    status: str = Field(default="pending", max_length=50)
+    priority: int = Field(default=0, ge=0, le=5)  # 0-5 range
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+Output (validation):
+
+>>> Task(title="")  # min_length=1 violation
+ValidationError: title must have at least 1 character
+
+>>> Task(title="Valid", priority=10)  # le=5 violation
+ValidationError: priority must be less than or equal to 5
+
+JSONB Columns for Lists and Dicts​
+
+Agents often need flexible data—tags, metadata, configuration. PostgreSQL's JSONB type stores JSON with indexing and query support.
+
+from sqlmodel import SQLModel, Field
+from sqlalchemy import Column
+from sqlalchemy.dialects.postgresql import JSONB
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+
+    # List field with JSONB
+    tags: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
+
+    # Dict field with JSONB
+    metadata: dict = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default="{}"),
+    )
+
+
+Important: Use sa_column=Column(JSONB, ...) for PostgreSQL. SQLite doesn't support JSONB—use JSON type for testing.
+
+Output (usage):
+
+task = Task(
+    title="Fix authentication",
+    tags=["security", "urgent", "backend"],
+    metadata={"estimated_hours": 4, "sprint": "2024-01"}
+)
+# Tags and metadata stored as JSON in PostgreSQL
+
+Indexes for Performance​
+
+Indexes speed up queries on specific columns. Add them to frequently-queried fields:
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    status: str = Field(default="pending", index=True)
+    priority: int = Field(default=0, index=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+
+
+When to add indexes:
+
+Column	Index?	Why
+id	Automatic	Primary key always indexed
+status	Yes	Filtered in most queries
+priority	Yes	Used for sorting
+project_id	Yes	Foreign keys need indexes
+description	No	Rarely used in WHERE clauses
+
+Output (SQL):
+
+CREATE INDEX ix_task_status ON task (status);
+CREATE INDEX ix_task_priority ON task (priority);
+CREATE INDEX ix_task_project_id ON task (project_id);
+
+Indexing Deep Dive​
+
+Basic single-column indexes handle most cases. But complex queries need advanced index types.
+
+Composite Indexes​
+
+When you filter by multiple columns together:
+
+from sqlalchemy import Index
+
+class Task(SQLModel, table=True):
+    __tablename__ = "task"
+    __table_args__ = (
+        Index("ix_task_project_status", "project_id", "status"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id")
+    status: str = Field(default="pending")
+
+
+When composite indexes help:
+
+-- This query uses the composite index efficiently
+SELECT * FROM task WHERE project_id = 1 AND status = 'pending';
+
+-- Column order matters! This also uses it (leftmost prefix)
+SELECT * FROM task WHERE project_id = 1;
+
+-- This does NOT use the index well (skips first column)
+SELECT * FROM task WHERE status = 'pending';
+
+
+Rule: Put most-filtered column first in composite indexes.
+
+Partial Indexes​
+
+Index only rows that match a condition—smaller and faster:
+
+from sqlalchemy import Index
+
+class Task(SQLModel, table=True):
+    __tablename__ = "task"
+    __table_args__ = (
+        # Only index non-deleted tasks
+        Index(
+            "ix_task_active",
+            "status",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+
+Use cases:
+
+Soft-deleted records (index only active)
+Status filtering (index only pending/in_progress)
+Recent data (index only last 30 days)
+GIN Indexes for JSONB​
+
+Regular indexes don't work inside JSONB. Use GIN (Generalized Inverted Index):
+
+from sqlalchemy import Index
+from sqlalchemy.dialects.postgresql import JSONB
+
+class Task(SQLModel, table=True):
+    __tablename__ = "task"
+    __table_args__ = (
+        Index(
+            "ix_task_tags_gin",
+            "tags",
+            postgresql_using="gin",
+        ),
+    )
+
+    tags: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
+
+
+Queries that use GIN index:
+
+-- Find tasks with specific tag
+SELECT * FROM task WHERE tags @> '["urgent"]';
+
+-- Find tasks with any of these tags
+SELECT * FROM task WHERE tags ?| array['urgent', 'security'];
+
+-- Find tasks containing key in metadata
+SELECT * FROM task WHERE metadata ? 'sprint';
+
+
+GIN operators:
+
+Operator	Meaning	Example
+@>	Contains	tags @> '["urgent"]'
+?	Key exists	metadata ? 'sprint'
+?|	Any key exists	tags ?| array['a','b']
+?&	All keys exist	tags ?& array['a','b']
+Unique Constraints​
+
+Enforce uniqueness across one or more columns:
+
+from sqlalchemy import UniqueConstraint
+
+class Worker(SQLModel, table=True):
+    __tablename__ = "worker"
+    __table_args__ = (
+        UniqueConstraint("handle", name="uq_worker_handle"),
+        # Composite unique: one email per type
+        UniqueConstraint("email", "type", name="uq_worker_email_type"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    handle: str  # Must be unique
+    email: str | None = None
+    type: str  # "human" or "agent"
+
+Index Maintenance​
+
+Indexes speed up reads but slow down writes. Monitor and optimize:
+
+-- Check index usage in PostgreSQL
+SELECT
+    indexrelname AS index_name,
+    idx_scan AS times_used,
+    pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE schemaname = 'public'
+ORDER BY idx_scan DESC;
+
+
+Signs you need to review indexes:
+
+Unused indexes (idx_scan = 0) → Drop them
+Slow queries without index → Add index
+Large indexes on small tables → May not be worth it
+Foreign Keys​
+
+Connect models with foreign keys:
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+
+    # Foreign key to Project table
+    project_id: int = Field(foreign_key="project.id", index=True)
+
+    # Nullable foreign key
+    assignee_id: int | None = Field(
+        default=None,
+        foreign_key="worker.id",
+        index=True,
+    )
+
+
+Output (SQL):
+
+CREATE TABLE task (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR NOT NULL,
+    project_id INTEGER NOT NULL REFERENCES project(id),
+    assignee_id INTEGER REFERENCES worker(id)
+)
+
+The Timestamp Pattern​
+
+Most models need creation and update timestamps:
+
+from datetime import datetime
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+Update updated_at on modifications:
+
+from datetime import datetime
+
+async def update_task(session, task, data):
+    if data.title:
+        task.title = data.title
+    task.updated_at = datetime.utcnow()  # Always update timestamp
+    session.add(task)
+    await session.commit()
+
+Complete Task Model​
+
+Here's a production-ready Task model:
+
+# models/task.py
+from sqlmodel import SQLModel, Field
+from sqlalchemy import Column
+from sqlalchemy.dialects.postgresql import JSONB
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .project import Project
+    from .worker import Worker
+
+class Task(SQLModel, table=True):
+    """A unit of work assigned within a project."""
+
+    __tablename__ = "task"
+
+    # Primary key
+    id: int | None = Field(default=None, primary_key=True)
+
+    # Core fields
+    title: str = Field(max_length=500)
+    description: str | None = Field(default=None)
+    status: str = Field(default="pending", max_length=50, index=True)
+    priority: str = Field(default="medium", max_length=20)
+
+    # JSONB for flexible data
+    tags: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
+
+    # Foreign keys
+    project_id: int = Field(foreign_key="project.id", index=True)
+    assignee_id: int | None = Field(
+        default=None, foreign_key="worker.id", index=True
+    )
+    created_by_id: int = Field(foreign_key="worker.id", index=True)
+
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    due_date: datetime | None = Field(default=None)
+
+
+Output (table structure):
+
+Table: task
+├── id: SERIAL PRIMARY KEY
+├── title: VARCHAR(500) NOT NULL
+├── description: TEXT
+├── status: VARCHAR(50) DEFAULT 'pending'
+├── priority: VARCHAR(20) DEFAULT 'medium'
+├── tags: JSONB DEFAULT '[]'
+├── project_id: INTEGER NOT NULL → project.id
+├── assignee_id: INTEGER → worker.id
+├── created_by_id: INTEGER NOT NULL → worker.id
+├── created_at: TIMESTAMP
+├── updated_at: TIMESTAMP
+└── due_date: TIMESTAMP
+
+Try With AI​
+Prompt 1: Design a Worker Model​
+I need a Worker model for my Task Manager. Workers can be:
+- Human users (with email, name)
+- AI agents (with handle like @researcher)
+
+Both have:
+- id, type, created_at
+- handle (unique identifier like @john or @researcher)
+
+Design the SQLModel class with appropriate fields, constraints,
+and indexes.
+
+
+What you're learning: Model design—translating business requirements into database schema.
+
+Prompt 2: Add JSONB Metadata​
+My Task model needs a metadata field that can store:
+- estimated_hours (number)
+- sprint (string)
+- labels (array of strings)
+- custom_fields (user-defined key-value pairs)
+
+Show me how to add this as a JSONB column with SQLModel,
+and demonstrate how to query tasks by metadata values.
+
+
+What you're learning: JSONB usage—flexible data storage within relational structure.
+
+Prompt 3: Model Validation​
+I want my Task model to enforce these rules:
+- title: 1-500 characters, required
+- priority: must be "low", "medium", "high", or "critical"
+- due_date: if provided, must be in the future
+
+Show me how to implement these validations in SQLModel.
+
+
+What you're learning: Pydantic validation—data integrity before database insertion.
+
+Safety Note​
+
+Model changes require migrations in production. Never modify production models without creating an Alembic migration first. Dropping columns loses data permanently.
+
+Reflect on Your Skill​
+
+You built a relational-db-agent skill in Lesson 0. Test its model design capabilities.
+
+Test Your Skill​
+Using my relational-db-agent skill, generate a Project model with:
+- id as primary key
+- name (required, max 200 chars)
+- description (optional)
+- status with default "active"
+- metadata as JSONB
+- created_at and updated_at timestamps
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include table=True?
+Did it use sa_column=Column(JSONB, ...) correctly?
+Did it add index=True to status?
+Did it use default_factory for timestamps?
+Improve Your Skill​
+
+If you found gaps:
+
+My relational-db-agent skill generates incorrect JSONB columns.
+Update it to use this pattern:
+metadata: dict = Field(
+    default_factory=dict,
+    sa_column=Column(JSONB, nullable=False, server_default="{}"),
+)
+Include the import: from sqlalchemy.dialects.postgresql import JSONB
+
+
+Your skill now generates PostgreSQL-ready models.

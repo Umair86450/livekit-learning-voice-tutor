@@ -1,0 +1,590 @@
+Velero for Kubernetes Backup and Restore
+
+It happens faster than you can react. A junior developer runs kubectl delete namespace production instead of kubectl delete namespace test-production. In the two seconds before muscle memory kicks in and they hit Ctrl+C, Kubernetes has already begun terminating every pod, service, configmap, and secret in your production namespace.
+
+Your database PersistentVolumeClaim survives because the storage class has reclaimPolicy: Retain. Small mercy. But the Task API deployment, the inference service configuration, the carefully-tuned HPA settings, the secrets containing API keys for three external services - all gone. You stare at the terminal, trying to remember what was in that namespace. You haven't touched some of those configurations in months.
+
+This is the moment you discover whether your disaster recovery strategy exists beyond good intentions. Do you have backups? When were they last tested? Can you restore to a specific namespace? How long until production is back?
+
+Velero answers these questions before disaster strikes. It's a CNCF project that backs up Kubernetes resources and persistent volumes, stores them safely off-cluster, and restores them when you need them. This lesson teaches you to install Velero, configure scheduled backups with retention policies, implement database-aware hooks for consistency, and verify that restores actually work.
+
+Installing Velero with MinIO for Local Development​
+
+In production, you'll use cloud object storage - S3, GCS, Azure Blob. For local development and testing, MinIO provides an S3-compatible storage backend that runs in your cluster.
+
+Step 1: Deploy MinIO
+
+helm repo add minio https://charts.min.io/
+helm install minio minio/minio \
+  --namespace minio \
+  --create-namespace \
+  --set rootUser=minioadmin \
+  --set rootPassword=minioadmin \
+  --set mode=standalone \
+  --set resources.requests.memory=512Mi \
+  --set persistence.size=10Gi
+
+
+Output:
+
+NAME: minio
+LAST DEPLOYED: Mon Dec 30 10:00:00 2024
+NAMESPACE: minio
+STATUS: deployed
+REVISION: 1
+
+
+Create a bucket for Velero backups:
+
+kubectl run minio-client --rm -it --restart=Never \
+  --image=minio/mc \
+  --namespace=minio \
+  --command -- /bin/sh -c "
+    mc alias set myminio http://minio:9000 minioadmin minioadmin && \
+    mc mb myminio/velero-backups
+  "
+
+
+Output:
+
+Bucket created successfully 'myminio/velero-backups'.
+pod "minio-client" deleted
+
+
+Step 2: Install Velero
+
+helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+helm install velero vmware-tanzu/velero \
+  --namespace velero \
+  --create-namespace \
+  --set configuration.backupStorageLocation[0].name=default \
+  --set configuration.backupStorageLocation[0].provider=aws \
+  --set configuration.backupStorageLocation[0].bucket=velero-backups \
+  --set configuration.backupStorageLocation[0].config.region=minio \
+  --set configuration.backupStorageLocation[0].config.s3ForcePathStyle=true \
+  --set configuration.backupStorageLocation[0].config.s3Url=http://minio.minio:9000 \
+  --set snapshotsEnabled=false \
+  --set initContainers[0].name=velero-plugin-for-aws \
+  --set initContainers[0].image=velero/velero-plugin-for-aws:v1.10.0 \
+  --set initContainers[0].volumeMounts[0].mountPath=/target \
+  --set initContainers[0].volumeMounts[0].name=plugins \
+  --set credentials.useSecret=true \
+  --set credentials.secretContents.cloud='[default]\naws_access_key_id=minioadmin\naws_secret_access_key=minioadmin'
+
+
+Output:
+
+NAME: velero
+LAST DEPLOYED: Mon Dec 30 10:05:00 2024
+NAMESPACE: velero
+STATUS: deployed
+
+
+Verify Velero is running and connected to storage:
+
+kubectl get pods -n velero
+kubectl get backupstoragelocation -n velero
+
+
+Output:
+
+NAME                      READY   STATUS    RESTARTS   AGE
+velero-7c4b5d9f8d-x2k9m   1/1     Running   0          60s
+
+NAME      PHASE       LAST VALIDATED   AGE   DEFAULT
+default   Available   30s              60s   true
+
+
+The Available phase confirms Velero can reach the MinIO bucket.
+
+Understanding Velero's CRD Architecture​
+
+Velero introduces four Custom Resource Definitions that work together to manage backups and restores.
+
+BackupStorageLocation: Where Backups Live​
+
+The BackupStorageLocation tells Velero where to store backup data. You configured this during installation, but you can have multiple locations for different purposes:
+
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: secondary-location
+  namespace: velero
+spec:
+  provider: aws
+  objectStorage:
+    bucket: velero-backups-secondary
+  config:
+    region: us-east-1
+    s3Url: https://s3.amazonaws.com
+
+Backup: A Point-in-Time Snapshot​
+
+A Backup captures Kubernetes resources at a specific moment. You can create on-demand backups:
+
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: production-backup-2024-12-30
+  namespace: velero
+spec:
+  includedNamespaces:
+    - production
+  includedResources:
+    - deployments
+    - services
+    - configmaps
+    - secrets
+    - persistentvolumeclaims
+  excludedResources:
+    - events
+    - pods
+  ttl: 720h  # 30 days
+
+
+Key fields:
+
+Field	Purpose
+includedNamespaces	Which namespaces to back up
+includedResources	Which resource types to include (defaults to all)
+excludedResources	Skip ephemeral resources like pods and events
+ttl	How long to keep this backup before automatic deletion
+Schedule: Automated Recurring Backups​
+
+A Schedule creates Backups automatically based on a cron expression. This is what you'll use for production:
+
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: task-api-daily
+  namespace: velero
+spec:
+  schedule: "0 2 * * *"  # 2 AM daily
+  template:
+    includedNamespaces:
+      - production
+    snapshotVolumes: true
+    ttl: 720h  # 30-day retention
+
+
+The template section contains everything that would go in a Backup spec. Velero creates a new Backup from this template on the defined schedule.
+
+Restore: Recovering from Backup​
+
+A Restore brings resources back from a specific Backup:
+
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: restore-from-production-backup
+  namespace: velero
+spec:
+  backupName: production-backup-2024-12-30
+  includedNamespaces:
+    - production
+  restorePVs: true
+
+
+You can restore to the same namespace (recovery) or a different namespace (cloning).
+
+Creating a Production Schedule with 30-Day Retention​
+
+The RTO/RPO lesson established your recovery requirements. Now you'll implement them with a Velero Schedule. A 24-hour RPO means daily backups; 30-day retention means you can recover from problems that weren't noticed immediately.
+
+Create the Schedule manifest:
+
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: task-api-production-daily
+  namespace: velero
+  labels:
+    app: task-api
+    environment: production
+    backup-type: scheduled
+spec:
+  schedule: "0 2 * * *"  # 2 AM UTC daily
+  useOwnerReferencesInBackup: false
+  template:
+    includedNamespaces:
+      - production
+    includedResources:
+      - "*"
+    excludedResources:
+      - events
+      - pods
+      - replicasets
+    snapshotVolumes: true
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    ttl: 720h  # 30 days = 720 hours
+    metadata:
+      labels:
+        app: task-api
+        backup-type: daily
+
+
+Apply the Schedule:
+
+kubectl apply -f task-api-schedule.yaml
+
+
+Output:
+
+schedule.velero.io/task-api-production-daily created
+
+
+Verify the Schedule:
+
+velero schedule describe task-api-production-daily
+
+
+Output:
+
+Name:         task-api-production-daily
+Namespace:    velero
+Labels:       app=task-api
+              backup-type=scheduled
+              environment=production
+Phase:        Enabled
+Schedule:     0 2 * * *
+TTL:          720h0m0s
+
+Backup Template:
+  Namespaces:
+    Included:  production
+  Resources:
+    Included:        *
+    Excluded:        events, pods, replicasets
+  Snapshot PVs:      true
+  Storage Location:  default
+
+Understanding TTL Retention​
+
+The ttl: 720h field means backups expire 30 days after creation. Velero automatically deletes expired backups and their associated data in object storage. This prevents backup storage from growing unbounded.
+
+TTL Value	Retention Period
+168h	7 days
+336h	14 days
+720h	30 days
+2160h	90 days
+8760h	1 year
+
+Match your TTL to your compliance and recovery requirements. Longer retention uses more storage but lets you recover from problems discovered weeks later.
+
+Implementing Backup Hooks for Database Consistency​
+
+Regular Kubernetes resource backups capture YAML manifests. But databases need special handling. If Velero backs up a PostgreSQL PersistentVolumeClaim while the database is actively writing, the backup might contain inconsistent data - half-written transactions, incomplete indexes.
+
+Backup hooks solve this by running commands in containers before and after the backup:
+
+Pre-backup hook: Quiesce the database (stop writes, flush to disk)
+Post-backup hook: Resume normal operations
+Complete Schedule with Database Hooks​
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: task-api-production-daily
+  namespace: velero
+  labels:
+    app: task-api
+    environment: production
+spec:
+  schedule: "0 2 * * *"
+  template:
+    includedNamespaces:
+      - production
+    includedResources:
+      - "*"
+    excludedResources:
+      - events
+      - pods
+      - replicasets
+    snapshotVolumes: true
+    ttl: 720h
+    hooks:
+      resources:
+        - name: postgres-consistency
+          includedNamespaces:
+            - production
+          labelSelector:
+            matchLabels:
+              app: postgres
+          pre:
+            - exec:
+                container: postgres
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    echo "Starting pre-backup hook at $(date)"
+                    # Create a checkpoint to flush WAL to disk
+                    psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CHECKPOINT;"
+                    # Dump database for application-level recovery
+                    pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" > /var/lib/postgresql/data/backup.sql
+                    echo "Pre-backup hook completed at $(date)"
+                onError: Fail
+                timeout: 120s
+          post:
+            - exec:
+                container: postgres
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    echo "Post-backup hook completed at $(date)"
+                    # Remove temporary dump file
+                    rm -f /var/lib/postgresql/data/backup.sql
+                onError: Continue
+                timeout: 30s
+
+Hook Configuration Explained​
+Field	Purpose
+labelSelector	Which pods the hook applies to
+pre.exec.container	Which container in the pod to run the command
+pre.exec.command	The command to execute
+onError: Fail	Abort the backup if the hook fails
+onError: Continue	Proceed even if hook fails (for non-critical post-backup cleanup)
+timeout	Maximum time to wait for hook completion
+Why Pre-Backup Hooks Matter​
+
+Without the hook, Velero might capture the PersistentVolumeClaim while PostgreSQL is mid-transaction. The CHECKPOINT command forces PostgreSQL to write all dirty buffers to disk, ensuring the volume snapshot is consistent.
+
+The pg_dump creates an additional SQL backup inside the container. This provides application-level recovery - you can restore the logical dump even if the volume snapshot has issues.
+
+Restore Procedure: Step-by-Step Recovery​
+
+When disaster strikes, you need a reliable, tested restore procedure. Here's the complete workflow:
+
+Step 1: Verify Available Backups​
+velero backup get
+
+
+Output:
+
+NAME                                       STATUS      ERRORS   WARNINGS   CREATED                          EXPIRES
+task-api-production-daily-20241230020000   Completed   0        0          2024-12-30 02:00:00 +0000 UTC    29d
+task-api-production-daily-20241229020000   Completed   0        0          2024-12-29 02:00:00 +0000 UTC    28d
+task-api-production-daily-20241228020000   Completed   0        0          2024-12-28 02:00:00 +0000 UTC    27d
+
+Step 2: Inspect a Specific Backup​
+velero backup describe task-api-production-daily-20241230020000 --details
+
+
+Output:
+
+Name:         task-api-production-daily-20241230020000
+Namespace:    velero
+Phase:        Completed
+
+Namespaces:
+  Included:  production
+
+Resources:
+  Included:        *
+  Excluded:        events, pods, replicasets
+
+Backup Hooks:
+  Resources:
+    Name:  postgres-consistency
+    Pre Exec Hook:
+      Container:  postgres
+      Command:    /bin/bash -c echo "Starting pre-backup hook..."
+      On Error:   Fail
+      Timeout:    2m0s
+    Post Exec Hook:
+      Container:  postgres
+      Command:    /bin/bash -c echo "Post-backup hook completed..."
+      On Error:   Continue
+      Timeout:    30s
+
+Step 3: Create a Restore​
+velero restore create restore-production-20241230 \
+  --from-backup task-api-production-daily-20241230020000 \
+  --include-namespaces production \
+  --restore-volumes=true
+
+
+Output:
+
+Restore request "restore-production-20241230" submitted successfully.
+Run `velero restore describe restore-production-20241230` for more details.
+
+Step 4: Monitor Restore Progress​
+velero restore describe restore-production-20241230 --details
+
+
+Output:
+
+Name:         restore-production-20241230
+Namespace:    velero
+Phase:        InProgress
+
+Restore Volumes:
+  task-api-pvc:  InProgress
+  postgres-pvc:  InProgress
+
+
+Wait for completion:
+
+velero restore wait restore-production-20241230
+
+
+Output:
+
+Restore completed with status: Completed. Duration: 2m30s.
+
+Step 5: Verify the Restore​
+
+Check that resources are restored:
+
+kubectl get deployments -n production
+kubectl get services -n production
+kubectl get pvc -n production
+
+
+Output:
+
+NAME        READY   UP-TO-DATE   AVAILABLE
+task-api    3/3     3            3
+postgres    1/1     1            1
+
+NAME        TYPE        CLUSTER-IP    PORT(S)
+task-api    ClusterIP   10.96.x.x     8000/TCP
+postgres    ClusterIP   10.96.x.x     5432/TCP
+
+NAME            STATUS   VOLUME                                     CAPACITY
+task-api-pvc    Bound    pvc-abc123...                             5Gi
+postgres-pvc    Bound    pvc-def456...                             10Gi
+
+Step 6: Validate Application Functionality​
+# Port-forward to test the API
+kubectl port-forward svc/task-api 8000:8000 -n production &
+
+# Test the API endpoint
+curl http://localhost:8000/health
+
+
+Output:
+
+{"status": "healthy", "database": "connected"}
+
+Discovering Backup Patterns Through Collaboration​
+
+You've learned to install Velero, configure scheduled backups, and implement hooks. But backup strategies aren't one-size-fits-all. Your specific requirements - compliance constraints, database types, multi-cluster architecture - shape the patterns you need.
+
+Your initial approach:
+
+You've set up a daily backup with 30-day retention and PostgreSQL hooks. But you're wondering: "Is this enough for production? What am I missing?"
+
+Exploring hook timing with AI:
+
+I have a Velero Schedule with pre-backup hooks that run pg_dump before backing up my PostgreSQL PVC.
+The hook has a 120-second timeout. My database has grown to 50GB.
+
+Questions:
+1. Will pg_dump complete in 120 seconds for a 50GB database?
+2. Should I increase the timeout, or is there a better approach?
+3. What happens to the backup if the hook times out?
+
+
+AI responds with insight you hadn't considered: "For a 50GB database, pg_dump might take 5-10 minutes depending on I/O speed. Consider using pg_basebackup for larger databases, or PostgreSQL's native WAL archiving. The timeout should be 600s minimum. If the hook times out with onError: Fail, the entire backup fails - which is what you want for data consistency."
+
+You refine based on this feedback:
+
+"That makes sense. But my RPO is 24 hours - I can tolerate some data loss. Should I switch to onError: Continue so backups don't fail entirely if the hook times out?"
+
+AI adapts to your constraint: "For a 24-hour RPO, that's a reasonable trade-off. You'd have a backup without the SQL dump, but the PVC snapshot would still exist. However, consider: if the hook consistently times out, you're not getting application-consistent backups at all. Better solution: increase timeout AND set up alerting on hook failures."
+
+What emerged from this iteration:
+
+A more sophisticated backup strategy:
+
+Increased hook timeout to 600 seconds
+Added monitoring for hook execution time
+Configured alerts when hooks take longer than 300 seconds (warning threshold)
+Kept onError: Fail to guarantee consistency, but added fallback alerting
+
+Neither you nor AI had this complete picture initially. You knew your RPO; AI knew PostgreSQL backup patterns. Together, you designed a robust solution.
+
+Reflect on Your Skill​
+
+You built an operational-excellence skill in Lesson 0. Test and improve it based on what you learned about Velero.
+
+Test Your Skill​
+Using my operational-excellence skill, generate a Velero Schedule for the
+task-api application with the following requirements:
+- Daily backups at 3 AM UTC
+- 30-day retention
+- Pre-backup hook that runs pg_dump on the postgres container
+- Back up only the production namespace
+- Exclude events, pods, and replicasets
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the complete hook syntax with onError and timeout?
+Did it explain when to use onError: Fail vs onError: Continue?
+Did it include the TTL calculation (720h = 30 days)?
+Improve Your Skill​
+
+If you found gaps:
+
+My operational-excellence skill generated the Schedule but didn't include
+the `timeout` field for hooks. Update it to always include:
+- timeout: 120s minimum for pre-backup hooks
+- onError: Fail for data-consistency hooks
+- onError: Continue for non-critical cleanup hooks
+
+Also add guidance on TTL values:
+- 168h = 7 days
+- 720h = 30 days
+- 2160h = 90 days
+
+Try With AI​
+
+These prompts help you apply Velero patterns to your own backup requirements.
+
+Prompt 1: Backup Strategy Design
+
+I'm designing a backup strategy for my Kubernetes cluster running three applications:
+- Task API (FastAPI + PostgreSQL)
+- Inference Service (stateless, connects to external LLM APIs)
+- Redis cache (ephemeral, can be rebuilt)
+
+Help me decide:
+1. Which components need Velero backups vs just Helm charts for reconstruction?
+2. What backup frequency for each?
+3. Which need database hooks and which don't?
+
+
+What you're learning: Not everything needs the same backup strategy. Stateless services can often be reconstructed from Helm charts and container images faster than restoring from backup. AI helps you distinguish between data that needs backup (PostgreSQL) and infrastructure that can be rebuilt (Redis, stateless APIs).
+
+Prompt 2: Multi-Cluster Backup Architecture
+
+I have three Kubernetes clusters: dev, staging, production. I want to:
+- Back up production daily to cloud storage
+- Be able to restore production to staging for debugging
+- Keep 7-day retention in dev, 30-day in staging, 90-day in production
+
+Design the BackupStorageLocation and Schedule configuration for this setup.
+What are the implications of cross-cluster restore?
+
+
+What you're learning: Enterprise backup patterns involve multiple storage locations and retention policies. Restoring to different clusters requires understanding namespace conflicts and storage class mapping. AI helps you anticipate the configuration complexity before you hit it in production.
+
+Prompt 3: Compliance-Driven Backup Requirements
+
+My company needs to comply with SOC 2 Type II. The auditor asks:
+1. How do you ensure backups are encrypted at rest?
+2. How do you verify backup integrity?
+3. Can you prove restore procedures work?
+
+Show me how to configure Velero to answer these questions with evidence.
+
+
+What you're learning: Compliance isn't just about having backups - it's about proving they work. AI helps you translate audit requirements into specific Velero configuration: encryption via S3 server-side encryption, integrity via checksum verification, and restore verification via scheduled test restores to non-production namespaces.
+
+Safety note: Restore operations can overwrite existing resources. Always use --include-namespaces to target specific namespaces. Test restores in non-production environments first. The --dry-run flag shows what would be restored without actually modifying the cluster. Production restores should be planned and documented, not improvised during an outage.

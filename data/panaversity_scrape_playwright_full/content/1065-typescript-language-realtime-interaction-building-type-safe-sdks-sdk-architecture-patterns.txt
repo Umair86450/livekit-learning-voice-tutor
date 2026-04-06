@@ -1,0 +1,735 @@
+SDK Architecture Patterns
+
+When you use the OpenAI SDK, you write openai.chat.completions.create() and everything works. TypeScript knows the exact shape of your request. Autocomplete guides you through the options. The response comes back fully typed. Behind this simplicity lies careful architectural decisions that separate good SDKs from frustrating ones.
+
+Consider what happens when you call that method: your request passes through authentication, gets serialized to JSON, travels over HTTP to OpenAI's servers, the response is parsed, validated against expected schemas, and returned with full type information. A well-designed SDK makes all of this invisible. A poorly designed SDK leaks abstractions at every step, forcing you to handle edge cases that should be the SDK's responsibility.
+
+In this lesson, you'll learn the five foundational patterns that production SDKs use: centralized HTTP handling, abstraction layers, type-safe design, cross-runtime compatibility, and namespaced method organization. These patterns apply whether you're wrapping your own FastAPI backend or contributing to open-source SDK projects.
+
+Pattern 1: Centralized HTTP Client​
+
+The first instinct when building an SDK is to sprinkle fetch calls throughout your code. Every method makes its own request with its own headers. This works until you need to change the base URL, add a new header, or implement retry logic. Suddenly you're hunting through dozens of files.
+
+Production SDKs centralize all HTTP logic in one place:
+
+interface HttpClientConfig {
+  baseUrl: string;
+  apiKey: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+}
+
+class HttpClient {
+  private config: HttpClientConfig;
+
+  constructor(config: HttpClientConfig) {
+    this.config = {
+      timeout: 30000,
+      ...config,
+    };
+  }
+
+  private getHeaders(): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${this.config.apiKey}`,
+      ...this.config.headers,
+    };
+  }
+
+  async request<T>(
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    path: string,
+    body?: unknown
+  ): Promise<T> {
+    const url = `${this.config.baseUrl}${path}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      this.config.timeout
+    );
+
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: this.getHeaders(),
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new ApiError(response.status, error.message || "Request failed");
+      }
+
+      return response.json() as Promise<T>;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  // Convenience methods
+  get<T>(path: string): Promise<T> {
+    return this.request<T>("GET", path);
+  }
+
+  post<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>("POST", path, body);
+  }
+}
+
+class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+
+Output:
+
+// Usage throughout the SDK:
+const client = new HttpClient({
+  baseUrl: "https://api.example.com",
+  apiKey: "sk-...",
+});
+
+// Every request uses the same headers, timeout, error handling
+const result = await client.post<ChatResponse>("/chat", { messages });
+
+
+Notice what this centralizes:
+
+Authentication: API key added to every request automatically
+Timeouts: Configured once, applied everywhere
+Error handling: Consistent error shape across all endpoints
+Headers: Custom headers merge with defaults
+Base URL: Change once, affects all requests
+
+When you need to add retry logic or request logging, you add it here once. Every SDK method benefits automatically.
+
+Pattern 2: Abstraction Layers​
+
+Production SDKs organize code into distinct layers, each with a specific responsibility:
+
+┌─────────────────────────────────────┐
+│         Domain Layer (top)          │
+│   sdk.chat.create(), sdk.files.upload()  │
+│   Business logic, resource organization  │
+├─────────────────────────────────────┤
+│        Validation Layer             │
+│   Zod schemas, runtime type checking    │
+│   Transforms API responses to safe types │
+├─────────────────────────────────────┤
+│        Transport Layer (bottom)     │
+│   HttpClient, fetch, streaming      │
+│   HTTP concerns only                │
+└─────────────────────────────────────┘
+
+
+Here's how these layers work together:
+
+// Transport Layer: Handles HTTP only
+class HttpClient {
+  async post<T>(path: string, body: unknown): Promise<T> {
+    // HTTP logic only - no business logic
+    return this.request<T>("POST", path, body);
+  }
+}
+
+// Validation Layer: Schema definitions and parsing
+import { z } from "zod";
+
+const ChatMessageSchema = z.object({
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string(),
+});
+
+const ChatResponseSchema = z.object({
+  id: z.string(),
+  choices: z.array(
+    z.object({
+      message: ChatMessageSchema,
+      finish_reason: z.enum(["stop", "length", "tool_calls"]),
+    })
+  ),
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number(),
+    total_tokens: z.number(),
+  }),
+});
+
+type ChatResponse = z.infer<typeof ChatResponseSchema>;
+
+// Domain Layer: Business logic and API organization
+class ChatResource {
+  constructor(private client: HttpClient) {}
+
+  async create(params: {
+    messages: Array<{ role: string; content: string }>;
+    model?: string;
+  }): Promise<ChatResponse> {
+    // 1. Validate input (optional, but good practice)
+    const validatedMessages = params.messages.map((m) =>
+      ChatMessageSchema.parse(m)
+    );
+
+    // 2. Make request through transport layer
+    const raw = await this.client.post("/chat/completions", {
+      messages: validatedMessages,
+      model: params.model ?? "gpt-4o",
+    });
+
+    // 3. Validate response
+    const result = ChatResponseSchema.safeParse(raw);
+    if (!result.success) {
+      throw new Error(`Invalid API response: ${result.error.message}`);
+    }
+
+    return result.data;
+  }
+}
+
+
+Output:
+
+// The domain layer exposes clean, validated types
+const response = await chat.create({
+  messages: [{ role: "user", content: "Hello" }],
+});
+
+// TypeScript knows exact shape:
+// response.choices[0].message.content is string
+// response.usage.total_tokens is number
+
+
+Why separate layers matter:
+
+Testing: Mock the transport layer to test domain logic in isolation
+Portability: Swap transport implementations (fetch vs axios) without touching domain code
+Validation: Catch API changes before they crash your application
+Maintenance: Change validation schemas without touching HTTP logic
+Pattern 3: Avoiding the any Type​
+
+The any type is the escape hatch that ruins SDK type safety. Once any enters your type flow, TypeScript stops checking everything downstream:
+
+// The problem: any spreads like a virus
+async function badFetch(url: string): Promise<any> {
+  const response = await fetch(url);
+  return response.json(); // Returns any
+}
+
+const data = await badFetch("/api/users");
+// data is any - TypeScript provides no help
+console.log(data.naem); // Typo? TypeScript doesn't know!
+
+
+The solution is generics with proper constraints:
+
+// Pattern 1: Generic return types
+async function typedFetch<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  return response.json() as T;
+}
+
+// Now TypeScript knows the shape
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+const user = await typedFetch<User>("/api/users/1");
+console.log(user.naem); // Error: Property 'naem' does not exist
+
+// Pattern 2: Inferred generics from parameters
+interface RequestConfig<TBody, TResponse> {
+  method: "GET" | "POST";
+  path: string;
+  body?: TBody;
+  responseSchema: z.ZodType<TResponse>;
+}
+
+async function request<TBody, TResponse>(
+  config: RequestConfig<TBody, TResponse>
+): Promise<TResponse> {
+  const response = await fetch(config.path, {
+    method: config.method,
+    body: config.body ? JSON.stringify(config.body) : undefined,
+  });
+
+  const data = await response.json();
+  return config.responseSchema.parse(data);
+}
+
+// Usage: Types inferred from schema
+const user = await request({
+  method: "GET",
+  path: "/api/users/1",
+  responseSchema: z.object({
+    id: z.string(),
+    name: z.string(),
+    email: z.string(),
+  }),
+});
+// user is { id: string; name: string; email: string }
+
+
+Output:
+
+// Pattern 3: Method chaining with type inference
+class TypedBuilder<T> {
+  private data: T;
+
+  constructor(initial: T) {
+    this.data = initial;
+  }
+
+  set<K extends keyof T>(key: K, value: T[K]): TypedBuilder<T> {
+    this.data[key] = value;
+    return this;
+  }
+
+  build(): T {
+    return this.data;
+  }
+}
+
+// TypeScript enforces valid keys and value types
+const config = new TypedBuilder({ timeout: 0, retries: 0 })
+  .set("timeout", 5000)   // OK: number
+  .set("retries", 3)      // OK: number
+  // .set("timeout", "fast") // Error: Type 'string' not assignable to 'number'
+  .build();
+
+
+The key insight: anywhere you're tempted to use any, there's usually a generic pattern that preserves type safety.
+
+Pattern 4: Cross-Runtime Compatibility​
+
+SDKs need to work everywhere: Node.js servers, Deno deployments, Bun applications, browser clients. Each runtime has subtle differences in how they handle HTTP:
+
+// The problem: Node.js fetch wasn't always available
+// Node < 18 required node-fetch
+// Some environments use different fetch implementations
+
+// Solution: Runtime detection and polyfill strategy
+type FetchFunction = typeof globalThis.fetch;
+
+interface RuntimeConfig {
+  fetch?: FetchFunction;
+}
+
+class CrossRuntimeClient {
+  private fetchFn: FetchFunction;
+
+  constructor(config: RuntimeConfig = {}) {
+    // Allow custom fetch injection for testing or polyfills
+    this.fetchFn = config.fetch ?? this.detectFetch();
+  }
+
+  private detectFetch(): FetchFunction {
+    // Modern approach: globalThis.fetch works in Node 18+, Deno, Bun, browsers
+    if (typeof globalThis.fetch === "function") {
+      return globalThis.fetch.bind(globalThis);
+    }
+
+    throw new Error(
+      "No fetch implementation found. " +
+        "Please provide a fetch function or use Node.js 18+."
+    );
+  }
+
+  async request(url: string, options: RequestInit): Promise<Response> {
+    return this.fetchFn(url, options);
+  }
+}
+
+
+Output:
+
+// Works in any runtime
+const client = new CrossRuntimeClient();
+
+// Or inject a custom fetch for testing
+const testClient = new CrossRuntimeClient({
+  fetch: async (url, options) => {
+    console.log(`Mock request to ${url}`);
+    return new Response(JSON.stringify({ mocked: true }));
+  },
+});
+
+Handling Streaming Differences​
+
+Streaming responses have more significant runtime differences:
+
+interface StreamConfig {
+  onChunk: (chunk: string) => void;
+  onComplete: () => void;
+  onError: (error: Error) => void;
+}
+
+async function streamResponse(
+  response: Response,
+  config: StreamConfig
+): Promise<void> {
+  const reader = response.body?.getReader();
+
+  if (!reader) {
+    throw new Error("Response body is not readable");
+  }
+
+  const decoder = new TextDecoder();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        config.onComplete();
+        break;
+      }
+
+      // Decode chunk - works consistently across runtimes
+      const text = decoder.decode(value, { stream: true });
+      config.onChunk(text);
+    }
+  } catch (error) {
+    config.onError(error instanceof Error ? error : new Error(String(error)));
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+
+Output:
+
+// Usage pattern works in Node, Deno, Bun, browsers
+const response = await fetch("https://api.example.com/stream");
+
+await streamResponse(response, {
+  onChunk: (text) => process.stdout.write(text),
+  onComplete: () => console.log("\nStream complete"),
+  onError: (err) => console.error("Stream error:", err),
+});
+
+
+The key principles for cross-runtime compatibility:
+
+Use globalThis: It works everywhere modern JavaScript runs
+Allow dependency injection: Let users provide their own fetch if needed
+Use web standards: ReadableStream, TextDecoder work consistently
+Avoid Node-specific APIs: Buffer, http module, stream module
+Pattern 5: Namespaced Methods​
+
+The best SDKs organize methods to mirror the API structure. Instead of flat functions, they use namespaced objects:
+
+// Bad: Flat function names that don't scale
+sdk.createChat()
+sdk.getChat()
+sdk.createFile()
+sdk.deleteFile()
+sdk.createCompletion()
+// 50 more methods...
+
+// Good: Namespaced by resource
+sdk.chat.create()
+sdk.chat.get()
+sdk.files.create()
+sdk.files.delete()
+sdk.completions.create()
+
+
+Here's how to implement this pattern:
+
+// Each resource is its own class
+class ChatResource {
+  constructor(private client: HttpClient) {}
+
+  async create(params: ChatCreateParams): Promise<ChatResponse> {
+    return this.client.post("/chat/completions", params);
+  }
+
+  async get(id: string): Promise<ChatResponse> {
+    return this.client.get(`/chat/completions/${id}`);
+  }
+}
+
+class FilesResource {
+  constructor(private client: HttpClient) {}
+
+  async upload(file: File): Promise<FileResponse> {
+    // File upload logic
+    return this.client.post("/files", { file });
+  }
+
+  async delete(id: string): Promise<void> {
+    return this.client.request("DELETE", `/files/${id}`);
+  }
+
+  async list(): Promise<FileResponse[]> {
+    return this.client.get("/files");
+  }
+}
+
+// Main SDK class composes resources
+class AgentSDK {
+  readonly chat: ChatResource;
+  readonly files: FilesResource;
+
+  private client: HttpClient;
+
+  constructor(config: SDKConfig) {
+    this.client = new HttpClient({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+    });
+
+    // Initialize all resources with shared client
+    this.chat = new ChatResource(this.client);
+    this.files = new FilesResource(this.client);
+  }
+}
+
+// Factory function for clean instantiation
+function createAgentSDK(config: SDKConfig): AgentSDK {
+  return new AgentSDK(config);
+}
+
+
+Output:
+
+// Clean, discoverable API
+const sdk = createAgentSDK({
+  baseUrl: "https://api.example.com",
+  apiKey: process.env.API_KEY!,
+});
+
+// Autocomplete shows available resources
+sdk.chat    // ChatResource
+sdk.files   // FilesResource
+
+// Then shows available methods
+sdk.chat.create()  // Create chat completion
+sdk.chat.get()     // Get chat by ID
+
+// Full type inference throughout
+const response = await sdk.chat.create({
+  messages: [{ role: "user", content: "Hello" }],
+});
+// response is fully typed ChatResponse
+
+Nested Resources for Complex APIs​
+
+Some APIs have nested resources. Here's how to handle them:
+
+class ThreadsResource {
+  constructor(private client: HttpClient) {}
+
+  // Nested resource: sdk.threads.messages
+  readonly messages = {
+    create: async (
+      threadId: string,
+      params: MessageCreateParams
+    ): Promise<Message> => {
+      return this.client.post(`/threads/${threadId}/messages`, params);
+    },
+
+    list: async (threadId: string): Promise<Message[]> => {
+      return this.client.get(`/threads/${threadId}/messages`);
+    },
+  };
+
+  // Direct methods
+  async create(params: ThreadCreateParams): Promise<Thread> {
+    return this.client.post("/threads", params);
+  }
+
+  async get(id: string): Promise<Thread> {
+    return this.client.get(`/threads/${id}`);
+  }
+}
+
+
+Output:
+
+// Intuitive nested access
+const thread = await sdk.threads.create({ title: "New Thread" });
+const message = await sdk.threads.messages.create(thread.id, {
+  role: "user",
+  content: "Hello",
+});
+const allMessages = await sdk.threads.messages.list(thread.id);
+
+Putting It Together​
+
+Here's a complete minimal SDK demonstrating all five patterns:
+
+import { z } from "zod";
+
+// === Types ===
+interface SDKConfig {
+  baseUrl: string;
+  apiKey: string;
+  timeout?: number;
+  fetch?: typeof globalThis.fetch;
+}
+
+// === Transport Layer ===
+class HttpClient {
+  private config: Required<Omit<SDKConfig, "fetch">> & { fetch: typeof fetch };
+
+  constructor(config: SDKConfig) {
+    this.config = {
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      timeout: config.timeout ?? 30000,
+      fetch: config.fetch ?? globalThis.fetch.bind(globalThis),
+    };
+  }
+
+  async request<T>(
+    method: string,
+    path: string,
+    body?: unknown
+  ): Promise<T> {
+    const response = await this.config.fetch(
+      `${this.config.baseUrl}${path}`,
+      {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.config.apiKey}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  post<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>("POST", path, body);
+  }
+
+  get<T>(path: string): Promise<T> {
+    return this.request<T>("GET", path);
+  }
+}
+
+// === Validation Layer ===
+const ChatResponseSchema = z.object({
+  id: z.string(),
+  message: z.object({
+    role: z.string(),
+    content: z.string(),
+  }),
+});
+
+type ChatResponse = z.infer<typeof ChatResponseSchema>;
+
+// === Domain Layer ===
+class ChatResource {
+  constructor(private client: HttpClient) {}
+
+  async create(params: {
+    messages: Array<{ role: string; content: string }>;
+  }): Promise<ChatResponse> {
+    const raw = await this.client.post("/chat", params);
+    return ChatResponseSchema.parse(raw);
+  }
+}
+
+// === SDK Facade ===
+class AgentSDK {
+  readonly chat: ChatResource;
+
+  constructor(config: SDKConfig) {
+    const client = new HttpClient(config);
+    this.chat = new ChatResource(client);
+  }
+}
+
+export function createAgentSDK(config: SDKConfig): AgentSDK {
+  return new AgentSDK(config);
+}
+
+
+Output:
+
+// Complete type-safe usage
+const sdk = createAgentSDK({
+  baseUrl: "https://api.myagent.com",
+  apiKey: "sk-...",
+});
+
+const response = await sdk.chat.create({
+  messages: [{ role: "user", content: "Hello, agent!" }],
+});
+
+console.log(response.message.content);
+// TypeScript knows this is a string
+
+Try With AI​
+Prompt 1: Design Your SDK Structure​
+I'm building an SDK for an AI agent API with these endpoints:
+- POST /chat (create chat completion)
+- GET /chat/:id (get chat by ID)
+- POST /files (upload file)
+- GET /files (list files)
+- DELETE /files/:id (delete file)
+- POST /threads (create thread)
+- POST /threads/:id/messages (add message to thread)
+
+Help me design the resource class structure following the namespaced
+pattern. Show me the TypeScript interfaces for the SDK facade and
+how users would call each endpoint (sdk.resource.method() style).
+
+
+What you're learning: How to translate REST API structure into SDK organization. You'll see how resource grouping creates discoverability and how nested resources handle hierarchical endpoints.
+
+Prompt 2: Eliminate any From Existing Code​
+I have this SDK code that uses 'any' in several places:
+
+async function apiRequest(path: string, options: any): Promise<any> {
+  const response = await fetch(path, options);
+  return response.json();
+}
+
+function handleResponse(data: any) {
+  if (data.error) {
+    throw new Error(data.error.message);
+  }
+  return data.result;
+}
+
+Help me refactor this to be fully type-safe using generics. Show me
+the before/after comparison and explain what type safety I gain.
+
+
+What you're learning: Practical techniques for replacing any with generics. You'll understand how generic constraints flow through function calls and why this matters for SDK consumers.
+
+Prompt 3: Cross-Runtime Testing Strategy​
+My SDK needs to work in Node.js 18+, Deno, Bun, and browsers. I want
+to write tests that verify cross-runtime compatibility without
+actually running in each environment.
+
+Help me design a testing strategy that:
+1. Mocks fetch for unit tests
+2. Tests runtime detection logic
+3. Verifies streaming works with standard APIs
+
+Show me the test structure and key test cases.
+
+
+What you're learning: How to ensure cross-runtime compatibility through testing. You'll see how dependency injection enables testing and what edge cases matter most for runtime differences.
+
+Safety Note​
+
+When building SDKs that handle API keys, never log request bodies or headers in production. The centralized HTTP client pattern makes this easy to control, but you must be intentional about what gets logged during debugging. Consider using a debug mode that only activates in development environments.

@@ -1,0 +1,475 @@
+Deploy Dapr + State Management
+
+You understand the sidecar pattern and building blocks. Now it's time to deploy a real Dapr control plane and write code that uses it.
+
+This lesson has two parts. First, you'll deploy Dapr on Docker Desktop Kubernetes using Helm—the same pattern you used for Kafka in Chapter 82. Second, you'll implement state management operations using the Python SDK, moving from simple save/get operations to handling concurrent updates with ETags.
+
+By the end, you'll have Dapr running on your local Kubernetes cluster and a clear pattern for persisting state without writing any Redis-specific code.
+
+Part A: Deploy Dapr with Helm (15 minutes)​
+Prerequisites Check​
+
+Before deploying Dapr, verify your environment:
+
+# Check Docker Desktop Kubernetes is running
+kubectl cluster-info
+
+
+Output:
+
+Kubernetes control plane is running at https://127.0.0.1:6443
+CoreDNS is running at https://127.0.0.1:6443/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+# Check Helm is installed
+helm version
+
+
+Output:
+
+version.BuildInfo{Version:"v3.16.3", GitCommit:"...", GitTreeState:"clean", GoVersion:"go1.22.7"}
+
+
+If either command fails, revisit Chapters 79-81 to set up Docker Desktop Kubernetes and Helm.
+
+Step 1: Add Dapr Helm Repository​
+# Add Dapr Helm repo
+helm repo add dapr https://dapr.github.io/helm-charts/
+helm repo update
+
+
+Output:
+
+"dapr" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "dapr" chart repository
+Update Complete. Happy Helming!
+
+Step 2: Install Dapr Control Plane​
+
+Install Dapr 1.14 in the dapr-system namespace:
+
+# Install Dapr control plane
+helm upgrade --install dapr dapr/dapr \
+  --version=1.14.0 \
+  --namespace dapr-system \
+  --create-namespace \
+  --wait
+
+
+Output:
+
+Release "dapr" does not exist. Installing it now.
+NAME: dapr
+LAST DEPLOYED: [timestamp]
+NAMESPACE: dapr-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Thank you for installing dapr.
+
+
+The --wait flag ensures Helm waits until all pods are ready before returning.
+
+Step 3: Verify Control Plane Components​
+
+Check that all Dapr pods are running:
+
+kubectl get pods -n dapr-system
+
+
+Output:
+
+NAME                                     READY   STATUS    RESTARTS   AGE
+dapr-operator-7d8b9f4c5b-x2j4k           1/1     Running   0          45s
+dapr-sentry-5f6c7d8e9f-m3n5p             1/1     Running   0          45s
+dapr-sidecar-injector-6a7b8c9d0e-q1r2s   1/1     Running   0          45s
+dapr-placement-server-0                  1/1     Running   0          45s
+dapr-scheduler-server-0                  1/1     Running   0          45s
+
+
+Each component has a specific role:
+
+Component	Role
+dapr-operator	Manages Dapr component resources and Kubernetes integration
+dapr-sidecar-injector	Automatically injects sidecars into pods with Dapr annotations
+dapr-sentry	Certificate authority for mTLS between services
+dapr-placement-server	Actor placement service (used in Chapter 89)
+dapr-scheduler-server	Job scheduling service for the Jobs API (Lesson 7)
+Step 4: Deploy Redis for State Store​
+
+Dapr needs a backend for state storage. Deploy Redis using the Bitnami Helm chart:
+
+# Add Bitnami repo if not already added
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+# Install Redis in default namespace
+helm install redis bitnami/redis \
+  --namespace default \
+  --set auth.enabled=false \
+  --set architecture=standalone
+
+
+Output:
+
+NAME: redis
+LAST DEPLOYED: [timestamp]
+NAMESPACE: default
+STATUS: deployed
+
+
+Wait for Redis to be ready:
+
+kubectl get pods -l app.kubernetes.io/name=redis
+
+
+Output:
+
+NAME               READY   STATUS    RESTARTS   AGE
+redis-master-0     1/1     Running   0          60s
+
+Step 5: Create State Store Component​
+
+Dapr components tell the sidecar which backend to use. Create a file named statestore.yaml:
+
+# statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: default
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis-master.default.svc.cluster.local:6379
+    - name: redisPassword
+      value: ""
+
+Field	Purpose
+type: state.redis	Use Redis state store implementation
+version: v1	Component API version
+redisHost	Kubernetes DNS name for Redis service
+redisPassword	Empty for development (use secrets in production)
+
+Apply the component:
+
+kubectl apply -f statestore.yaml
+
+
+Output:
+
+component.dapr.io/statestore created
+
+
+Verify the component was created:
+
+kubectl get components
+
+
+Output:
+
+NAME         AGE
+statestore   15s
+
+
+Your Dapr control plane is now running with a Redis state store configured. Any pod with Dapr annotations can now use the state API.
+
+Part B: State Management with Python SDK (20 minutes)​
+
+Now let's write Python code that uses Dapr's state management. You'll use the dapr-client SDK to save, retrieve, and delete state—without any Redis-specific code.
+
+Install the Python SDK​
+pip install dapr-client
+
+Basic State Operations​
+
+The DaprClient class provides a context manager for state operations:
+
+from dapr.clients import DaprClient
+from pydantic import BaseModel
+import json
+
+class Todo(BaseModel):
+    id: str
+    title: str
+    done: bool = False
+
+# Using context manager for proper resource cleanup
+with DaprClient() as client:
+    # Create a Todo
+    todo = Todo(id="todo-1", title="Learn Dapr", done=False)
+
+    # Save state
+    client.save_state(
+        store_name="statestore",
+        key="todo-1",
+        value=todo.model_dump_json()
+    )
+    print(f"Saved: {todo.title}")
+
+
+Output:
+
+Saved: Learn Dapr
+
+Retrieve State​
+with DaprClient() as client:
+    # Get state
+    state = client.get_state(
+        store_name="statestore",
+        key="todo-1"
+    )
+
+    if state.data:
+        todo = Todo.model_validate_json(state.data)
+        print(f"Retrieved: {todo.title}, done={todo.done}")
+    else:
+        print("Todo not found")
+
+
+Output:
+
+Retrieved: Learn Dapr, done=False
+
+Delete State​
+with DaprClient() as client:
+    # Delete state
+    client.delete_state(
+        store_name="statestore",
+        key="todo-1"
+    )
+    print("Deleted todo-1")
+
+    # Verify deletion
+    state = client.get_state(store_name="statestore", key="todo-1")
+    print(f"After delete, data exists: {bool(state.data)}")
+
+
+Output:
+
+Deleted todo-1
+After delete, data exists: False
+
+Bulk Operations​
+
+When you need to save multiple items, bulk operations are more efficient:
+
+with DaprClient() as client:
+    # Save multiple todos at once
+    todos = [
+        Todo(id="todo-1", title="Deploy Dapr", done=True),
+        Todo(id="todo-2", title="Configure state store", done=True),
+        Todo(id="todo-3", title="Write Python code", done=False),
+    ]
+
+    states = [
+        {"key": todo.id, "value": todo.model_dump_json()}
+        for todo in todos
+    ]
+
+    client.save_bulk_state(
+        store_name="statestore",
+        states=states
+    )
+    print(f"Saved {len(todos)} todos in one operation")
+
+
+Output:
+
+Saved 3 todos in one operation
+
+ETag for Optimistic Concurrency​
+
+When multiple processes might update the same state, you need concurrency control. Dapr uses ETags for optimistic concurrency—each state value has a version number, and updates only succeed if your version matches.
+
+The problem: Two processes read the same todo, both modify it, both try to save. Without concurrency control, the last write wins and one update is lost.
+
+The solution: Use the ETag returned with each read. If someone else modified the state since you read it, your ETag won't match and the save fails.
+
+with DaprClient() as client:
+    # Get state with ETag
+    state = client.get_state(
+        store_name="statestore",
+        key="todo-1"
+    )
+
+    current_etag = state.etag
+    print(f"Current ETag: {current_etag}")
+
+    # Update with ETag (first-write-wins)
+    todo = Todo.model_validate_json(state.data)
+    todo.done = True
+
+    try:
+        client.save_state(
+            store_name="statestore",
+            key="todo-1",
+            value=todo.model_dump_json(),
+            etag=current_etag,
+            state_metadata={"concurrency": "first-write"}
+        )
+        print("Update succeeded - ETag matched")
+    except Exception as e:
+        print(f"Update failed - ETag mismatch: {e}")
+
+
+Output:
+
+Current ETag: 1
+Update succeeded - ETag matched
+
+
+If another process updated the state between your read and write, you'd see:
+
+Update failed - ETag mismatch: ...
+
+FastAPI Integration with Lifespan​
+
+In a real application, you'll integrate Dapr with FastAPI. Use the lifespan pattern for proper initialization:
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from dapr.clients import DaprClient
+from pydantic import BaseModel
+import uuid
+
+class Todo(BaseModel):
+    id: str | None = None
+    title: str
+    done: bool = False
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: verify Dapr sidecar is ready
+    # In Kubernetes, the sidecar starts alongside your container
+    yield
+    # Shutdown: cleanup if needed
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/todos", response_model=Todo)
+async def create_todo(todo: Todo):
+    todo.id = str(uuid.uuid4())
+
+    with DaprClient() as client:
+        client.save_state(
+            store_name="statestore",
+            key=f"todo-{todo.id}",
+            value=todo.model_dump_json()
+        )
+
+    return todo
+
+@app.get("/todos/{todo_id}", response_model=Todo)
+async def get_todo(todo_id: str):
+    with DaprClient() as client:
+        state = client.get_state(
+            store_name="statestore",
+            key=f"todo-{todo_id}"
+        )
+
+        if not state.data:
+            raise HTTPException(status_code=404, detail="Todo not found")
+
+        return Todo.model_validate_json(state.data)
+
+@app.delete("/todos/{todo_id}")
+async def delete_todo(todo_id: str):
+    with DaprClient() as client:
+        client.delete_state(
+            store_name="statestore",
+            key=f"todo-{todo_id}"
+        )
+
+    return {"status": "deleted"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+This FastAPI application stores todos in Dapr state without any Redis-specific code. If you later switch to PostgreSQL or Cosmos DB, you change the component YAML—not your application code.
+
+Why Dapr State vs Direct Redis?​
+
+You might wonder: why add Dapr instead of using Redis directly?
+
+Aspect	Direct Redis (redis-py)	Dapr State API
+Backend lock-in	Code tied to Redis	Swap via YAML
+Connection management	Your responsibility	Sidecar handles it
+Serialization	Your choice	Consistent JSON
+Concurrency	Manual ETag implementation	Built-in first-write-wins
+mTLS	Manual certificate setup	Automatic via Sentry
+State backends	Redis only	30+ supported stores
+
+For a single service using Redis forever, direct Redis is fine. For distributed systems where you might change backends or need consistent patterns across services, Dapr provides valuable abstraction.
+
+Reflect on Your Skill​
+
+You built a dapr-deployment skill in Lesson 0. Does it include both infrastructure deployment AND state management code patterns?
+
+Test Your Skill​
+Using my dapr-deployment skill, generate:
+1. Helm commands to deploy Dapr 1.14 with verification
+2. A Redis state store component YAML
+3. Python code using DaprClient to save and get state
+
+Does my skill produce all three outputs correctly?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the control plane component explanations?
+Did it include the async context manager pattern?
+Did it explain ETag concurrency?
+Improve Your Skill​
+
+If you found gaps:
+
+Update my dapr-deployment skill to include:
+- Helm deployment commands with --wait and verification
+- State store component YAML structure
+- DaprClient context manager pattern for state operations
+- ETag-based optimistic concurrency example
+
+Try With AI​
+
+Deploy Dapr on Your Cluster
+
+Deploy Dapr 1.14 on my Docker Desktop Kubernetes cluster. Show me:
+1. The Helm install command with recommended flags
+2. How to verify all control plane pods are running
+3. What each control plane component does
+
+Then create a Redis state store component YAML.
+
+
+What you're learning: Dapr deployment follows the operator pattern you learned in Chapter 82 (Strimzi). The control plane manages sidecar injection and security certificates—you declare what you want, Dapr figures out how to achieve it.
+
+Create a FastAPI State Endpoint
+
+Create a FastAPI endpoint that saves a Todo to Dapr state store using DaprClient. Include:
+- Pydantic model for Todo
+- POST endpoint to create todos
+- GET endpoint to retrieve by ID
+- The state store component YAML needed
+
+
+What you're learning: The DaprClient context manager handles connection lifecycle. You don't manage Redis connections—you call save_state with a store name, and Dapr routes to the configured backend.
+
+Explain ETag Concurrency
+
+What's the ETag pattern for optimistic concurrency with Dapr state? Help me understand:
+1. What problem does it solve?
+2. How do I use it with DaprClient?
+3. What happens when there's a conflict?
+4. When would I use first-write-wins vs last-write-wins?
+
+
+What you're learning: Concurrent state updates are a classic distributed systems problem. ETags provide optimistic concurrency—you assume no conflict and handle the rare case when one occurs. This is more performant than pessimistic locking for read-heavy workloads.
+
+Safety note: When using Dapr state in production, never store secrets in plain text. Use the Secrets building block (Lesson 8) for credentials, and enable encryption at rest on your state store backend.

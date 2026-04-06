@@ -1,0 +1,585 @@
+LLM-as-Judge Graders
+
+You've classified your evaluation into quadrants. Some criteria fall into Q2 or Q4—the subjective quadrants where code cannot determine correctness. "Is this response helpful?" "Does the explanation make sense?" "Is the tone appropriate?"
+
+These questions require judgment. A function cannot tell you whether advice is actionable or whether a summary captures the key points. The criterion requires understanding context, interpreting meaning, and making quality assessments that only reasoning systems can perform.
+
+This is where LLM-as-Judge enters the picture. You use one LLM to evaluate the outputs of another. The judge doesn't execute your agent—it reviews what your agent produced and scores it against criteria you define.
+
+But LLM judges have failure modes that trip up most developers. They're poorly calibrated on numeric scales. They exhibit position bias when comparing two outputs. They can be influenced by response length and formatting. Understanding these limitations is the difference between reliable evaluation and noise that misleads you about actual agent quality.
+
+When to Use LLM-as-Judge​
+
+Not every evaluation needs an LLM judge. In fact, using LLM judges when code suffices wastes money and adds noise.
+
+Use LLM-as-Judge when:
+
+The criterion requires semantic understanding
+Quality depends on context interpretation
+Multiple valid outputs exist (no single correct answer)
+You need to assess dimensions like helpfulness, clarity, or appropriateness
+
+Use code-based grading when:
+
+The criterion can be expressed as a computable predicate
+Success is verifiable through pattern matching, counting, or parsing
+You have ground truth for exact or fuzzy comparison
+
+The decision framework:
+
+Can I write a function that returns True/False for this criterion?
+
+YES → Use code-based grader (faster, cheaper, deterministic)
+NO  → Use LLM-as-Judge (captures semantic quality)
+
+
+Here's the practical test: If you catch yourself writing regex patterns or string matching to approximate a quality judgment, stop. You're forcing code to do judgment's job. Move to an LLM judge instead.
+
+Criterion	Code or LLM?	Why
+Response under 500 tokens	Code	Token count is computable
+Response is helpful	LLM	"Helpful" requires understanding needs
+Contains required JSON fields	Code	JSON parsing is deterministic
+Explanation is clear	LLM	Clarity requires comprehension
+No profanity in output	Code	Profanity detection is pattern-based
+Addresses user's actual question	LLM	Intent interpretation needs reasoning
+The Binary Criteria Pattern​
+
+Here's the most important lesson about LLM judges: Don't use numeric scales.
+
+When you ask an LLM "Rate this response 1-5 on helpfulness," you get unreliable scores. LLMs are poorly calibrated on numeric scales. A 3 from one run might be a 4 from another. Different phrasings of the same criterion produce different score distributions. The numbers don't mean what you think they mean.
+
+The solution: Binary criteria.
+
+Instead of asking for a single 1-5 rating, ask multiple yes/no questions. Each question tests one aspect of quality. Sum the yes answers. Now you have a reliable score from 0 to N.
+
+The problematic approach:
+
+Rate this customer support response on a scale of 1-5 for quality.
+
+Response: {response}
+
+Return a single number 1-5.
+
+
+This produces noisy, inconsistent scores. A response might get 3 on one run and 4 on another. You can't tell if changes improved quality or if you're seeing noise.
+
+The reliable approach:
+
+Evaluate this customer support response. For EACH criterion,
+answer YES or NO:
+
+1. Does the response acknowledge the customer's concern?
+2. Does it provide specific, actionable next steps?
+3. Is the tone professional and empathetic?
+4. Does it avoid making promises that cannot be kept?
+5. Does it address what the customer actually asked about?
+
+Response: {response}
+
+Return JSON: {"criteria_results": {"criterion_1": true/false, ...}, "total_passed": N}
+
+
+Same quality dimensions, but now each is binary. The LLM decides yes or no—a much easier judgment than picking a number from 1-5. Sum the results: a score of 4/5 is meaningful and reproducible.
+
+Why binary criteria work better:
+
+Aspect	Numeric Scale (1-5)	Binary Criteria
+Calibration	Poor—LLMs inconsistent on scales	Good—yes/no is easier to judge
+Reproducibility	Low—same response gets different scores	High—binary decisions are more stable
+Interpretability	What does "3" mean?	Clear—which criteria passed/failed
+Actionability	"Improve to get 4" is vague	"Add acknowledgment" is specific
+LLM Grader Prompt Structure​
+
+A well-structured grader prompt has four components:
+
+Context: What the LLM is evaluating and why
+Criteria: Specific yes/no questions to answer
+Response: The agent output to evaluate
+Output format: How to structure the results
+
+Grader prompt template:
+
+GRADER_PROMPT = """
+You are evaluating an agent response for quality.
+
+Evaluate the following response against these criteria.
+For EACH criterion, answer YES or NO only.
+
+Criteria:
+1. Does the response directly address the user's stated question?
+2. Is the information provided accurate and relevant?
+3. Is the response appropriately detailed (not too brief, not excessive)?
+4. Is the tone suitable for the context?
+5. Would a reasonable user find this response helpful?
+
+Response to evaluate:
+{response}
+
+Return your evaluation as JSON in this exact format:
+{
+  "criteria_results": {
+    "addresses_question": true or false,
+    "accurate_relevant": true or false,
+    "appropriate_detail": true or false,
+    "suitable_tone": true or false,
+    "user_finds_helpful": true or false
+  },
+  "total_passed": <count of true values>,
+  "explanation": "<brief reasoning for any false criteria>"
+}
+"""
+
+
+Key design choices:
+
+Each criterion is a complete yes/no question
+Criteria are specific enough that two humans would likely agree
+Output format is structured JSON for reliable parsing
+Optional explanation helps debugging but doesn't affect score
+Implementing an LLM Grader​
+
+Here's a complete implementation that works with any SDK that provides a completion API:
+
+import json
+from typing import Any
+
+def create_grader_prompt(response: str) -> str:
+    """Build the evaluation prompt with the response embedded."""
+    return f"""
+You are evaluating an agent response for quality.
+
+Evaluate the following response against these criteria.
+For EACH criterion, answer YES or NO only.
+
+Criteria:
+1. Does the response directly address the user's stated question?
+2. Is the information provided accurate and relevant?
+3. Is the response appropriately detailed (not too brief, not excessive)?
+4. Is the tone suitable for the context?
+5. Would a reasonable user find this response helpful?
+
+Response to evaluate:
+{response}
+
+Return your evaluation as JSON in this exact format:
+{{
+  "criteria_results": {{
+    "addresses_question": true or false,
+    "accurate_relevant": true or false,
+    "appropriate_detail": true or false,
+    "suitable_tone": true or false,
+    "user_finds_helpful": true or false
+  }},
+  "total_passed": <count of true values>,
+  "explanation": "<brief reasoning for any false criteria>"
+}}
+"""
+
+
+def grade_response(response: str, llm_client: Any) -> dict:
+    """
+    Use LLM-as-judge to evaluate an agent response.
+
+    Args:
+        response: The agent output to evaluate
+        llm_client: Any LLM client with a .complete() or similar method
+
+    Returns:
+        dict with criteria_results, total_passed, and explanation
+    """
+    prompt = create_grader_prompt(response)
+
+    # Call your LLM - adapt this to your SDK
+    # OpenAI: llm_client.chat.completions.create(...)
+    # Anthropic: llm_client.messages.create(...)
+    # Generic: llm_client.complete(prompt)
+    result = llm_client.complete(prompt)
+
+    # Parse the JSON response
+    try:
+        evaluation = json.loads(result)
+        return evaluation
+    except json.JSONDecodeError:
+        # Handle cases where LLM doesn't return valid JSON
+        return {
+            "criteria_results": {},
+            "total_passed": 0,
+            "explanation": "Failed to parse LLM response as JSON",
+            "raw_response": result
+        }
+
+
+Output:
+
+# Example usage and output
+response_to_grade = """
+I understand you're having trouble with your order. Let me help!
+
+Your order #12345 is currently in transit. Based on the tracking,
+it should arrive by Thursday. If it doesn't arrive by Friday,
+please reach out and we'll issue a replacement.
+
+Is there anything else I can help you with?
+"""
+
+result = grade_response(response_to_grade, my_llm_client)
+print(json.dumps(result, indent=2))
+
+{
+  "criteria_results": {
+    "addresses_question": true,
+    "accurate_relevant": true,
+    "appropriate_detail": true,
+    "suitable_tone": true,
+    "user_finds_helpful": true
+  },
+  "total_passed": 5,
+  "explanation": "Response fully addresses the order status inquiry with specific details and next steps."
+}
+
+Position Bias: The Hidden Problem​
+
+When LLMs compare two outputs side by side, they exhibit position bias—a systematic preference for the output presented first (or sometimes last, depending on the model).
+
+The problematic pairwise comparison:
+
+Which response is better?
+
+Response A:
+{response_a}
+
+Response B:
+{response_b}
+
+Answer A or B.
+
+
+This seems reasonable. You want to know which output is better. But research shows LLMs will prefer Response A more often than chance, regardless of actual quality. Swap the order, and now Response B wins more often.
+
+Evidence of position bias:
+
+Researchers testing GPT-4 found:
+
+When the better response was in position A, the model correctly chose A ~70% of time
+When the same better response was moved to position B, correct identification dropped to ~50%
+The model's "preference" was partly about position, not quality
+
+This isn't unique to GPT-4. Multiple models exhibit position bias, and the direction varies by model and even by prompt format.
+
+Why pairwise comparisons fail:
+
+Problem	Impact
+Position bias	Model prefers first (or last) option systematically
+Length bias	Longer responses often rated higher regardless of quality
+Format bias	Responses with bullet points may be preferred over prose
+Inconsistent	Swap positions, get different winner
+
+The solution: Rubric-based scoring
+
+Instead of asking "Which is better?", ask "How well does each response meet these criteria?" independently.
+
+# Instead of:
+"Compare A and B, which is better?"
+
+# Use:
+"Evaluate this response against these 5 criteria."
+# Run separately for A, then for B
+# Compare scores mathematically
+
+
+Now each response is evaluated independently. Position doesn't matter because there's only one response per evaluation. You can compare final scores without the bias.
+
+Avoiding Pairwise Comparisons​
+
+When you need to compare two agent versions, evaluate each independently:
+
+def compare_agents(
+    response_v1: str,
+    response_v2: str,
+    llm_client: Any
+) -> dict:
+    """
+    Compare two agent responses by grading each independently.
+
+    This avoids position bias from pairwise comparison.
+    """
+    # Grade each response separately
+    score_v1 = grade_response(response_v1, llm_client)
+    score_v2 = grade_response(response_v2, llm_client)
+
+    # Compare scores mathematically
+    v1_passed = score_v1.get("total_passed", 0)
+    v2_passed = score_v2.get("total_passed", 0)
+
+    return {
+        "v1_score": v1_passed,
+        "v2_score": v2_passed,
+        "winner": "v1" if v1_passed > v2_passed else "v2" if v2_passed > v1_passed else "tie",
+        "v1_details": score_v1,
+        "v2_details": score_v2
+    }
+
+
+Output:
+
+{
+  "v1_score": 3,
+  "v2_score": 5,
+  "winner": "v2",
+  "v1_details": {
+    "criteria_results": {
+      "addresses_question": true,
+      "accurate_relevant": true,
+      "appropriate_detail": false,
+      "suitable_tone": false,
+      "user_finds_helpful": true
+    },
+    "total_passed": 3
+  },
+  "v2_details": {
+    "criteria_results": {
+      "addresses_question": true,
+      "accurate_relevant": true,
+      "appropriate_detail": true,
+      "suitable_tone": true,
+      "user_finds_helpful": true
+    },
+    "total_passed": 5
+  }
+}
+
+
+The comparison is now position-independent. Each response gets a score on its own merits. You compare numbers, not ask the LLM to compare responses.
+
+Comparing LLM Judgment to Human Judgment​
+
+How do you know your LLM grader is reliable? You compare it to human judgment.
+
+The process:
+
+Have humans rate a sample of responses (your "ground truth" for quality)
+Run the same responses through your LLM grader
+Calculate agreement between human and LLM scores
+If agreement is low, revise your criteria
+
+Agreement calculation:
+
+def calculate_agreement(
+    human_scores: list[int],
+    llm_scores: list[int]
+) -> dict:
+    """
+    Calculate agreement between human and LLM graders.
+
+    Both should be lists of scores (e.g., 0-5) for same responses.
+    """
+    if len(human_scores) != len(llm_scores):
+        raise ValueError("Score lists must be same length")
+
+    n = len(human_scores)
+
+    # Exact match rate
+    exact_matches = sum(1 for h, l in zip(human_scores, llm_scores) if h == l)
+    exact_rate = exact_matches / n
+
+    # Within-1 agreement (human score 3, LLM score 2 or 4 counts as agreement)
+    within_one = sum(1 for h, l in zip(human_scores, llm_scores) if abs(h - l) <= 1)
+    within_one_rate = within_one / n
+
+    # Average difference
+    avg_diff = sum(abs(h - l) for h, l in zip(human_scores, llm_scores)) / n
+
+    return {
+        "exact_match_rate": exact_rate,
+        "within_one_rate": within_one_rate,
+        "average_difference": avg_diff,
+        "sample_size": n
+    }
+
+
+Output:
+
+human = [5, 4, 3, 4, 2, 5, 3, 4, 5, 3]
+llm = [5, 4, 4, 4, 3, 5, 3, 3, 5, 3]
+
+agreement = calculate_agreement(human, llm)
+print(agreement)
+
+{
+  "exact_match_rate": 0.7,
+  "within_one_rate": 1.0,
+  "average_difference": 0.3,
+  "sample_size": 10
+}
+
+
+Interpreting agreement:
+
+Metric	Good	Acceptable	Poor
+Exact match rate	≥70%	50-70%	≤50%
+Within-one rate	≥90%	75-90%	≤75%
+Average difference	≤0.5	0.5-1.0	≥1.0
+
+If your LLM grader disagrees with human judgment more than 30% of the time, your criteria need revision. Either they're ambiguous (humans and LLM interpret differently) or they're too subjective (even humans would disagree).
+
+Exercise: Create LLM Grader for Task API Helpfulness​
+
+Your Task API agent helps users manage their tasks. Users can ask things like:
+
+"What should I work on next?"
+"Add a task to call the dentist"
+"What's overdue?"
+
+You need to evaluate whether the agent's responses are actually helpful—not just whether they executed correctly.
+
+Step 1: Design 5 binary criteria for "helpfulness" in this context.
+
+Think about what makes a task management response helpful:
+
+Does it understand what the user wanted?
+Does it provide information the user can act on?
+Is it concise enough to be useful?
+Does it match the user's apparent urgency?
+Does it avoid overwhelming with unnecessary options?
+
+Step 2: Write the grader prompt.
+
+TASK_API_GRADER = """
+You are evaluating a task management assistant's response.
+
+For EACH criterion, answer YES or NO:
+
+1. Does the response correctly interpret what the user wanted to accomplish?
+2. Does it provide actionable information or confirmation?
+3. Is the response concise (no unnecessary detail or repetition)?
+4. Does the tone match the apparent urgency of the request?
+5. Does it avoid overwhelming the user with too many options or questions?
+
+User request: {user_request}
+Agent response: {agent_response}
+
+Return JSON:
+{
+  "criteria_results": {
+    "correct_interpretation": true/false,
+    "actionable": true/false,
+    "concise": true/false,
+    "appropriate_urgency": true/false,
+    "not_overwhelming": true/false
+  },
+  "total_passed": N,
+  "explanation": "..."
+}
+"""
+
+
+Step 3: Test with sample exchanges.
+
+Try grading these responses:
+
+Exchange 1:
+
+User: "What should I work on next?"
+Response: "Based on your deadlines, your most urgent task is 'Quarterly report' due tomorrow. After that, 'Client presentation' is due Friday."
+
+Exchange 2:
+
+User: "Add a task to call the dentist"
+Response: "I've added 'Call the dentist' to your task list. Would you like me to set a due date? Also, you have 47 other tasks. Here are some options: you could prioritize by urgency, by project, by context..."
+
+Which scores higher? Why? What criteria did each response fail or pass?
+
+Reflect on Your Skill​
+
+After implementing LLM graders, consider adding these patterns to your agent-evals skill:
+
+Pattern: Binary criteria over numeric scales
+
+When evaluating subjective criteria:
+1. Break quality into 5-7 specific yes/no questions
+2. Each question should be unambiguous enough that two humans would agree
+3. Sum yes answers for final score
+4. Avoid 1-5 scales—they're poorly calibrated
+
+
+Pattern: Independent evaluation over pairwise comparison
+
+When comparing agent versions:
+1. Evaluate each response independently against same criteria
+2. Do NOT ask "which is better?"
+3. Compare final scores mathematically
+4. Position bias makes pairwise unreliable
+
+
+Pattern: Validate against human judgment
+
+Before trusting LLM grader in production:
+1. Collect human ratings on 20+ sample responses
+2. Run same samples through LLM grader
+3. Calculate agreement (target: ≥70% exact, ≥90% within-one)
+4. Revise criteria if agreement is poor
+
+
+Key insight to encode: LLM judges are powerful but imperfect. Binary criteria and independent evaluation compensate for their weaknesses. Always validate against human judgment before trusting automated scores.
+
+Try With AI​
+Prompt 1: Design Binary Criteria for Your Agent​
+I have an agent that [describe your agent]. I need to evaluate whether
+its responses are [describe quality dimension: helpful, accurate, appropriate, etc.].
+
+Help me design 5 binary (yes/no) criteria that capture this quality dimension.
+For each criterion:
+- State it as a complete yes/no question
+- Explain what would make the answer YES vs NO
+- Give an example response that would pass and one that would fail
+
+Make the criteria specific enough that two humans would agree on the answer.
+
+
+What you're learning: Converting vague quality requirements into specific, measurable criteria. The specificity exercise reveals what you actually mean by "helpful" or "appropriate."
+
+Prompt 2: Debug a Low-Agreement Grader​
+My LLM grader only agrees with human judgment 55% of the time. Here are
+my criteria:
+
+[Paste your criteria]
+
+Here are 3 cases where LLM and human disagreed:
+
+Case 1: Human said pass, LLM said fail
+Response: [paste]
+
+Case 2: Human said fail, LLM said pass
+Response: [paste]
+
+Case 3: Human said pass, LLM said fail
+Response: [paste]
+
+Help me understand why we disagree. Are my criteria ambiguous? Is the
+LLM interpreting them differently than humans would? How should I revise?
+
+
+What you're learning: Debugging evaluation criteria is as important as debugging agent code. Disagreement reveals ambiguity in your criteria definitions.
+
+Prompt 3: Create a Task-Specific Grader​
+I need an LLM grader for my [describe specific agent task].
+
+The ideal response should:
+- [Quality dimension 1]
+- [Quality dimension 2]
+- [Quality dimension 3]
+
+Write me a complete grader prompt with:
+1. Context for the LLM judge
+2. 5 binary criteria (yes/no questions)
+3. The response placeholder
+4. JSON output format specification
+
+Then show me example output for a good response and a poor response.
+
+
+What you're learning: Grader design is domain-specific. The criteria for a code review agent differ from those for a customer support agent. AI helps you translate domain expertise into evaluation criteria.
+
+Safety Note​
+
+LLM judges inherit the biases of the models they're based on. They may rate responses higher if they're longer, better formatted, or use certain vocabulary patterns. Always validate LLM grader scores against human judgment before trusting them for important decisions. When in doubt, have humans review borderline cases—the goal is reliable signal, not fully automated judgment.

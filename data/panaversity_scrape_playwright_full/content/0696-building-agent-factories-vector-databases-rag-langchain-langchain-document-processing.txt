@@ -1,0 +1,457 @@
+LangChain Document Processing
+
+Your Task API stores task descriptions as plain text. But when you want to find semantically similar tasks—like "show me tasks related to container deployment" when the actual text says "configure Kubernetes pods"—you need to prepare documents for vector search. The first step: loading your content and splitting it into chunks that preserve meaning.
+
+This lesson teaches you the document processing pipeline that sits between your raw content and the vector store. You'll learn to load documents from multiple sources, split them intelligently, and preserve the metadata that makes retrieval useful.
+
+Why Document Processing Matters​
+
+Raw documents don't go directly into vector databases. Consider a 50-page PDF about your API documentation. If you embed the entire document as one chunk, you'll get one vector representing the average meaning of everything. Search quality suffers because the vector can't represent specific sections accurately.
+
+The solution: split documents into smaller chunks that each represent a focused concept. But splitting naively—every 500 characters regardless of content—breaks sentences mid-thought and loses context.
+
+LangChain solves this with intelligent document loaders and text splitters that:
+
+Extract content while preserving structure
+Split at natural boundaries (paragraphs, sentences)
+Maintain overlap so context isn't lost between chunks
+Preserve metadata for filtering and citation
+Document Loaders: Getting Content In​
+
+LangChain provides specialized loaders for different content types. Each returns a list of Document objects—the universal format for content in LangChain.
+
+The Document Object​
+
+Every document loader produces Document objects with two properties:
+
+from langchain_core.documents import Document
+
+doc = Document(
+    page_content="The actual text content goes here",
+    metadata={"source": "api-docs.pdf", "page": 3, "section": "Authentication"}
+)
+
+
+Output:
+
+Document(page_content='The actual text content goes here', metadata={'source': 'api-docs.pdf', 'page': 3, 'section': 'Authentication'})
+
+
+The page_content holds the text. The metadata dictionary carries source information—essential for citing where answers came from.
+
+TextLoader: Plain Text Files​
+
+The simplest loader reads text files directly:
+
+from langchain_community.document_loaders import TextLoader
+
+loader = TextLoader("task_descriptions.txt", encoding="utf-8")
+docs = loader.load()
+
+print(f"Loaded {len(docs)} document(s)")
+print(f"Content preview: {docs[0].page_content[:100]}...")
+print(f"Metadata: {docs[0].metadata}")
+
+
+Output:
+
+Loaded 1 document(s)
+Content preview: # Task Descriptions
+
+## Setup Docker Environment
+Configure Docker for development including...
+Metadata: {'source': 'task_descriptions.txt'}
+
+
+TextLoader automatically adds the source file path as metadata. You'll use this to trace search results back to their origin.
+
+PyPDFLoader: PDF Documents​
+
+PDF files require specialized parsing. PyPDFLoader extracts text page by page:
+
+from langchain_community.document_loaders import PyPDFLoader
+
+loader = PyPDFLoader("api_reference.pdf")
+docs = loader.load()
+
+print(f"Loaded {len(docs)} pages")
+print(f"Page 1 preview: {docs[0].page_content[:150]}...")
+print(f"Page 1 metadata: {docs[0].metadata}")
+
+
+Output:
+
+Loaded 24 pages
+Page 1 preview: Task API Reference Guide
+
+Version 2.0
+
+This document describes the REST API endpoints for task management including creation, retrieval, update...
+Metadata: {'source': 'api_reference.pdf', 'page': 0}
+
+
+Notice how each page becomes a separate Document. The metadata includes both source and page number—invaluable when users ask "where did this answer come from?"
+
+WebBaseLoader: Web Pages​
+
+Web content requires HTML parsing. WebBaseLoader fetches pages and extracts text:
+
+import bs4
+from langchain_community.document_loaders import WebBaseLoader
+
+# Parse only specific elements to avoid navigation/footer noise
+bs4_strainer = bs4.SoupStrainer(class_=("post-content", "article-body"))
+
+loader = WebBaseLoader(
+    web_paths=("https://docs.example.com/task-api/quickstart",),
+    bs_kwargs={"parse_only": bs4_strainer},
+)
+docs = loader.load()
+
+print(f"Loaded {len(docs)} document(s)")
+print(f"Source: {docs[0].metadata.get('source')}")
+
+
+Output:
+
+Loaded 1 document(s)
+Source: https://docs.example.com/task-api/quickstart
+
+
+The bs4_strainer filters HTML elements—you get article content without navigation menus, footers, and sidebars that would pollute your embeddings.
+
+Text Splitting: Chunking for Retrieval​
+
+Documents loaded, now what? A 10,000-character document won't embed well. You need chunks—but smart chunks that preserve meaning.
+
+The Chunking Challenge​
+
+Consider this paragraph being split at exactly 50 characters:
+
+"Configure Docker for development including network settings and volume mounts."
+
+
+Naive split at character 50:
+
+Chunk 1: "Configure Docker for development including netwo"
+Chunk 2: "rk settings and volume mounts."
+
+The word "network" is broken. Neither chunk makes complete sense. This damages embedding quality.
+
+RecursiveCharacterTextSplitter: The Solution​
+
+LangChain's RecursiveCharacterTextSplitter splits intelligently using a hierarchy of separators:
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,       # Target size in characters
+    chunk_overlap=200,     # Overlap between chunks
+    add_start_index=True,  # Track position in original
+    separators=["\n\n", "\n", " ", ""]  # Split hierarchy
+)
+
+
+How it works:
+
+First tries to split on "\n\n" (paragraph breaks)
+If chunks are still too large, splits on "\n" (line breaks)
+Then on " " (spaces)
+Only uses "" (characters) as last resort
+
+This preserves semantic boundaries. Paragraphs stay together when possible.
+
+Applying the Splitter​
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader
+
+# Load a document
+loader = TextLoader("task_descriptions.txt", encoding="utf-8")
+docs = loader.load()
+
+# Configure splitter
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=100,
+    add_start_index=True,
+)
+
+# Split documents
+splits = text_splitter.split_documents(docs)
+
+print(f"Original: {len(docs)} document(s)")
+print(f"After splitting: {len(splits)} chunk(s)")
+print(f"\nFirst chunk ({len(splits[0].page_content)} chars):")
+print(splits[0].page_content[:200] + "...")
+print(f"\nMetadata: {splits[0].metadata}")
+
+
+Output:
+
+Original: 1 document(s)
+After splitting: 12 chunk(s)
+
+First chunk (487 chars):
+# Task Descriptions
+
+## Setup Docker Environment
+Configure Docker for development including network settings and volume mounts. This task covers:
+- Installing Docker Desktop
+- Configuring daemon.json
+- Setting up Docker Compose...
+
+Metadata: {'source': 'task_descriptions.txt', 'start_index': 0}
+
+
+Notice start_index: 0—this tracks where in the original document each chunk came from. Essential for context expansion later.
+
+Understanding Chunk Overlap​
+
+Why overlap? Imagine searching for "Docker network configuration":
+
+Without overlap:
+
+Chunk 1 ends: "...Docker for development including"
+Chunk 2 starts: "network settings and volume mounts..."
+
+The relevant content spans both chunks, but neither chunk alone captures the full context. With 20% overlap (200 chars for 1000-char chunks), both chunks contain the transitional content.
+
+Visualizing overlap:
+
+Document: [==========CHUNK 1==========]
+                              [==========CHUNK 2==========]
+                                                  [==========CHUNK 3==========]
+          |__________________|
+                overlap
+
+Choosing Parameters​
+
+Parameter selection depends on your use case:
+
+Parameter	Small Values	Large Values
+chunk_size	More chunks, precise retrieval, higher cost	Fewer chunks, more context per chunk, lower cost
+chunk_overlap	Risk losing boundary context	Better continuity, more redundancy
+
+Guidelines for starting values:
+
+chunk_size=1000: Good default. Fits most embedding model context windows.
+chunk_overlap=200: 20% overlap balances continuity vs redundancy.
+add_start_index=True: Always enable for debugging and context expansion.
+
+Adjust based on experimentation—which you'll do in the Try With AI section.
+
+Metadata Preservation​
+
+Metadata flows through the entire pipeline. This matters more than you might expect.
+
+Why Metadata Matters​
+
+When your RAG system answers "How do I configure task priorities?", users want to know:
+
+Which document contained that information?
+What page or section?
+When was it written?
+
+Without metadata, you have answers without sources. With metadata, you can cite and link back.
+
+Metadata Through Splitting​
+
+Watch how metadata propagates:
+
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Document with rich metadata
+doc = Document(
+    page_content="Docker configuration guide. First, install Docker Desktop...",
+    metadata={
+        "source": "devops-guide.pdf",
+        "page": 5,
+        "section": "Container Setup",
+        "author": "DevOps Team",
+        "updated": "2025-01-15"
+    }
+)
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=200,
+    chunk_overlap=50,
+    add_start_index=True
+)
+
+splits = splitter.split_documents([doc])
+
+for i, split in enumerate(splits):
+    print(f"Chunk {i}: {split.metadata}")
+
+
+Output:
+
+Chunk 0: {'source': 'devops-guide.pdf', 'page': 5, 'section': 'Container Setup', 'author': 'DevOps Team', 'updated': '2025-01-15', 'start_index': 0}
+Chunk 1: {'source': 'devops-guide.pdf', 'page': 5, 'section': 'Container Setup', 'author': 'DevOps Team', 'updated': '2025-01-15', 'start_index': 178}
+
+
+Every chunk inherits the parent's metadata, plus gets start_index. This enables:
+
+Filtering: "Search only DevOps Team documents"
+Citation: "Answer found on page 5 of devops-guide.pdf"
+Context expansion: "Get 500 chars before and after this chunk"
+Complete Processing Pipeline​
+
+Let's combine everything into a reusable pipeline:
+
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pathlib import Path
+
+def process_documents(file_paths: list[str], chunk_size: int = 1000, chunk_overlap: int = 200) -> list:
+    """Load and split documents from multiple sources."""
+
+    all_docs = []
+
+    for path in file_paths:
+        file_path = Path(path)
+
+        # Choose loader based on file type
+        if file_path.suffix == ".pdf":
+            loader = PyPDFLoader(str(file_path))
+        elif file_path.suffix in [".txt", ".md"]:
+            loader = TextLoader(str(file_path), encoding="utf-8")
+        else:
+            print(f"Skipping unsupported file: {path}")
+            continue
+
+        docs = loader.load()
+        all_docs.extend(docs)
+        print(f"Loaded {len(docs)} document(s) from {path}")
+
+    # Split all documents
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        add_start_index=True,
+    )
+
+    splits = splitter.split_documents(all_docs)
+    print(f"\nTotal chunks: {len(splits)}")
+
+    return splits
+
+# Example usage
+files = ["task_descriptions.txt", "api_reference.pdf"]
+chunks = process_documents(files, chunk_size=800, chunk_overlap=150)
+
+
+Output:
+
+Loaded 1 document(s) from task_descriptions.txt
+Loaded 24 document(s) from api_reference.pdf
+
+Total chunks: 89
+
+
+This pipeline handles mixed content types, applies consistent splitting, and preserves all metadata. The chunks are ready for embedding and storage in Qdrant (next lesson).
+
+Common Pitfalls and Solutions​
+Pitfall 1: Chunks Too Small​
+
+If chunk_size=100, you get many tiny chunks that lack context:
+
+"Configure Docker"
+"for development"
+"including network"
+
+Each chunk is too fragmented to represent a useful concept.
+
+Solution: Start with chunk_size=1000 and decrease only if chunks contain too many unrelated concepts.
+
+Pitfall 2: No Overlap​
+
+With chunk_overlap=0, boundary content gets lost. Searches for concepts that span chunk boundaries fail.
+
+Solution: Use 10-20% overlap. For 1000-char chunks, 100-200 overlap.
+
+Pitfall 3: Ignoring Metadata​
+
+Loading documents without preserving source information makes debugging impossible and removes citation capability.
+
+Solution: Always keep metadata from loaders. Add custom metadata when loading programmatically:
+
+doc = Document(
+    page_content=content,
+    metadata={"source": "manual_entry", "category": "tasks", "priority": "high"}
+)
+
+Reflect on Your Skill​
+
+You built a rag-deployment skill in Lesson 0. Now test it with document processing concepts.
+
+Test Your Skill​
+
+Ask your skill:
+
+"I have a 500-page PDF manual. What chunk_size and chunk_overlap would you recommend, and why?"
+
+Identify Gaps​
+
+Does your skill know about:
+
+Different document loaders for different file types?
+The separator hierarchy in RecursiveCharacterTextSplitter?
+Why add_start_index enables context expansion?
+Improve Your Skill​
+
+If gaps exist, update your skill with document processing patterns from this lesson.
+
+Try With AI​
+
+Document processing parameters significantly affect RAG quality. Experiment to understand the tradeoffs.
+
+Prompt 1: Compare Chunking Strategies​
+I have a markdown file with 15 sections, each about 2000 characters.
+Compare these chunking approaches:
+
+1. chunk_size=500, chunk_overlap=100
+2. chunk_size=2000, chunk_overlap=400
+3. chunk_size=1000, chunk_overlap=200
+
+For each, explain:
+- How many chunks I'd get approximately
+- What retrieval behavior to expect
+- When this configuration makes sense
+
+
+What you're learning: How parameter choices create different retrieval characteristics. Smaller chunks = precise but fragmented. Larger chunks = more context but less focused.
+
+Prompt 2: Debug a Loading Pipeline​
+I'm loading documents with this code but getting empty results:
+
+loader = TextLoader("docs/README.md")
+docs = loader.load()
+print(len(docs))  # Shows 0
+
+The file definitely exists and has content. Help me debug:
+1. What could cause empty results?
+2. How do I verify the file is being read correctly?
+3. What encoding issues might occur?
+
+
+What you're learning: Troubleshooting document loading failures—encoding mismatches, path issues, and verification techniques.
+
+Prompt 3: Design for Your Domain​
+I'm building RAG for my Task API documentation. The content includes:
+- API endpoint descriptions (200-500 chars each)
+- Code examples (50-300 chars)
+- Conceptual explanations (1000-3000 chars)
+
+Design a chunking strategy that:
+1. Keeps API endpoints as complete units
+2. Preserves code examples intact
+3. Handles long explanations appropriately
+
+Include specific parameter recommendations and explain your reasoning.
+
+
+What you're learning: Applying chunking strategy to real-world content with varying structure—the core skill for production RAG systems.
+
+Safety Note: When loading documents from external URLs with WebBaseLoader, only fetch from trusted sources. Malicious content could affect your embeddings and RAG outputs.

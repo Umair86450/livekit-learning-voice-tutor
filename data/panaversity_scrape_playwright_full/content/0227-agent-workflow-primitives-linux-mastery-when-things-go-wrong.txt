@@ -1,0 +1,220 @@
+When Things Go Wrong
+
+Sunday night. Agent deployed, unkillable, locked down. Ali checks the dashboard. The latest pricing report is empty. Not an error message, just empty. The agent ran on schedule, connected to the database, generated a report, and saved it. The report contains nothing.
+
+Board meeting at 9 AM. Twelve hours.
+
+Ali's first instinct: restart everything. The agent. The database. Maybe the whole server.
+
+"Every bad debugger has one move: restart. Every good debugger has a system."
+
+Restarting might fix the symptom. But if the root cause is still there, the problem comes back: probably at 3 AM before the next board meeting. Ali needs to find the cause, not mask it.
+
+The LNPS Method​
+
+When an agent fails, resist the urge to restart. Instead, follow four steps in order. Each step either finds the problem or eliminates a category of causes.
+
+Step	Check	What You're Asking	Tools
+L: Logs	Service logs	"What did the agent say happened?"	journalctl -u service
+N: Network	Connectivity	"Can the agent reach what it needs?"	curl, ping, ss
+P: Process	Process state	"Is the agent actually running? Is it stuck?"	systemctl status, ps
+S: System	Server resources	"Does the server have enough memory, disk, CPU?"	df -h, free -h, top
+
+The order matters. Logs are the fastest path to the answer: the agent often tells you what went wrong. Network is next because connectivity failures are common and non-obvious. Process checks catch zombie or stuck services. System resources catch exhaustion problems.
+
+Step L: Read the Logs​
+
+What you tell Claude Code: "Show me the competitor-tracker logs from the last 6 hours. Focus on errors and warnings."
+
+What the agent does:
+
+journalctl -u competitor-tracker --since "6 hours ago" --priority=warning
+
+
+What you see:
+
+Feb 28 02:15:33 server competitor-tracker[4821]: Starting competitor tracker agent...
+Feb 28 02:15:34 server competitor-tracker[4821]: Connected to database
+Feb 28 02:15:34 server competitor-tracker[4821]: Fetching pricing data...
+Feb 28 02:15:35 server competitor-tracker[4821]: WARNING: Query returned 0 rows
+Feb 28 02:15:35 server competitor-tracker[4821]: Report generated: 0 entries
+Feb 28 02:15:35 server competitor-tracker[4821]: Report saved to /opt/agents/competitor-tracker/data/report.csv
+
+
+No crashes. No errors. The agent connected, queried the database, got zero rows, and dutifully saved an empty report. The agent did exactly what it was told. The problem isn't the agent: the problem is upstream.
+
+What you tell Claude Code: "The agent got zero rows from the database. Check if the database service is running and if it has data."
+
+What the agent does:
+
+systemctl status postgresql
+
+
+What you see:
+
+● postgresql.service - PostgreSQL RDBMS
+     Active: inactive (dead)
+
+
+The database is not running. The agent connected (it's configured to retry), eventually got an empty result set, and reported it faithfully. The mystery is solved, but why is the database down?
+
+journalctl -u postgresql --since "12 hours ago" | tail -20
+
+Feb 27 22:00:01 server systemd[1]: Stopping PostgreSQL RDBMS...
+Feb 27 22:00:03 server systemd[1]: postgresql.service: Deactivated successfully.
+Feb 28 03:15:00 server systemd[1]: postgresql.service not found in boot target
+
+
+The server rebooted for security updates at 10 PM. PostgreSQL restarted, but it was never enabled at boot. Ali enabled his agent with systemctl enable competitor-tracker. He never enabled the database.
+
+The fix:
+
+sudo systemctl enable postgresql
+sudo systemctl start postgresql
+
+
+Pause.
+
+The root cause wasn't a code bug. It wasn't a network problem. It wasn't a crashed agent. It was an infrastructure oversight: the database wasn't configured to start on boot. Restarting the agent would have changed nothing. Reading the logs found the answer in under two minutes.
+
+Step N: Check the Network​
+
+If the logs show connection errors instead of empty results, the problem is often network connectivity. The agent can't reach something it needs.
+
+What you tell Claude Code: "Check if the agent can reach the external pricing API at api.pricingdata.com on port 443."
+
+What the agent does:
+
+curl -I https://api.pricingdata.com/health
+
+
+What you see if it works:
+
+HTTP/2 200
+content-type: application/json
+
+
+What you see if it fails:
+
+curl: (7) Failed to connect to api.pricingdata.com port 443: Connection refused
+
+
+Connection refused means either the remote server is down or a firewall is blocking the connection. Connection timed out means the packets aren't reaching the destination at all.
+
+To check if the server can reach the internet generally:
+
+ping -c 3 8.8.8.8
+
+
+If ping works but curl doesn't, the problem is specific to that service or port. If ping also fails, the server has no internet connectivity: check DNS and network configuration.
+
+Step P: Check the Process​
+
+Sometimes the agent appears to be running but isn't actually doing work. It might be stuck in an infinite loop, waiting for a resource that will never become available, or consuming all available CPU without producing output.
+
+What you tell Claude Code: "Is the competitor-tracker process actually running? How much CPU and memory is it using?"
+
+What the agent does:
+
+systemctl status competitor-tracker
+ps aux | grep competitor-tracker
+
+
+What to look for:
+
+Symptom	Likely Cause
+Status: active (running) but CPU is 100%	Agent stuck in infinite loop
+Status: active (running) but CPU is 0%	Agent waiting/sleeping (might be normal)
+Status: activating (auto-restart)	Agent crashing and restarting repeatedly
+Status: failed	Agent crashed and didn't restart: check Restart= policy
+Step S: Check System Resources​
+
+If logs, network, and process all look fine, the server itself might be running out of resources.
+
+What you tell Claude Code: "Check the server's disk space, memory, and CPU usage."
+
+What the agent does:
+
+df -h /
+free -h
+uptime
+
+
+What you see:
+
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        50G   48G  2.0G  96% /
+
+              total        used        free
+Mem:          2.0Gi       1.8Gi       200Mi
+
+ load average: 0.15, 0.10, 0.08
+
+Resource	Warning Sign	Impact
+Disk 96%+ full	/var/log fills up, services can't write	Agent can't save reports or logs
+Memory 90%+ used	OOM killer starts terminating processes	Agent gets randomly killed
+Load average > CPU cores	Server is overloaded	Everything runs slow
+The LNPS Method in Summary​
+
+Print this. Tape it to your monitor. Use it every time.
+
+AGENT FAILURE TRIAGE
+━━━━━━━━━━━━━━━━━━━
+
+1. LOGS    → journalctl -u <service> --since "1 hour ago"
+             What did the agent say happened?
+
+2. NETWORK → curl <endpoint>, ping <host>
+             Can the agent reach what it needs?
+
+3. PROCESS → systemctl status <service>, ps aux
+             Is the agent running? Is it stuck?
+
+4. SYSTEM  → df -h, free -h, uptime
+             Does the server have resources?
+
+━━━━━━━━━━━━━━━━━━━
+DO NOT RESTART UNTIL YOU KNOW THE CAUSE.
+
+Ali's Resolution​
+
+Ali followed the LNPS method. Logs revealed the database returned zero rows. Checking the database process showed it was inactive. The database journal showed it wasn't enabled at boot.
+
+Two commands fixed it: enable and start. The database came back. The agent's next scheduled run produced a full pricing report. Ali reviewed the data, formatted the summary, and sent it to his client at 7 AM: two hours before the board meeting.
+
+The client never knew it was a close call.
+
+Monday morning. The board meeting goes well. Ali's competitor-tracker runs on Dev's server. It survives reboots, restarts after crashes, runs under a dedicated user with locked-down permissions, and Ali knows how to diagnose it when things go wrong.
+
+He thinks: "What if I could do this from zero? Not three days of figuring things out, just sit down and deploy, following a checklist?"
+
+Try With AI​
+Prompt 1: Group Errors by Type​
+Show me all the logs for my service from the last 24 hours.
+Group the errors by type — how many connection errors, how many
+timeout errors, how many permission errors? Which type is most
+common? What does the pattern tell us about the root cause?
+
+
+What you're practicing: Log analysis at scale. Individual error messages are data points. Patterns across many errors tell the real story. A dozen timeout errors at 3 AM points to a scheduled maintenance window, not a code bug.
+
+Prompt 2: Apply LNPS to a Different Scenario​
+My web application is slow — pages take 10 seconds to load.
+Walk me through the LNPS method for this scenario. What would
+you check at each step? What would the output look like for
+different root causes (database slow, memory exhaustion, network
+latency, application bug)?
+
+
+What you're practicing: Transferring the LNPS framework to a different problem type. The method works for any service failure, not just agent failures. Slowness is a failure mode too.
+
+Prompt 3: Why Not Restart First?​
+I've heard "have you tried turning it off and on again?" is the
+universal tech support answer. Why does the LNPS method say NOT
+to restart first? Give me a concrete example where restarting
+hides a serious problem that gets worse over time.
+
+
+What you're practicing: Understanding why systematic diagnosis matters. Restarting is tempting because it's fast. But speed without understanding creates recurring failures and erodes trust in the system.
+
+Flashcards Study Aid​

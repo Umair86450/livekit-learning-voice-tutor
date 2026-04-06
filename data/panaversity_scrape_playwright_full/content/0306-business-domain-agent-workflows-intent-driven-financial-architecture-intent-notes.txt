@@ -1,0 +1,235 @@
+Intent Notes: Guardrail 3
+
+The senior analyst who built the quarterly model retired last month. The model still works. Numbers flow through the Assumptions layer, Named Range formulas calculate in the Calculation layer, and the Output layer produces a clean board deck. LaTeX verification documents confirm the complex formulas are mathematically correct. Everything that Guardrails 1 and 2 protect is intact.
+
+But nobody can explain why the Year 3 COGS formula uses a declining efficiency factor. There is no record of whether that efficiency gain was based on a supplier contract, a manufacturing projection, or a negotiation target. The formula is COGS_Pct_Y3 = COGS_Pct_Y2 - Inp_COGS_Efficiency: mechanically clear, but business-silent. The Named Ranges tell you what is being calculated. They do not tell you why.
+
+In Lesson 5, you learned to verify that a formula is mathematically correct before committing it to a model. That guardrail ensures the formula does what the analyst intended. But LaTeX verification does not record the intention itself. If the analyst who wrote the formula leaves, the verified math survives; but the business reasoning behind it does not. Intent Notes close that gap. They are the third guardrail: the permanent audit trail that documents why every AI-generated formula exists.
+
+What Is an Intent Note?​
+
+An Intent Note is a structured Excel Note (or Comment) attached to a cell containing a Named Range formula. It is not a general annotation. It follows a specific five-field format designed for one purpose: making the business intent behind a formula permanently visible, so that any reader (human or AI) can understand what the formula was designed to calculate without asking the person who wrote it.
+
+The format:
+
+INTENT:      [Plain-English rule this formula encodes]
+FORMULA:     [LaTeX expression verified before writing]
+ASSUMPTIONS: [Named Ranges this formula depends on]
+GENERATED:   [Date / session identifier]
+MODIFIED:    [Date and modifier — updated on each change]
+
+
+Each field serves a distinct purpose in the audit trail:
+
+Field	What It Records	Why It Matters
+INTENT	The business rule in plain English	An auditor reads this first: it tells them what the formula is supposed to do, without reading the formula itself
+FORMULA	The LaTeX-verified mathematical expression	Cross-references with the Guardrail 2 verification: confirms the math was checked before writing
+ASSUMPTIONS	The Named Ranges the formula depends on	Traces the dependency chain: if any assumption changes, every formula listing it in ASSUMPTIONS is flagged for review
+GENERATED	When the formula was first created	Establishes provenance: was this formula built during the original model construction or added later?
+MODIFIED	When the formula was last changed, and by whom	The audit-critical field: when MODIFIED exists, it means the formula has been altered after its original creation
+Intent Notes in the GP Waterfall​
+
+In Lessons 3 through 5, you built the Gross Profit Waterfall with Named Range formulas and extended it with WACC and NPV. In Lesson 5, you verified the complex formulas in LaTeX. Now each formula gets an Intent Note that documents the business reasoning.
+
+Intent Note on Revenue_Y2:
+
+INTENT:      Year 2 Revenue equals Year 1 Revenue grown by the
+             annual revenue growth rate assumption.
+FORMULA:     Revenue(n) = Revenue(n-1) x (1 + g)
+ASSUMPTIONS: Revenue_Y1, Inp_Rev_Growth
+GENERATED:   2026-03-01 / IDFA-session-001
+MODIFIED:    —
+
+
+Intent Note on COGS_Pct_Y2:
+
+INTENT:      Year 2 COGS percentage equals Year 1 COGS percentage
+             reduced by the annual efficiency gain, reflecting scale
+             improvements that lower cost per unit of revenue.
+FORMULA:     COGS_Pct(n) = COGS_Pct(n-1) - efficiency_gain
+ASSUMPTIONS: COGS_Pct_Y1, Inp_COGS_Efficiency
+GENERATED:   2026-03-01 / IDFA-session-001
+MODIFIED:    —
+
+
+Intent Note on Gross_Profit_Y3:
+
+INTENT:      Gross Profit equals Revenue minus Cost of Goods Sold.
+             COGS is calculated as a percentage of Revenue, where the
+             percentage declines each year by the efficiency gain factor.
+FORMULA:     Gross_Profit = Revenue - COGS
+ASSUMPTIONS: Revenue_Y3, COGS_Y3
+GENERATED:   2026-03-01 / IDFA-session-001
+MODIFIED:    —
+
+
+Notice what each Intent Note achieves. The COGS_Pct_Y2 note explains why the percentage declines: scale improvements lowering cost per unit. That reasoning is now permanently attached to the cell. When the original analyst leaves, the logic stays.
+
+Why Divergence Is the Audit Trail​
+
+The real power of Intent Notes is not what they say when they are accurate. It is what they reveal when they are not.
+
+Suppose six months from now, a colleague modifies the COGS efficiency assumption. Instead of a flat 1% annual improvement, they change it to a compounding formula: COGS_Pct_Y2 = COGS_Pct_Y1 * (1 - Inp_COGS_Efficiency). The formula now compounds rather than subtracts. But the Intent Note still says "reduced by the annual efficiency gain": a subtraction.
+
+That divergence between the Intent Note and the formula is visible. An auditor reading the cell sees immediately that the documented intent (linear reduction) does not match the actual formula (compounding reduction). The mismatch does not tell the auditor which version is correct; but it tells them that something changed, and that the change needs investigation.
+
+Without the Intent Note, the modification would be invisible. The formula would calculate. The numbers would flow. And nobody would know that the model's COGS logic had shifted from linear to compounding until the variance showed up in the quarterly results.
+
+The principle: Intent Notes do not prevent modifications. They make modifications visible. And in financial modelling, visibility is the audit trail.
+
+Generating Intent Notes with Claude​
+
+Writing Intent Notes by hand for every formula in a model would be tedious. The cowork pattern solves this: Claude generates the Intent Notes, and the analyst reviews them for accuracy.
+
+Here is how this works with the GP Waterfall formulas you built in Lessons 3 through 5.
+
+Your prompt to Claude:
+
+Review the Calculation layer of the GP Waterfall model. For every
+Named Range formula, generate an Intent Note using this format:
+
+INTENT:      [Plain-English business rule]
+FORMULA:     [LaTeX expression]
+ASSUMPTIONS: [Named Ranges this formula depends on]
+GENERATED:   [Today's date / current session]
+MODIFIED:    —
+
+Start with Revenue_Y1 and work through every formula in dependency order.
+
+
+Claude's response includes Intent Notes for all twelve formulas in the model: Revenue (Y1-Y3), COGS_Pct (Y1-Y3), COGS (Y1-Y3), and Gross_Profit (Y1-Y3). Each note follows the format. Each lists the correct Named Range dependencies.
+
+Your review checks three things for every generated note:
+
+Is the INTENT field accurate? Does the plain-English description match what the formula actually does, including the business reasoning? Claude correctly identifies the arithmetic but may miss contextual reasoning: for example, it might say "COGS percentage decreases by 1%" without explaining that this represents scale efficiency.
+
+Is the ASSUMPTIONS field complete? Does it list every Named Range the formula reads? For simple formulas this is straightforward. For formulas with indirect dependencies, Claude may miss a link.
+
+Is the FORMULA field consistent with the LaTeX verification from Lesson 5? The LaTeX in the Intent Note should match the verified expression, not a new rendering.
+
+This is the cowork pattern at its most productive. Claude produces twelve Intent Notes in seconds. Your domain knowledge catches the nuances the agent's structural reading misses. The result is faster and more accurate than either party working alone.
+
+Exercise: Generate Intent Notes for the GP Waterfall​
+
+Your GP Waterfall now has GP formulas from Lessons 3-4 plus WACC and NPV from Lesson 5. All of these formulas need Intent Notes.
+
+Step 1: Prompt Cowork to Generate Intent Notes​
+
+Open the GP Waterfall spreadsheet in Cowork and type:
+
+Review every Named Range formula in this spreadsheet. For each one,
+generate an Intent Note using this format:
+
+INTENT:      [Plain-English business rule]
+FORMULA:     [LaTeX expression]
+ASSUMPTIONS: [Named Ranges this formula depends on]
+GENERATED:   [Today's date / current session]
+MODIFIED:    —
+
+Start with the Calculation layer formulas (Revenue, COGS, Gross Profit),
+then do WACC and NPV. Work in dependency order.
+
+Step 2: Verify the Generated Notes​
+
+Review each Intent Note Cowork produced. Check three things:
+
+Is the INTENT field specific enough? "COGS percentage decreases" is too vague. "COGS percentage decreases by the annual efficiency gain, reflecting scale improvements" captures the business reasoning.
+Is the ASSUMPTIONS field complete? Every Named Range the formula reads should be listed. For WACC, that includes Equity_Value, Debt_Value, Cost_of_Equity, Cost_of_Debt, and Tax_Rate.
+Does the FORMULA field match the LaTeX you verified in Lesson 5? The WACC Intent Note should show the same LaTeX expression with the tax shield on the debt term.
+
+Pay special attention to the WACC and NPV Intent Notes: these are the formulas where Cowork is most likely to miss business context (e.g., why the tax shield matters, why the initial investment is at period 0).
+
+Step 3: Extend: Correct and Refine​
+
+Pick the weakest Intent Note Cowork produced: the one with the vaguest INTENT or the most incomplete ASSUMPTIONS. Ask Cowork to improve it:
+
+The Intent Note for [formula name] is too vague. The INTENT field
+should explain WHY this calculation exists, not just WHAT it does.
+Rewrite it with the business reasoning included. Also check that
+the ASSUMPTIONS field lists every Named Range this formula reads.
+
+
+Compare the original and refined versions. The difference between "what" and "why" is what makes Intent Notes valuable for audit.
+
+KEEP THIS FILE
+
+Save this spreadsheet: you will use it for what-if analysis and goal-seeking in Lesson 7.
+
+The Business Bottom Line: Institutional Memory​
+
+When a formula and its Intent Note agree, the model is self-documenting. When they diverge, the divergence is visible. Either way, the business logic is permanently recorded at the cell level; not in a separate document that drifts, not in an email that gets deleted, not in the analyst's memory that walks out the door.
+
+Intent Notes are institutional memory. They answer the question every finance team dreads: "The analyst who built this model left. Can anyone explain how it works?" With Intent Notes, the answer is yes, because the explanation is attached to every formula, in a structured format that both human auditors and AI agents can read.
+
+For audit firms, Intent Notes transform the verification process. Instead of manually tracing every formula back to its business rule (which is what auditors spend weeks doing on coordinate-based models) the auditor reads the INTENT field, compares it to the formula, and flags any divergence. The audit moves from reconstruction to verification.
+
+Capability Preview: Logic De-compilation​
+
+In the capstone lesson (Lesson 11), you will validate all five Finance Domain Agent capabilities. Capability 3 is Logic De-compilation: the agent reads an unfamiliar model's formulas and Intent Notes, then reconstructs the complete business logic as a structured narrative.
+
+Intent Notes make this capability possible. Without them, the agent can only report the arithmetic ("this cell equals that cell minus that cell." With Intent Notes, the agent can report the business logic) "Gross Profit is calculated as Revenue minus COGS, where COGS declines annually due to scale efficiency gains documented in the COGS percentage Intent Note."
+
+The Intent Notes you write in this lesson become the input to that capability test. The quality of the documentation determines the quality of the de-compilation.
+
+Try With AI​
+SETUP
+
+Open Cowork with the GP Waterfall spreadsheet from Lessons 3-5 (including WACC and NPV). If you do not have the model built, you can describe the formulas to Claude and work from the descriptions.
+
+Prompt 1: Generate an Intent Note for a specific formula:
+
+Here is a Named Range formula from my GP Waterfall model:
+
+Revenue_Y2 = Revenue_Y1 * (1 + Inp_Rev_Growth)
+
+Generate a complete Intent Note using this format:
+INTENT: [plain-English business rule]
+FORMULA: [LaTeX expression]
+ASSUMPTIONS: [Named Ranges this formula depends on]
+GENERATED: [today's date / this session]
+MODIFIED: —
+
+Explain your reasoning for the INTENT field.
+
+
+What you are learning: How Claude infers business intent from Named Range structure. The agent reads the variable names and formula pattern to construct the plain-English description. Review whether the INTENT field captures the why (growth assumption) or only the what (multiplication).
+
+Prompt 2: Review an existing Intent Note for accuracy:
+
+Here is an Intent Note I wrote for a formula in my GP Waterfall:
+
+INTENT:      COGS percentage for Year 2 is lower than Year 1.
+FORMULA:     COGS_Pct(n) = COGS_Pct(n-1) - efficiency_gain
+ASSUMPTIONS: COGS_Pct_Y1
+GENERATED:   2026-03-01
+
+Review this Intent Note. Is the INTENT field specific enough for
+an auditor? Is the ASSUMPTIONS field complete? What is missing?
+
+
+What you are learning: How to use Claude as a quality reviewer for your own documentation. The Intent Note above has two deliberate problems: the INTENT field says what happens (lower) but not why (scale efficiency), and the ASSUMPTIONS field is missing Inp_COGS_Efficiency. See whether Claude catches both.
+
+Prompt 3: Compare a documented formula with an undocumented one:
+
+I have two formulas from two different financial models.
+
+Formula A (with Intent Note):
+Formula: Gross_Profit_Y3 = Revenue_Y3 - COGS_Y3
+INTENT: Gross Profit equals Revenue minus COGS, where COGS
+        declines annually due to scale efficiency.
+ASSUMPTIONS: Revenue_Y3, COGS_Y3
+
+Formula B (no Intent Note, coordinate-based):
+=B14-(C14*$F$8)
+
+For each formula, tell me:
+1. What business rule does this formula encode?
+2. What assumptions does it depend on?
+3. How confident are you in your answers?
+
+
+What you are learning: The difference in agent capability between a documented IDFA formula and an undocumented coordinate-based formula. Claude will answer Formula A with high confidence and specificity. For Formula B, it will describe the arithmetic but qualify that it cannot determine the business intent. This contrast demonstrates why Intent Notes exist.
+
+Flashcards Study Aid​
+
+Next: Lesson 7: Delegated Calculation (Guardrail 4) the final guardrail that ensures every number an agent reports comes from the model's deterministic calculation, never from the agent's internal arithmetic.

@@ -1,0 +1,493 @@
+Qdrant Vector Store with LangChain
+
+You have documents chunked and ready for indexing. You have an embedding model that converts text into 1536-dimensional vectors. Now you need somewhere to store those vectors and search them efficiently.
+
+That somewhere is a vector database. And for production RAG systems, Qdrant has become the go-to choice for Python developers: it is open source, runs anywhere from Docker to cloud, and integrates seamlessly with LangChain.
+
+By the end of this lesson, you will have Qdrant running locally, your documents indexed, and semantic search working. Your Task API from Chapter 70 is about to get much smarter.
+
+Why Qdrant?​
+
+Before we deploy anything, you should understand why we chose Qdrant over alternatives like Pinecone, Weaviate, or Chroma:
+
+Feature	Qdrant	Why It Matters
+Open source	Apache 2.0	No vendor lock-in; inspect and modify
+Docker-first	Single command	Runs identically on laptop and production
+Hybrid search	Dense + sparse vectors	Best of semantic AND keyword search
+LangChain native	langchain-qdrant package	First-class integration, not a wrapper
+Filtering	Payload-based	Combine vector similarity with metadata
+
+For your Task API, this means you can find tasks by meaning ("deployment-related work") while also filtering by status or priority—something pure keyword search cannot do.
+
+Step 1: Deploy Qdrant with Docker​
+
+Open your terminal and run:
+
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+
+
+Output:
+
+...
+[INFO] Qdrant gRPC listening on 0.0.0.0:6334
+[INFO] Qdrant REST API listening on 0.0.0.0:6333
+[INFO] Qdrant is ready to accept connections
+
+
+Qdrant exposes two ports:
+
+6333: REST API (what LangChain uses by default)
+6334: gRPC API (higher performance for production)
+
+Verify it is running by opening your browser to http://localhost:6333/dashboard. You should see the Qdrant web interface with an empty collections list.
+
+Note: For production, add volume persistence: docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage qdrant/qdrant. This ensures your vectors survive container restarts.
+
+Step 2: Install Dependencies​
+
+You need three packages beyond what you installed in Lesson 3:
+
+pip install langchain-qdrant qdrant-client fastembed
+
+Package	Purpose
+langchain-qdrant	QdrantVectorStore integration
+qdrant-client	Low-level Qdrant operations
+fastembed	Fast sparse embeddings for hybrid search
+Step 3: Initialize QdrantVectorStore​
+
+LangChain provides three initialization patterns depending on your use case.
+
+Pattern A: In-Memory (Testing)​
+
+For unit tests and experimentation, you do not need Docker at all:
+
+from langchain_openai import OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
+
+# Create embeddings model
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# In-memory Qdrant client
+client = QdrantClient(":memory:")
+
+# Create collection with vector configuration
+client.create_collection(
+    collection_name="task_docs",
+    vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+)
+
+# Initialize vector store
+vector_store = QdrantVectorStore(
+    client=client,
+    collection_name="task_docs",
+    embedding=embeddings,
+)
+
+print(f"Vector store ready: {vector_store.collection_name}")
+
+
+Output:
+
+Vector store ready: task_docs
+
+
+When to use: Tests, prototyping, learning. Data disappears when Python exits.
+
+Pattern B: Docker/Server (Development & Production)​
+
+For persistent storage, connect to your running Qdrant instance:
+
+from langchain_openai import OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# Connect to Qdrant and create collection from documents
+vector_store = QdrantVectorStore.from_documents(
+    documents=splits,  # Your chunked documents from Lesson 3
+    embedding=embeddings,
+    url="http://localhost:6333",
+    collection_name="task_docs",
+)
+
+print(f"Indexed {len(splits)} documents")
+
+
+Output:
+
+Indexed 42 documents
+
+
+When to use: Development on your machine, staging environments, production with Docker Compose or Kubernetes.
+
+Pattern C: From Existing Collection​
+
+When your collection already exists (after a restart or in a shared environment):
+
+from langchain_openai import OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# Connect to existing collection (no documents needed)
+vector_store = QdrantVectorStore.from_existing_collection(
+    embedding=embeddings,
+    collection_name="task_docs",
+    url="http://localhost:6333",
+)
+
+print(f"Connected to existing collection: {vector_store.collection_name}")
+
+
+Output:
+
+Connected to existing collection: task_docs
+
+
+When to use: Application restarts, multiple services sharing one Qdrant instance, production deployments.
+
+Step 4: Add Documents​
+
+Once your vector store is initialized, you can add documents in batches:
+
+from langchain_core.documents import Document
+from uuid import uuid4
+
+# Sample task documents (in production, these come from your Task API database)
+documents = [
+    Document(
+        page_content="Set up Docker containers for the FastAPI application. Include multi-stage builds for smaller images.",
+        metadata={"task_id": 1, "title": "Docker Setup", "priority": "high"},
+    ),
+    Document(
+        page_content="Deploy the Task API to Kubernetes cluster. Configure horizontal pod autoscaling for traffic spikes.",
+        metadata={"task_id": 2, "title": "K8s Deployment", "priority": "high"},
+    ),
+    Document(
+        page_content="Write unit tests for the task CRUD endpoints. Aim for 80% code coverage.",
+        metadata={"task_id": 3, "title": "Unit Tests", "priority": "medium"},
+    ),
+    Document(
+        page_content="Implement user authentication using OAuth2 with JWT tokens. Support refresh token rotation.",
+        metadata={"task_id": 4, "title": "Auth System", "priority": "high"},
+    ),
+    Document(
+        page_content="Set up CI/CD pipeline with GitHub Actions. Include linting, testing, and automatic deployment.",
+        metadata={"task_id": 5, "title": "CI/CD Pipeline", "priority": "medium"},
+    ),
+]
+
+# Generate unique IDs for each document
+uuids = [str(uuid4()) for _ in documents]
+
+# Add to vector store
+vector_store.add_documents(documents=documents, ids=uuids)
+
+print(f"Added {len(documents)} documents to vector store")
+
+
+Output:
+
+Added 5 documents to vector store
+
+
+Why UUIDs matter: Qdrant uses these IDs for updates and deletions. If you add a document with the same ID, it replaces the existing one—useful for keeping your vector store in sync with your database.
+
+Step 5: Similarity Search​
+
+Now for the payoff. Search by meaning, not keywords:
+
+# Semantic search - finds documents by meaning
+query = "container orchestration"
+results = vector_store.similarity_search(query, k=3)
+
+print(f"Query: '{query}'")
+print(f"Found {len(results)} relevant documents:\n")
+
+for i, doc in enumerate(results, 1):
+    print(f"{i}. Task: {doc.metadata.get('title')}")
+    print(f"   Priority: {doc.metadata.get('priority')}")
+    print(f"   Content: {doc.page_content[:100]}...")
+    print()
+
+
+Output:
+
+Query: 'container orchestration'
+Found 3 relevant documents:
+
+1. Task: K8s Deployment
+   Priority: high
+   Content: Deploy the Task API to Kubernetes cluster. Configure horizontal pod autoscaling for traffic s...
+
+2. Task: Docker Setup
+   Priority: high
+   Content: Set up Docker containers for the FastAPI application. Include multi-stage builds for smaller...
+
+3. Task: CI/CD Pipeline
+   Priority: medium
+   Content: Set up CI/CD pipeline with GitHub Actions. Include linting, testing, and automatic deploymen...
+
+
+Notice: the query "container orchestration" matched Kubernetes and Docker tasks even though neither document contains those exact words. That is semantic search in action.
+
+Search with Scores​
+
+To understand how relevant each result is:
+
+results_with_scores = vector_store.similarity_search_with_score(query, k=3)
+
+print(f"Query: '{query}'\n")
+for doc, score in results_with_scores:
+    print(f"Score: {score:.3f} | {doc.metadata.get('title')}")
+
+
+Output:
+
+Query: 'container orchestration'
+
+Score: 0.847 | K8s Deployment
+Score: 0.792 | Docker Setup
+Score: 0.634 | CI/CD Pipeline
+
+
+Higher scores mean stronger semantic similarity. You can use this to filter out weak matches:
+
+# Only return results above a relevance threshold
+MIN_SCORE = 0.7
+strong_matches = [
+    (doc, score) for doc, score in results_with_scores
+    if score >= MIN_SCORE
+]
+print(f"Strong matches (score >= {MIN_SCORE}): {len(strong_matches)}")
+
+
+Output:
+
+Strong matches (score >= 0.7): 2
+
+Step 6: Retrieval Modes​
+
+Qdrant supports three retrieval modes, each with different tradeoffs:
+
+Dense Retrieval (Default)​
+
+What you have been using. Embeddings capture semantic meaning:
+
+# This is the default mode
+vector_store = QdrantVectorStore(
+    client=client,
+    collection_name="task_docs",
+    embedding=embeddings,
+    # retrieval_mode defaults to RetrievalMode.DENSE
+)
+
+
+Strengths: Finds semantically similar documents even with different words ("car" matches "automobile").
+
+Weaknesses: May miss exact keyword matches; struggles with proper nouns and technical terms.
+
+Sparse Retrieval (BM25)​
+
+Traditional keyword-based search using sparse vectors:
+
+from langchain_qdrant import FastEmbedSparse, RetrievalMode
+
+sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+
+# Sparse-only retrieval
+vector_store_sparse = QdrantVectorStore(
+    client=client,
+    collection_name="task_docs_sparse",
+    sparse_embedding=sparse_embeddings,
+    retrieval_mode=RetrievalMode.SPARSE,
+)
+
+
+Strengths: Precise keyword matching; great for proper nouns, error codes, technical identifiers.
+
+Weaknesses: No semantic understanding ("deploy" does not match "deployment").
+
+Hybrid Retrieval (Best of Both)​
+
+Combines dense semantic search with sparse keyword matching:
+
+from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
+from qdrant_client import QdrantClient, models
+from qdrant_client.http.models import Distance, SparseVectorParams, VectorParams
+
+# Initialize both embedding types
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+
+# Create client and collection with both vector types
+client = QdrantClient(url="http://localhost:6333")
+client.create_collection(
+    collection_name="task_docs_hybrid",
+    vectors_config={
+        "dense": VectorParams(size=1536, distance=Distance.COSINE)
+    },
+    sparse_vectors_config={
+        "sparse": SparseVectorParams(
+            index=models.SparseIndexParams(on_disk=False)
+        )
+    },
+)
+
+# Initialize hybrid vector store
+vector_store_hybrid = QdrantVectorStore(
+    client=client,
+    collection_name="task_docs_hybrid",
+    embedding=embeddings,
+    sparse_embedding=sparse_embeddings,
+    retrieval_mode=RetrievalMode.HYBRID,
+    vector_name="dense",
+    sparse_vector_name="sparse",
+)
+
+print("Hybrid vector store ready")
+
+
+Output:
+
+Hybrid vector store ready
+
+
+When to use hybrid: Production RAG systems where users might search with exact terms ("OAuth2") or conceptual queries ("authentication system"). Hybrid mode handles both.
+
+Retrieval Mode Decision Framework​
+Query Type	Best Mode	Example
+Conceptual questions	Dense	"How do I scale my application?"
+Exact term lookups	Sparse	"ERROR_CODE_12345"
+Mixed intent (production)	Hybrid	User queries you cannot predict
+Development/testing	Dense	Simplest to set up
+
+For your Task API semantic search, start with dense retrieval. Move to hybrid when you observe users searching for exact task IDs or technical terms that semantic search misses.
+
+Metadata Filtering​
+
+Vector similarity alone is not enough. You often need to filter by metadata (status, priority, assignee):
+
+from qdrant_client import models
+
+# Find high-priority tasks related to deployment
+results = vector_store.similarity_search(
+    query="deployment automation",
+    k=5,
+    filter=models.Filter(
+        must=[
+            models.FieldCondition(
+                key="metadata.priority",
+                match=models.MatchValue(value="high"),
+            ),
+        ]
+    ),
+)
+
+print("High-priority deployment tasks:")
+for doc in results:
+    print(f"  - {doc.metadata.get('title')}")
+
+
+Output:
+
+High-priority deployment tasks:
+  - K8s Deployment
+  - Docker Setup
+
+
+The filter narrows results to high-priority tasks BEFORE vector similarity ranking. This is more efficient than filtering after retrieval.
+
+Common Pitfalls​
+Pitfall	Symptom	Solution
+Wrong vector size	"Vector size mismatch" error	Match VectorParams(size=) to your embedding model (1536 for text-embedding-3-small)
+Forgetting persistence	Data lost on restart	Add -v volume mount to Docker command
+Inconsistent IDs	Duplicate documents	Generate stable IDs from content hash or database primary key
+Over-fetching	Slow searches	Use appropriate k value; 4-10 is typical for RAG
+Safety Note​
+
+Your Qdrant instance stores indexed content. For production:
+
+Do not expose port 6333 publicly without authentication
+Use Qdrant Cloud or configure API keys for multi-user access
+Never index sensitive data (PII, credentials) unless you have proper access controls
+Reflect on Your Skill​
+
+You built a rag-deployment skill in Lesson 0. Does it know about Qdrant?
+
+Test Your Skill​
+
+Open your skill and ask:
+
+How do I set up Qdrant with LangChain for a production RAG system?
+
+
+Check if it mentions:
+
+Docker deployment command
+The three initialization patterns (in-memory, Docker, existing collection)
+Hybrid retrieval mode
+Identify Gaps​
+Does your skill know about metadata filtering?
+Does it explain when to use hybrid vs dense retrieval?
+Does it warn about vector size mismatches?
+Improve Your Skill​
+
+If gaps exist, update your skill with the patterns from this lesson:
+
+Update my rag-deployment skill to include:
+1. Qdrant Docker deployment (docker run -p 6333:6333 qdrant/qdrant)
+2. Three QdrantVectorStore initialization patterns
+3. Retrieval mode selection guidance (dense vs sparse vs hybrid)
+4. Metadata filtering examples
+
+Try With AI​
+
+Set up your AI companion (Claude Code, Cursor, or similar) and work through these challenges.
+
+Prompt 1: Deploy and Verify​
+I've started Qdrant with `docker run -p 6333:6333 qdrant/qdrant`.
+Write Python code that:
+1. Connects to Qdrant at localhost:6333
+2. Creates a collection called "test_collection" with 1536-dimension vectors
+3. Adds 3 sample documents about Python programming
+4. Runs a similarity search for "functions and methods"
+5. Prints the results with relevance scores
+
+Include error handling for connection failures.
+
+
+What you are learning: The complete workflow from deployment to search. You will see how the pieces connect: client creation, collection setup, document indexing, and retrieval.
+
+Prompt 2: Hybrid Search Comparison​
+Create a script that compares dense vs hybrid retrieval on the same
+document set. Use these 5 documents about software development:
+- "Implement REST API endpoints using FastAPI"
+- "Write unit tests with pytest for API validation"
+- "Configure Docker containers for microservices deployment"
+- "Set up PostgreSQL database with SQLModel ORM"
+- "Deploy to Kubernetes with helm charts"
+
+Run both search modes on query "k8s deployment" and show me:
+- Which documents each mode returns
+- The relevance scores for each
+- Which mode found the helm chart document (exact keyword match)
+
+
+What you are learning: The practical difference between retrieval modes. You will observe that "k8s" (abbreviation) may not match semantically with "Kubernetes", but sparse/hybrid search can catch it.
+
+Prompt 3: Production-Ready Setup​
+I need a production-ready Qdrant setup for my Task API. Help me create:
+1. A Docker Compose file that persists Qdrant data
+2. A Python module that handles connection, collection creation, and
+   graceful reconnection if Qdrant restarts
+3. A function to sync tasks from my database to the vector store
+   (handle updates and deletes, not just inserts)
+4. Appropriate error handling and logging
+
+The Task model has: id, title, description, status, priority, created_at
+
+
+What you are learning: Real-world deployment concerns: persistence, reconnection, data synchronization. This prompt bridges from tutorial code to production patterns.

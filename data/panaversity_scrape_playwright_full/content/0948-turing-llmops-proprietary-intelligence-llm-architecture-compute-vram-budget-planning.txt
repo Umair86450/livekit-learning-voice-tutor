@@ -1,0 +1,513 @@
+VRAM Budget Planning
+
+You've counted the parameters. You know an 8B model has 8 billion weights. Now the critical question: how much GPU memory do you actually need to train it? The answer isn't just "8 billion times bytes per parameter." Training requires memory for weights, gradients, optimizer states, and activations. Getting this calculation wrong means your training crashes with "CUDA out of memory."
+
+This lesson teaches you to plan your VRAM budget before starting any training job. You'll learn the components of GPU memory usage, how to calculate requirements for different scenarios, and what optimization techniques let you fit larger models on smaller GPUs.
+
+Why VRAM Planning Matters​
+
+Consider this common scenario:
+
+You: Load 8B model on T4 (15GB VRAM) for training
+GPU: CUDA out of memory
+You: But 8B at FP16 is only 16GB... wait, 16GB > 15GB
+GPU: Also you forgot gradients, optimizer, and activations
+You: How much memory do I actually need?
+
+
+The model weights are just the starting point. Training adds significant memory overhead.
+
+The VRAM Stack​
+GPU Memory Usage During Training:
+┌─────────────────────────────────────────────────────────────────┐
+│ Model Weights (base memory)                                     │
+├─────────────────────────────────────────────────────────────────┤
+│ Gradients (same size as weights for full fine-tuning)          │
+├─────────────────────────────────────────────────────────────────┤
+│ Optimizer States (2× weights for AdamW)                        │
+├─────────────────────────────────────────────────────────────────┤
+│ Activations (scales with batch size × sequence length)         │
+├─────────────────────────────────────────────────────────────────┤
+│ CUDA Kernels + Workspace (~500MB overhead)                     │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Let's calculate each component.
+
+Component 1: Model Weights​
+
+The foundation of memory usage. You learned this in Lesson 3:
+
+Weights Memory = Parameters × Bytes per parameter
+
+Precision	Bytes/Param	8B Model
+FP32	4	32 GB
+FP16/BF16	2	16 GB
+INT8	1	8 GB
+INT4/NF4	0.5	4 GB
+
+Key insight: Quantization is powerful. Going from FP16 to NF4 reduces weight memory by 4×.
+
+Component 2: Gradients​
+
+During backpropagation, you compute gradients for each parameter. For full fine-tuning:
+
+Gradient Memory = Parameters × Bytes per gradient
+
+
+Gradients typically stored at FP16:
+
+Model	Gradient Memory (FP16)
+8B model	8B × 2 = 16 GB
+7B model	7B × 2 = 14 GB
+
+Why this matters: Full fine-tuning doubles your weight memory just for gradients.
+
+LoRA Reduces Gradient Memory​
+
+With LoRA, you only compute gradients for the adapter parameters:
+
+LoRA Parameters = 2 × rank × hidden_dim × num_target_modules × layers
+
+
+For Llama-8B with LoRA rank 16, targeting Q and V:
+
+LoRA params = 2 × 16 × 4,096 × 2 × 32 = 8.4M parameters
+Gradient memory = 8.4M × 2 bytes = 16.8 MB
+
+
+Compare: 16 GB (full) vs 16.8 MB (LoRA) = 1000× reduction in gradient memory.
+
+Component 3: Optimizer States​
+
+Optimizers like AdamW maintain state for each trainable parameter:
+
+State	Purpose	Memory
+First moment (m)	Momentum	1× parameters (FP32)
+Second moment (v)	Adaptive learning rate	1× parameters (FP32)
+
+For full fine-tuning with AdamW:
+
+Optimizer Memory = Parameters × 8 bytes (two FP32 tensors)
+8B model = 8B × 8 = 64 GB
+
+
+This is often the memory killer. You need 64 GB just for optimizer states on an 8B model.
+
+LoRA Reduces Optimizer Memory​
+
+With LoRA's 8.4M trainable parameters:
+
+Optimizer memory = 8.4M × 8 = 67 MB
+
+
+Compare: 64 GB (full) vs 67 MB (LoRA) = ~1000× reduction.
+
+Component 4: Activations​
+
+The intermediate values computed during the forward pass. These are stored for the backward pass.
+
+Activation memory depends on:
+
+Batch size
+Sequence length
+Number of layers
+Hidden dimension
+
+Rough estimate:
+
+Activations ≈ 2 × layers × batch_size × seq_length × hidden_dim × bytes
+
+
+For Llama-8B with batch_size=1, seq_length=2048:
+
+Activations = 2 × 32 × 1 × 2,048 × 4,096 × 2 bytes
+           = 1.07 GB per sample
+
+
+Batch size scales linearly: batch_size=4 → 4.3 GB of activations.
+
+Gradient Checkpointing Trades Compute for Memory​
+
+Instead of storing all activations, recompute them during backward pass:
+
+Without checkpointing: Store all layer activations (high memory)
+With checkpointing: Store every N-th layer, recompute between (low memory, ~30% slower)
+
+
+Memory savings: Often 60-70% reduction in activation memory.
+
+The Complete VRAM Formula​
+
+Putting it all together for full fine-tuning:
+
+Total VRAM = Weights + Gradients + Optimizer + Activations + Overhead
+
+= (P × Bw) + (P × Bg) + (P × Bo) + (2 × L × B × S × H × Ba) + 0.5GB
+
+Where:
+P = Parameters
+Bw = Bytes per weight (2 for FP16, 0.5 for 4-bit)
+Bg = Bytes per gradient (2 for FP16)
+Bo = Bytes for optimizer (8 for AdamW)
+L = Layers
+B = Batch size
+S = Sequence length
+H = Hidden dimension
+Ba = Bytes per activation (2 for FP16)
+
+Example: Full Fine-Tuning Llama-8B​
+Parameters: 8B
+Precision: FP16
+Batch size: 1
+Sequence: 2048
+Layers: 32
+Hidden: 4096
+
+Weights:    8B × 2 = 16 GB
+Gradients:  8B × 2 = 16 GB
+Optimizer:  8B × 8 = 64 GB
+Activations: 2 × 32 × 1 × 2048 × 4096 × 2 = 1 GB
+Overhead:   0.5 GB
+
+Total: 16 + 16 + 64 + 1 + 0.5 = 97.5 GB
+
+
+Result: Full fine-tuning Llama-8B requires ~100 GB VRAM. That's an A100 80GB... times two.
+
+Making It Fit: QLoRA​
+
+QLoRA (Quantized LoRA) combines two techniques:
+
+4-bit quantization: Reduce weight memory
+LoRA: Reduce gradient and optimizer memory
+QLoRA VRAM Calculation​
+Quantized Weights: 8B × 0.5 = 4 GB
+LoRA Gradients:    8.4M × 2 = 0.017 GB
+LoRA Optimizer:    8.4M × 8 = 0.067 GB
+Activations:       ~1 GB (with gradient checkpointing)
+Overhead:          0.5 GB
+
+Total: 4 + 0.017 + 0.067 + 1 + 0.5 ≈ 5.6 GB
+
+
+Result: QLoRA drops 97.5 GB to 5.6 GB. This fits on a T4 with room to spare!
+
+Why QLoRA Works​
+
+The magic: quantized weights are used in forward pass, but gradients flow only through the small LoRA adapters. You get:
+
+Memory of a 4-bit model
+Trainability (can backprop through LoRA)
+Quality approaching full fine-tuning
+Batch Size and Sequence Length Trade-offs​
+
+Given fixed GPU memory, you can trade batch size for sequence length:
+
+Activation memory ∝ batch_size × sequence_length
+
+GPU Memory	Batch 1	Batch 4	Batch 8
+Seq 512	✓	✓	✓
+Seq 1024	✓	✓	Maybe
+Seq 2048	✓	Maybe	✗
+Seq 4096	Maybe	✗	✗
+
+For QLoRA on T4 (15GB), typical configurations:
+
+Batch 1, Seq 2048: ~6 GB (comfortable)
+Batch 4, Seq 512: ~7 GB (comfortable)
+Batch 2, Seq 1024: ~6.5 GB (comfortable)
+Gradient Accumulation: Effective Larger Batches​
+
+Can't fit batch_size=8 in memory? Use gradient accumulation:
+
+training_args = TrainingArguments(
+    per_device_train_batch_size=2,      # Actual batch in memory
+    gradient_accumulation_steps=4,       # Accumulate 4 steps
+    # Effective batch size = 2 × 4 = 8
+)
+
+
+This gives you the training stability of larger batches without the memory cost.
+
+Working Through a Scenario Together​
+
+Let's plan a training job step by step. Imagine you're preparing to fine-tune Llama-3-8B for Task API on a Colab T4 (15GB VRAM).
+
+Your initial specification:
+
+Model: Llama-3-8B
+Target: Task API JSON generation
+Hardware: T4 (15GB VRAM)
+Data: 500 examples, average 300 tokens each
+
+First attempt: Full fine-tuning at FP16
+
+Weights:    16 GB
+Gradients:  16 GB
+Optimizer:  64 GB
+Total:      96 GB → IMPOSSIBLE on T4
+
+
+Second attempt: What about just freezing most layers?
+
+You ask AI: "Can I freeze layers 0-28 and only train layers 29-31?"
+
+AI suggests: "That would reduce gradients and optimizer to ~10% (3 layers of 32). But you still need to load all weights: 16GB for weights alone exceeds your 15GB VRAM."
+
+Key insight from AI: "You need quantization just to load the model, regardless of training strategy."
+
+Third attempt: QLoRA
+
+4-bit weights: 4 GB
+LoRA adapters: 0.1 GB
+Activations:   1 GB (with grad checkpointing)
+Overhead:      0.5 GB
+Total:         5.6 GB → Fits with margin!
+
+
+Your refinement: "Wait, I have 15GB but only using 5.6GB. Can I increase batch size for faster training?"
+
+AI calculates: "With 9.4 GB headroom:
+
+Activation memory per sample: ~1 GB
+You could theoretically do batch_size=8, but that's 8 GB activations
+Total: 4 + 8 + 0.5 = 12.5 GB
+That's cutting it close. Recommend batch_size=4 with seq_length=1024."
+
+Final configuration:
+
+# QLoRA configuration for T4
+from peft import LoraConfig
+from transformers import BitsAndBytesConfig
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16
+)
+
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.05,
+    task_type="CAUSAL_LM"
+)
+
+training_args = TrainingArguments(
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,  # effective batch 16
+    max_seq_length=1024,
+    gradient_checkpointing=True,
+)
+
+
+Estimated VRAM: ~8-10 GB, comfortable on T4.
+
+This iterative process, where you refine your approach based on calculations and constraints, is exactly how practitioners plan real training jobs.
+
+Quick Reference: VRAM Estimates​
+
+Use these tables for rapid estimation:
+
+Inference (Model Loading Only)​
+Model	FP16	INT8	INT4/NF4
+1B	2 GB	1 GB	0.5 GB
+7-8B	14-16 GB	7-8 GB	4-5 GB
+13B	26 GB	13 GB	7 GB
+70B	140 GB	70 GB	35-40 GB
+Training (QLoRA with Gradient Checkpointing)​
+Model	Batch 1, Seq 2K	Batch 4, Seq 512	Batch 4, Seq 1K
+8B	~6 GB	~7 GB	~9 GB
+13B	~9 GB	~10 GB	~13 GB
+70B	~45 GB	~50 GB	~60 GB
+GPU Recommendations​
+GPU	VRAM	Model Sizes	Training
+T4	15 GB	Up to 8B (quantized)	QLoRA
+RTX 3090	24 GB	Up to 13B (quantized)	QLoRA
+RTX 4090	24 GB	Up to 13B (quantized)	QLoRA
+A100 40GB	40 GB	Up to 13B (FP16) or 70B (quantized)	Full FT or QLoRA
+A100 80GB	80 GB	Up to 70B (quantized)	QLoRA
+Python: VRAM Calculator​
+
+Use this code to estimate VRAM for your specific configuration:
+
+def estimate_vram_gb(
+    params_billions: float,
+    weight_precision: str = "fp16",
+    training: bool = True,
+    lora: bool = False,
+    lora_rank: int = 16,
+    gradient_checkpointing: bool = True,
+    batch_size: int = 1,
+    seq_length: int = 2048,
+    num_layers: int = 32,
+    hidden_dim: int = 4096
+) -> dict:
+    """
+    Estimate VRAM requirements for LLM inference or training.
+
+    Returns breakdown by component.
+    """
+    params = params_billions * 1e9
+
+    # Weight memory by precision
+    precision_bytes = {
+        "fp32": 4,
+        "fp16": 2,
+        "bf16": 2,
+        "int8": 1,
+        "int4": 0.5,
+        "nf4": 0.5
+    }
+    weight_bytes = precision_bytes[weight_precision]
+    weights_gb = (params * weight_bytes) / 1e9
+
+    if not training:
+        # Inference only
+        overhead_gb = 0.5
+        return {
+            "weights": weights_gb,
+            "overhead": overhead_gb,
+            "total": weights_gb + overhead_gb
+        }
+
+    # Training components
+    if lora:
+        # LoRA trainable parameters (rough estimate)
+        # 2 matrices × rank × hidden × 2 target modules × layers
+        lora_params = 2 * lora_rank * hidden_dim * 2 * num_layers
+        grad_params = lora_params
+        optim_params = lora_params
+    else:
+        grad_params = params
+        optim_params = params
+
+    # Gradients (FP16)
+    gradients_gb = (grad_params * 2) / 1e9
+
+    # Optimizer (AdamW: 2× FP32)
+    optimizer_gb = (optim_params * 8) / 1e9
+
+    # Activations (rough estimate)
+    activation_base = 2 * num_layers * batch_size * seq_length * hidden_dim * 2
+    if gradient_checkpointing:
+        activation_base *= 0.4  # ~60% savings
+    activations_gb = activation_base / 1e9
+
+    overhead_gb = 0.5
+
+    total = weights_gb + gradients_gb + optimizer_gb + activations_gb + overhead_gb
+
+    return {
+        "weights": round(weights_gb, 2),
+        "gradients": round(gradients_gb, 2),
+        "optimizer": round(optimizer_gb, 2),
+        "activations": round(activations_gb, 2),
+        "overhead": overhead_gb,
+        "total": round(total, 2)
+    }
+
+# Examples
+print("Llama-8B Full Fine-tuning (FP16):")
+print(estimate_vram_gb(8, "fp16", training=True, lora=False))
+
+print("\nLlama-8B QLoRA (4-bit):")
+print(estimate_vram_gb(8, "nf4", training=True, lora=True))
+
+print("\nLlama-8B Inference Only (4-bit):")
+print(estimate_vram_gb(8, "nf4", training=False))
+
+
+Output:
+
+Llama-8B Full Fine-tuning (FP16):
+{'weights': 16.0, 'gradients': 16.0, 'optimizer': 64.0, 'activations': 2.15, 'overhead': 0.5, 'total': 98.65}
+
+Llama-8B QLoRA (4-bit):
+{'weights': 4.0, 'gradients': 0.0, 'optimizer': 0.0, 'activations': 0.86, 'overhead': 0.5, 'total': 5.36}
+
+Llama-8B Inference Only (4-bit):
+{'weights': 4.0, 'overhead': 0.5, 'total': 4.5}
+
+Common Mistakes and Fixes​
+Mistake	Symptom	Fix
+Forgot optimizer states	OOM during first training step	Use QLoRA or 8-bit optimizer
+Batch size too high	OOM after a few steps	Reduce batch size, use gradient accumulation
+Sequence too long	OOM during forward pass	Reduce max_seq_length or use gradient checkpointing
+No gradient checkpointing	OOM with even batch=1	Enable gradient_checkpointing=True
+Loading FP16 on small GPU	OOM during model.load	Use 4-bit quantization from the start
+The OOM Debugging Checklist​
+
+When you get CUDA out of memory:
+
+ Is model loaded at correct precision?
+ Is gradient checkpointing enabled?
+ What's the batch size and sequence length?
+ Is LoRA/QLoRA properly configured?
+ Any other models/tensors in GPU memory?
+Try With AI​
+
+Now that you understand VRAM budgeting, practice planning with your AI companion.
+
+Prompt 1: Plan Your Training Configuration​
+I want to fine-tune Llama-3-8B on Colab Free Tier (T4, 15GB VRAM).
+
+My training data:
+- 1,000 examples
+- Average length: 400 tokens
+- Maximum length: 1,200 tokens
+- Format: instruction/response pairs
+
+Help me:
+1. Calculate expected VRAM for different configurations
+2. Choose between max_seq_length 512, 1024, or 2048
+3. Determine the largest batch size I can use
+4. Decide on gradient accumulation for effective batch size 16
+
+Show your calculations and explain trade-offs.
+
+
+What you're learning: Applying VRAM estimation to real planning decisions.
+
+Prompt 2: Optimize an Existing Configuration​
+My current training setup on a T4:
+- Llama-3-8B with QLoRA (4-bit)
+- Batch size: 1
+- Sequence length: 2048
+- Gradient checkpointing: enabled
+- Estimated VRAM: ~6GB
+
+But training is slow (only using batch 1). I have 9GB of unused VRAM.
+Help me optimize:
+
+1. Should I increase batch size or sequence length?
+2. What batch size can I safely use?
+3. How does this affect training speed and quality?
+4. If I increase batch size to 4, should I reduce gradient accumulation?
+
+I want faster training without OOM crashes.
+
+
+What you're learning: You specify your constraints, and together you converge on an optimized configuration that neither would have reached alone.
+
+Prompt 3: Explore the Memory-Compute Trade-off​
+I'm confused about when to use gradient checkpointing vs. just reducing
+batch size. Both save memory, but in different ways.
+
+Help me understand:
+1. What exactly does gradient checkpointing trade (memory for what)?
+2. When is it better to reduce batch size instead?
+3. For training quality, is it better to use checkpointing with batch=4
+   or no checkpointing with batch=1?
+4. How do these choices interact with learning rate and convergence?
+
+Walk me through the decision framework.
+
+
+What you're learning: Understanding the deeper trade-offs helps you make better configuration decisions beyond just "will it fit."
+
+Safety Note​
+
+Before starting a long training run, always do a quick test with 1-2 batches to verify your VRAM calculations are correct. Training jobs can run for hours; discovering an OOM error after 30 minutes wastes compute credits and time. The T4 on Colab Free Tier also has session limits (~90 minutes of continuous GPU use), so save checkpoints frequently.

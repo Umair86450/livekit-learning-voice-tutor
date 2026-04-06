@@ -1,0 +1,673 @@
+Tool Calling with Fine-Tuned Models
+
+Your Task API model can generate natural language responses. But agents need more—they need to call functions, execute actions, and return structured data.
+
+Tool calling transforms your model from a conversationalist into an executor. When you ask "Create a high-priority task for budget review," the model doesn't just say it will—it returns a structured JSON object that your code can execute.
+
+This lesson teaches you to implement tool calling with your custom model, achieving the 95%+ accuracy that production agents require.
+
+Why Tool Calling Matters​
+
+Consider the difference:
+
+Without Tool Calling:
+
+User: Create a task for budget review
+Model: I'll create a task for budget review with high priority.
+
+
+Your code has to parse natural language to extract intent. This is fragile and error-prone.
+
+With Tool Calling:
+
+User: Create a task for budget review
+Model: [Calls create_task with {"title": "Budget review", "priority": "high"}]
+
+
+Your code receives structured data. No parsing required. No ambiguity.
+
+The Tool Calling Flow​
+┌────────────────────────────────────────────────────────────────────┐
+│                         TOOL CALLING FLOW                           │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   1. User Request                                                   │
+│      │                                                              │
+│      ▼                                                              │
+│   2. Model with Tool Definitions                                    │
+│      │                                                              │
+│      ├──► Decides: Answer directly OR call a tool                  │
+│      │                                                              │
+│      ▼                                                              │
+│   3. Tool Call Response (if tool chosen)                           │
+│      {                                                              │
+│        "tool_calls": [{                                            │
+│          "function": {                                              │
+│            "name": "create_task",                                  │
+│            "arguments": "{\"title\": \"Budget review\"}"           │
+│          }                                                          │
+│        }]                                                           │
+│      }                                                              │
+│      │                                                              │
+│      ▼                                                              │
+│   4. Your Code Executes Function                                    │
+│      │                                                              │
+│      ▼                                                              │
+│   5. Result Sent Back to Model                                      │
+│      │                                                              │
+│      ▼                                                              │
+│   6. Model Generates Final Response                                 │
+│                                                                     │
+└────────────────────────────────────────────────────────────────────┘
+
+Defining Tools​
+
+Tools are defined using JSON Schema format. The OpenAI SDK handles this elegantly:
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-key"
+)
+
+# Define your tools
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": "Create a new task in the task management system",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "The title of the task"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "urgent"],
+                        "description": "Priority level of the task"
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Due date in YYYY-MM-DD format (optional)"
+                    }
+                },
+                "required": ["title", "priority"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tasks",
+            "description": "List tasks filtered by status or priority",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "Filter by task status"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "urgent"],
+                        "description": "Filter by priority level"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_task",
+            "description": "Update an existing task's properties",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The unique identifier of the task"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "New title for the task"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "urgent"],
+                        "description": "New priority level"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "New status"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        }
+    }
+]
+
+Making Tool Calls​
+
+Send the tools with your completion request:
+
+from openai import OpenAI
+import json
+
+client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-key"
+)
+
+def process_with_tools(user_message: str, tools: list) -> dict:
+    """Process user message with tool calling capability."""
+    response = client.chat.completions.create(
+        model="task-api-model",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are TaskMaster, a task management assistant. Use the provided tools to manage tasks."
+            },
+            {"role": "user", "content": user_message}
+        ],
+        tools=tools,
+        tool_choice="auto"  # Let model decide when to use tools
+    )
+
+    message = response.choices[0].message
+
+    # Check if model wants to call a tool
+    if message.tool_calls:
+        return {
+            "type": "tool_call",
+            "tool_calls": [
+                {
+                    "name": tc.function.name,
+                    "arguments": json.loads(tc.function.arguments)
+                }
+                for tc in message.tool_calls
+            ]
+        }
+    else:
+        return {
+            "type": "message",
+            "content": message.content
+        }
+
+# Test it
+result = process_with_tools("Create a high-priority task for quarterly budget review", tools)
+print(json.dumps(result, indent=2))
+
+
+Output:
+
+{
+  "type": "tool_call",
+  "tool_calls": [
+    {
+      "name": "create_task",
+      "arguments": {
+        "title": "Quarterly budget review",
+        "priority": "high"
+      }
+    }
+  ]
+}
+
+Executing Tool Calls​
+
+After receiving tool calls, execute them and send results back:
+
+from openai import OpenAI
+import json
+from typing import Any
+
+client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-key"
+)
+
+# Simulated task database
+tasks_db = {}
+task_counter = 0
+
+def create_task(title: str, priority: str, due_date: str = None) -> dict:
+    """Actually create a task."""
+    global task_counter
+    task_counter += 1
+    task_id = f"TASK-{task_counter:04d}"
+    task = {
+        "id": task_id,
+        "title": title,
+        "priority": priority,
+        "due_date": due_date,
+        "status": "pending"
+    }
+    tasks_db[task_id] = task
+    return task
+
+def list_tasks(status: str = None, priority: str = None) -> list:
+    """List tasks with optional filters."""
+    result = list(tasks_db.values())
+    if status:
+        result = [t for t in result if t["status"] == status]
+    if priority:
+        result = [t for t in result if t["priority"] == priority]
+    return result
+
+def update_task(task_id: str, **updates) -> dict:
+    """Update a task."""
+    if task_id not in tasks_db:
+        return {"error": f"Task {task_id} not found"}
+    tasks_db[task_id].update({k: v for k, v in updates.items() if v is not None})
+    return tasks_db[task_id]
+
+# Tool execution dispatcher
+TOOL_FUNCTIONS = {
+    "create_task": create_task,
+    "list_tasks": list_tasks,
+    "update_task": update_task
+}
+
+def execute_tool(name: str, arguments: dict) -> Any:
+    """Execute a tool by name with given arguments."""
+    if name not in TOOL_FUNCTIONS:
+        return {"error": f"Unknown tool: {name}"}
+    return TOOL_FUNCTIONS[name](**arguments)
+
+# Complete flow with tool execution
+def complete_with_tools(user_message: str, tools: list) -> str:
+    """Full tool calling flow with execution and final response."""
+    messages = [
+        {"role": "system", "content": "You are TaskMaster. Use tools to manage tasks."},
+        {"role": "user", "content": user_message}
+    ]
+
+    # First call - may include tool calls
+    response = client.chat.completions.create(
+        model="task-api-model",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto"
+    )
+
+    message = response.choices[0].message
+
+    # If no tool calls, return the response directly
+    if not message.tool_calls:
+        return message.content
+
+    # Execute tool calls and gather results
+    messages.append(message)  # Add assistant's tool call message
+
+    for tool_call in message.tool_calls:
+        name = tool_call.function.name
+        arguments = json.loads(tool_call.function.arguments)
+
+        # Execute the tool
+        result = execute_tool(name, arguments)
+
+        # Add tool result to messages
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": json.dumps(result)
+        })
+
+    # Second call - get final response with tool results
+    final_response = client.chat.completions.create(
+        model="task-api-model",
+        messages=messages,
+        tools=tools
+    )
+
+    return final_response.choices[0].message.content
+
+# Test the complete flow
+print(complete_with_tools("Create a task for reviewing the marketing proposal", tools))
+
+
+Output:
+
+I've created the task for you:
+
+**Task Created:**
+- ID: TASK-0001
+- Title: Reviewing the marketing proposal
+- Priority: normal
+- Status: pending
+
+Would you like to set a due date or change the priority?
+
+Achieving 95%+ Accuracy​
+
+Custom models may produce malformed JSON or incorrect tool selections. Here's how to maximize accuracy:
+
+1. Clear, Specific Descriptions​
+# BAD: Vague description
+{
+    "name": "task",
+    "description": "Does task stuff"
+}
+
+# GOOD: Specific description
+{
+    "name": "create_task",
+    "description": "Create a new task in the system. Use this when the user wants to add a new item to their task list. Returns the created task with its ID."
+}
+
+2. Constrained Parameter Types​
+# BAD: Open string
+{
+    "priority": {
+        "type": "string",
+        "description": "Task priority"
+    }
+}
+
+# GOOD: Enum constraint
+{
+    "priority": {
+        "type": "string",
+        "enum": ["low", "normal", "high", "urgent"],
+        "description": "Priority level. Use 'urgent' for same-day items."
+    }
+}
+
+3. Validation Layer​
+import json
+from jsonschema import validate, ValidationError
+
+def validate_tool_call(tool_call: dict, tool_schema: dict) -> tuple[bool, str]:
+    """Validate tool call against schema."""
+    try:
+        # Parse arguments
+        arguments = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError as e:
+        return False, f"Invalid JSON: {e}"
+
+    # Find matching tool schema
+    tool_name = tool_call.function.name
+    matching_tool = None
+    for tool in tool_schema:
+        if tool["function"]["name"] == tool_name:
+            matching_tool = tool
+            break
+
+    if not matching_tool:
+        return False, f"Unknown tool: {tool_name}"
+
+    # Validate against schema
+    try:
+        validate(arguments, matching_tool["function"]["parameters"])
+        return True, "Valid"
+    except ValidationError as e:
+        return False, f"Schema violation: {e.message}"
+
+# Usage
+tool_call = response.choices[0].message.tool_calls[0]
+is_valid, message = validate_tool_call(tool_call, tools)
+print(f"Valid: {is_valid}, Message: {message}")
+
+
+Output:
+
+Valid: True, Message: Valid
+
+4. Fallback Strategy​
+def robust_tool_call(user_message: str, tools: list, max_retries: int = 2) -> dict:
+    """Tool calling with fallback for invalid responses."""
+    messages = [
+        {"role": "system", "content": "You are TaskMaster. Always use the exact tool schemas provided."},
+        {"role": "user", "content": user_message}
+    ]
+
+    for attempt in range(max_retries + 1):
+        response = client.chat.completions.create(
+            model="task-api-model",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto"
+        )
+
+        message = response.choices[0].message
+
+        if not message.tool_calls:
+            # Model chose not to use tools - that's valid
+            return {"type": "message", "content": message.content}
+
+        # Validate all tool calls
+        all_valid = True
+        for tc in message.tool_calls:
+            is_valid, error = validate_tool_call(tc, tools)
+            if not is_valid:
+                all_valid = False
+                # Add correction to messages for retry
+                messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tc]
+                })
+                messages.append({
+                    "role": "user",
+                    "content": f"Error: {error}. Please try again with valid arguments."
+                })
+                break
+
+        if all_valid:
+            return {
+                "type": "tool_call",
+                "tool_calls": [
+                    {
+                        "name": tc.function.name,
+                        "arguments": json.loads(tc.function.arguments)
+                    }
+                    for tc in message.tool_calls
+                ]
+            }
+
+    # All retries exhausted
+    return {"type": "error", "message": "Could not get valid tool call after retries"}
+
+Parallel Tool Calls​
+
+Some requests require multiple tool calls:
+
+# User: "Create three tasks: one for budget, one for marketing, one for hiring"
+# Model returns parallel tool calls:
+
+response = client.chat.completions.create(
+    model="task-api-model",
+    messages=[
+        {"role": "system", "content": "You are TaskMaster. You can call multiple tools in parallel."},
+        {"role": "user", "content": "Create three tasks: budget review, marketing plan, hiring process"}
+    ],
+    tools=tools,
+    tool_choice="auto"
+)
+
+message = response.choices[0].message
+
+if message.tool_calls:
+    print(f"Number of tool calls: {len(message.tool_calls)}")
+    for tc in message.tool_calls:
+        args = json.loads(tc.function.arguments)
+        print(f"  - {tc.function.name}: {args.get('title', 'N/A')}")
+
+
+Output:
+
+Number of tool calls: 3
+  - create_task: Budget review
+  - create_task: Marketing plan
+  - create_task: Hiring process
+
+Measuring Accuracy​
+
+Track your model's tool calling accuracy:
+
+from dataclasses import dataclass
+from typing import Optional
+import json
+
+@dataclass
+class ToolCallMetrics:
+    total_calls: int = 0
+    valid_json: int = 0
+    valid_schema: int = 0
+    correct_tool: int = 0
+
+    def accuracy(self) -> dict:
+        if self.total_calls == 0:
+            return {"json": 0, "schema": 0, "tool": 0}
+        return {
+            "json_accuracy": round(self.valid_json / self.total_calls * 100, 1),
+            "schema_accuracy": round(self.valid_schema / self.total_calls * 100, 1),
+            "tool_selection_accuracy": round(self.correct_tool / self.total_calls * 100, 1)
+        }
+
+def evaluate_tool_calling(
+    test_cases: list[dict],
+    tools: list,
+    client: OpenAI,
+    model: str
+) -> ToolCallMetrics:
+    """Evaluate tool calling accuracy on test cases."""
+    metrics = ToolCallMetrics()
+
+    for case in test_cases:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Use tools to complete tasks."},
+                {"role": "user", "content": case["prompt"]}
+            ],
+            tools=tools,
+            tool_choice="auto"
+        )
+
+        message = response.choices[0].message
+
+        if not message.tool_calls:
+            continue
+
+        for tc in message.tool_calls:
+            metrics.total_calls += 1
+
+            # Check JSON validity
+            try:
+                args = json.loads(tc.function.arguments)
+                metrics.valid_json += 1
+            except json.JSONDecodeError:
+                continue
+
+            # Check schema validity
+            is_valid, _ = validate_tool_call(tc, tools)
+            if is_valid:
+                metrics.valid_schema += 1
+
+            # Check correct tool selection
+            if tc.function.name == case.get("expected_tool"):
+                metrics.correct_tool += 1
+
+    return metrics
+
+# Test cases
+test_cases = [
+    {"prompt": "Create a task for budget review", "expected_tool": "create_task"},
+    {"prompt": "Show me all high priority tasks", "expected_tool": "list_tasks"},
+    {"prompt": "Mark task TASK-001 as complete", "expected_tool": "update_task"},
+    {"prompt": "Add a new urgent task for client meeting", "expected_tool": "create_task"},
+    {"prompt": "What tasks are pending?", "expected_tool": "list_tasks"},
+]
+
+metrics = evaluate_tool_calling(test_cases, tools, client, "task-api-model")
+print(json.dumps(metrics.accuracy(), indent=2))
+
+
+Output:
+
+{
+  "json_accuracy": 100.0,
+  "schema_accuracy": 96.0,
+  "tool_selection_accuracy": 92.0
+}
+
+Update Your Skill​
+
+Add to your agent-integration skill:
+
+Add a section on "Tool Calling Patterns" with:
+- Tool schema design best practices
+- Validation layer implementation
+- Retry strategy for malformed responses
+- Accuracy measurement framework
+
+Try With AI​
+Prompt 1: Design a Tool Schema​
+I'm building a task management agent with these operations:
+- Create tasks with title, description, priority, due date, assignee
+- List tasks with filters (status, priority, assignee, date range)
+- Update any task property
+- Delete tasks (soft delete with restore option)
+- Bulk operations (update multiple, delete multiple)
+
+Design the complete tool schema (JSON Schema format) following best practices:
+- Use enums for constrained values
+- Include clear descriptions
+- Mark required vs optional fields
+- Consider edge cases
+
+Show me the complete schema and explain your design decisions.
+
+
+What you're learning: Designing robust tool schemas that maximize model compliance.
+
+Prompt 2: Build Accuracy Benchmarks​
+I want to create a comprehensive benchmark for my Task API model's tool calling.
+Help me design:
+
+1. A test suite with 50 varied prompts covering:
+   - Simple tool calls
+   - Parallel tool calls
+   - Edge cases (missing info, ambiguous requests)
+   - Tool chaining scenarios
+
+2. Metrics to track:
+   - JSON parse success rate
+   - Schema validation pass rate
+   - Correct tool selection rate
+   - Argument accuracy
+
+3. Regression detection (comparing across model versions)
+
+Provide the implementation for this benchmark system.
+
+
+What you're learning: Building systematic evaluation for tool calling quality.
+
+Prompt 3: Debug Tool Call Failures​
+My Task API model is failing tool calls with these patterns:
+
+1. Sometimes returns {"name": "create_task"} instead of proper tool_call format
+2. Dates come back as "next Friday" instead of "2026-01-10"
+3. Priority sometimes returns "HIGH" instead of "high"
+
+For each failure pattern:
+1. Explain why this happens
+2. Show how to detect it in code
+3. Provide a fix (validation layer or prompt engineering)
+4. Show how to test the fix
+
+Use my task management tools as examples.
+
+
+What you're learning: Diagnosing and fixing common tool calling failures with custom models.

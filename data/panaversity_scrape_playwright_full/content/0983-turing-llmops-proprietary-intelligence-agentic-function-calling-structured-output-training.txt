@@ -1,0 +1,396 @@
+Structured Output Training
+
+You know what tool-calling patterns look like. Now you'll learn how to train a model to produce them reliably. This lesson covers the techniques that achieve 99%+ JSON validity—from data format requirements to training configuration.
+
+The key insight: structured output isn't about teaching the model new knowledge. It's about teaching the model a new output format that it must follow precisely.
+
+The JSON Validity Challenge​
+
+A model trained for natural language generation has no incentive to produce valid JSON. Consider what can go wrong:
+
+Error Type	Example	Frequency
+Missing quotes	{name: "value"}	Common
+Wrong quote type	{'name': 'value'}	Common
+Trailing comma	{"a": 1, "b": 2,}	Very common
+Unescaped content	"title": "Review "Q4" budget"	Common
+Incomplete JSON	{"name": "value"	Occasional
+Mixed content	{"name": "value"} Great!	Common
+
+Even one of these errors per 100 responses means your agent fails 1% of the time. At 10,000 daily calls, that's 100 failures—unacceptable for production.
+
+Target: 99%+ JSON validity (fewer than 1 in 100 malformed responses)
+
+Data Format Requirements​
+
+Training data for structured outputs must be precisely formatted:
+
+Correct String Escaping​
+// User input might contain quotes
+"user": "Create a task called \"Budget Review\" for Q4"
+
+// The arguments field must escape internal JSON
+"arguments": "{\"title\": \"Budget Review\", \"description\": \"Q4 analysis\"}"
+
+
+Common escaping needs:
+
+Double quotes inside strings: \"
+Backslashes: \\
+Newlines: \n
+Tab characters: \t
+Consistent Null Handling​
+
+When the assistant outputs tool calls, content must be null:
+
+{
+  "role": "assistant",
+  "content": null,  // NOT "", NOT "null", NOT missing
+  "tool_calls": [...]
+}
+
+Type Consistency​
+
+Arguments must match the schema types exactly:
+
+// If schema says priority is a string enum
+"priority": "high"  // CORRECT
+"priority": 1       // WRONG - integer instead of string
+
+// If schema says count is an integer
+"count": 5          // CORRECT
+"count": "5"        // WRONG - string instead of integer
+
+Generating Training Data with AI​
+
+You'll generate hundreds of training examples. AI can help—but you must validate.
+
+The Generation Loop​
+┌─────────────────────────────────────────────┐
+│ 1. Define example template with schema      │
+└─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────┐
+│ 2. Generate diverse user messages with AI   │
+└─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────┐
+│ 3. Generate corresponding tool calls        │
+└─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────┐
+│ 4. Validate JSON and schema compliance      │
+└─────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────┐
+│ 5. Review edge cases, fix errors            │
+└─────────────────────────────────────────────┘
+                    │
+                    ▼
+         ┌─────────────────┐
+         │ Repeat until    │
+         │ 500+ examples   │
+         └─────────────────┘
+
+Collaborative Data Generation​
+
+Your request to AI:
+
+Generate 20 diverse user messages for the create_task tool.
+Vary:
+- Formality (casual to professional)
+- Completeness (title only vs all fields)
+- Phrasing (command, request, statement)
+- Edge cases (special characters, dates, priorities)
+
+For each message, generate the correct tool_calls output.
+Format as JSONL with one example per line.
+
+
+AI's response (partial):
+
+{"messages":[{"role":"system","content":"..."},{"role":"user","content":"Add a task to buy milk"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_001","type":"function","function":{"name":"create_task","arguments":"{\"title\":\"Buy milk\"}"}}]}]}
+{"messages":[{"role":"system","content":"..."},{"role":"user","content":"Create high priority task: Review Q4 budget by Friday"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_002","type":"function","function":{"name":"create_task","arguments":"{\"title\":\"Review Q4 budget\",\"priority\":\"high\",\"due_date\":\"2024-01-19\"}"}}]}]}
+
+
+Your validation feedback:
+
+I found issues in examples 5, 12, and 17:
+- Example 5: "priortiy" typo in arguments
+- Example 12: date format wrong (01/19/2024 instead of 2024-01-19)
+- Example 17: missing closing brace
+
+Please fix these and regenerate. Also, none of the examples
+include special characters in titles. Add 5 examples with:
+- Quotes in task titles
+- Ampersands or other special chars
+- Very long titles (50+ chars)
+
+
+This back-and-forth is Layer 2 collaboration in action: you specify requirements, AI generates, you validate and refine.
+
+Validation Script​
+
+Automate validation to catch errors before training:
+
+import json
+from typing import List, Dict
+
+def validate_training_example(example: Dict) -> List[str]:
+    """Validate a single training example. Returns list of errors."""
+    errors = []
+
+    # Check messages structure
+    if "messages" not in example:
+        errors.append("Missing 'messages' key")
+        return errors
+
+    messages = example["messages"]
+
+    # Check for required roles
+    roles = [m.get("role") for m in messages]
+    if "system" not in roles:
+        errors.append("Missing system message")
+    if "user" not in roles:
+        errors.append("Missing user message")
+    if "assistant" not in roles:
+        errors.append("Missing assistant message")
+
+    # Validate assistant message with tool_calls
+    for msg in messages:
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            # Content must be null
+            if msg.get("content") is not None:
+                errors.append("Assistant content must be null when tool_calls present")
+
+            # Validate each tool call
+            for tc in msg.get("tool_calls", []):
+                if "function" not in tc:
+                    errors.append(f"Tool call missing 'function': {tc}")
+                    continue
+
+                func = tc["function"]
+
+                # Validate function name
+                valid_tools = ["create_task", "update_task", "complete_task", "list_tasks"]
+                if func.get("name") not in valid_tools:
+                    errors.append(f"Unknown tool: {func.get('name')}")
+
+                # Validate arguments is valid JSON string
+                args_str = func.get("arguments", "")
+                try:
+                    args = json.loads(args_str)
+
+                    # Validate argument types based on tool
+                    if func.get("name") == "create_task":
+                        if "title" not in args:
+                            errors.append("create_task missing required 'title'")
+                        if "priority" in args and args["priority"] not in ["low", "medium", "high"]:
+                            errors.append(f"Invalid priority: {args['priority']}")
+
+                except json.JSONDecodeError as e:
+                    errors.append(f"Invalid JSON in arguments: {e}")
+
+    return errors
+
+
+def validate_dataset(filepath: str) -> Dict:
+    """Validate entire dataset file (JSONL format)."""
+    results = {"valid": 0, "invalid": 0, "errors": []}
+
+    with open(filepath, "r") as f:
+        for line_num, line in enumerate(f, 1):
+            try:
+                example = json.loads(line)
+                errors = validate_training_example(example)
+
+                if errors:
+                    results["invalid"] += 1
+                    results["errors"].append({
+                        "line": line_num,
+                        "errors": errors
+                    })
+                else:
+                    results["valid"] += 1
+
+            except json.JSONDecodeError as e:
+                results["invalid"] += 1
+                results["errors"].append({
+                    "line": line_num,
+                    "errors": [f"JSON parse error: {e}"]
+                })
+
+    return results
+
+
+Output:
+
+results = validate_dataset("training_data.jsonl")
+print(f"Valid: {results['valid']}, Invalid: {results['invalid']}")
+
+# Valid: 485, Invalid: 15
+# Errors:
+# - Line 23: Invalid priority: HIGH (should be lowercase)
+# - Line 45: create_task missing required 'title'
+# - Line 67: Invalid JSON in arguments: Expecting ',' delimiter
+
+
+Fix all errors before training. A clean dataset is essential.
+
+Training Configuration for Structured Output​
+
+Several training settings affect structured output quality:
+
+Temperature and Sampling​
+
+During training, these don't apply. But when generating synthetic data or evaluating, use:
+
+# For data generation - allow some creativity
+temperature = 0.7
+top_p = 0.9
+
+# For structured output inference - be deterministic
+temperature = 0.0  # or very low like 0.1
+top_p = 1.0
+
+
+Low temperature at inference time reduces JSON errors dramatically.
+
+Loss Masking Strategy​
+
+Standard training applies loss to all tokens. For structured output, you want the model to focus on the structured parts:
+
+# Conceptual loss masking for tool calls
+training_example = {
+    "messages": [
+        {"role": "system", "content": "..."},      # Don't train on this
+        {"role": "user", "content": "..."},        # Don't train on this
+        {"role": "assistant", "tool_calls": [...]} # TRAIN ON THIS
+    ]
+}
+
+
+Most fine-tuning frameworks (OpenAI, Hugging Face TRL) handle this automatically when you format data correctly.
+
+Special Token Handling​
+
+The model needs to learn when to output tool calls vs natural language. Some frameworks use special tokens:
+
+<|tool_call|>
+{"name": "create_task", "arguments": {...}}
+<|/tool_call|>
+
+
+When using OpenAI-compatible fine-tuning, this is handled automatically. For custom training, ensure your tokenizer and data format align.
+
+Data Quality Metrics​
+
+Track these metrics for your training dataset:
+
+Metric	Target	Why It Matters
+JSON validity	100%	Invalid examples teach bad patterns
+Schema compliance	100%	Types and required fields must be correct
+Tool distribution	Balanced	Don't train 90% on create_task only
+Argument diversity	High	Variety in values, not just structure
+Edge case coverage	10%+	Special characters, long strings, nulls
+Example Distribution Check​
+from collections import Counter
+
+def analyze_tool_distribution(filepath: str) -> Dict[str, int]:
+    """Count tool usage across dataset."""
+    tool_counts = Counter()
+
+    with open(filepath) as f:
+        for line in f:
+            example = json.loads(line)
+            for msg in example.get("messages", []):
+                if msg.get("role") == "assistant" and "tool_calls" in msg:
+                    for tc in msg["tool_calls"]:
+                        tool_name = tc["function"]["name"]
+                        tool_counts[tool_name] += 1
+
+    return dict(tool_counts)
+
+# Check distribution
+dist = analyze_tool_distribution("training_data.jsonl")
+print(dist)
+# {'create_task': 200, 'update_task': 150, 'complete_task': 100, 'list_tasks': 50}
+
+# Rebalance if needed - list_tasks is underrepresented
+
+Building Your Dataset​
+
+Aim for 500+ examples with this distribution:
+
+Category	Count	Description
+create_task	150	Varied titles, priorities, dates
+update_task	100	Different fields being updated
+complete_task	75	Simple completions
+list_tasks	75	Different filter combinations
+Multi-turn	50	Conversations with 2+ tool calls
+Edge cases	50	Special chars, errors, corrections
+Reflect on Your Skill​
+
+Update your agentic-tuning skill:
+
+Add validation requirements: JSON validity 100%, schema compliance 100%
+Add data generation workflow: Template -> Generate -> Validate -> Fix -> Repeat
+Add distribution targets: Balanced tools, 10%+ edge cases
+Try With AI​
+Prompt 1: Generate Edge Cases​
+I need edge case training examples for create_task. Generate 10 examples
+covering:
+- Titles with quotes, apostrophes, and special characters
+- Very short titles (1-2 words)
+- Very long titles (50+ characters)
+- Dates in various natural language formats ("tomorrow", "next Friday")
+- Missing optional fields
+- Invalid inputs that should be handled gracefully
+
+Show both the user message and correct tool_calls for each.
+
+
+What you're learning: Edge case anticipation—training data must cover unusual inputs to ensure robustness.
+
+Prompt 2: Validate My Examples​
+I generated these training examples. Please validate each one:
+
+[paste 5-10 examples]
+
+Check for:
+1. Valid JSON (proper escaping, no syntax errors)
+2. Schema compliance (correct types, required fields)
+3. Logical correctness (arguments match user intent)
+4. Format compliance (null content, proper tool_calls structure)
+
+For each error, explain what's wrong and show the fix.
+
+
+What you're learning: Collaborative validation—using AI as a second pair of eyes to catch errors you might miss.
+
+Prompt 3: Improve Data Diversity​
+Here's my current training data distribution:
+- create_task: 200 examples
+- update_task: 50 examples
+- complete_task: 30 examples
+- list_tasks: 20 examples
+
+The distribution is unbalanced. Help me:
+1. Generate 50 more update_task examples with varied update scenarios
+2. Generate 45 more complete_task examples
+3. Generate 55 more list_tasks examples with different filter combinations
+
+For list_tasks, include combinations like:
+- No filters (list all)
+- Single filter (just priority=high)
+- Multiple filters (status=pending AND due_before=2024-01-20)
+
+
+What you're learning: Data balancing—ensuring the model learns all tools equally well, not just the most common one.
+
+Safety Note​
+
+When generating synthetic training data, review edge cases carefully. Examples with phrases like "delete everything" or "ignore previous instructions" should teach appropriate responses (confirmation requests, refusal) rather than compliance. Your training data shapes model behavior.

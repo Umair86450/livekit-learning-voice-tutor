@@ -1,0 +1,1043 @@
+Capstone: Full Observability Stack for Task API
+
+You've learned each piece of the observability puzzle across this chapter: Prometheus for metrics, Grafana for visualization, OpenTelemetry and Jaeger for tracing, Loki for logging, SLOs and error budgets for reliability, alerting for incident response, OpenCost for FinOps, and Dapr integration patterns. Now you bring them together.
+
+This capstone deploys a complete, production-ready observability stack for Task API. By the end, you'll have:
+
+Metrics: Prometheus collecting application and infrastructure metrics
+Visualization: Grafana dashboards showing the four golden signals
+Tracing: Jaeger receiving distributed traces from OpenTelemetry
+Logging: Loki aggregating structured logs with trace correlation
+SLOs: 99.9% availability and P95 latency targets with error budget tracking
+Alerting: Multi-burn-rate alerts that page when SLO is at risk
+Cost: OpenCost showing resource costs by team and service
+
+This is the observability infrastructure your Digital FTE products need in production. Every AI agent you deploy deserves this level of visibility.
+
+Part 1: Deploy Complete Observability Stack via Helm​
+
+Start by deploying all observability components. This is the infrastructure layer that receives telemetry from your applications.
+
+Stack Architecture​
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            Kubernetes Cluster                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
+│  │  Task API   │───►│  Prometheus │◄───│ServiceMonitor│                │
+│  │  (metrics)  │    │   (TSDB)    │    │   (CRD)      │                │
+│  └─────────────┘    └──────┬──────┘    └─────────────┘                 │
+│         │                  │                                            │
+│         │           ┌──────▼──────┐                                    │
+│         │           │   Grafana   │ ◄── Dashboards + Alerts            │
+│         │           │  (Visualize)│                                    │
+│         │           └─────────────┘                                    │
+│         │                                                               │
+│  ┌──────▼──────┐    ┌─────────────┐                                    │
+│  │  Task API   │───►│   Jaeger    │ ◄── Trace Analysis                 │
+│  │  (traces)   │    │ (Collector) │                                    │
+│  └─────────────┘    └─────────────┘                                    │
+│         │                                                               │
+│  ┌──────▼──────┐    ┌─────────────┐                                    │
+│  │  Task API   │───►│    Loki     │ ◄── Log Aggregation                │
+│  │  (logs)     │    │  + Promtail │                                    │
+│  └─────────────┘    └─────────────┘                                    │
+│                                                                         │
+│  ┌─────────────┐                                                        │
+│  │  OpenCost   │ ◄── Cost Allocation by Namespace/Team                 │
+│  │  (FinOps)   │                                                        │
+│  └─────────────┘                                                        │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Install kube-prometheus-stack (Prometheus + Grafana)​
+# Add Helm repositories
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo add jaegertracing https://jaegertracing.github.io/helm-charts
+helm repo add opencost https://opencost.github.io/opencost-helm-chart
+helm repo update
+
+
+Output:
+
+"prometheus-community" has been added to your repositories
+"grafana" has been added to your repositories
+"jaegertracing" has been added to your repositories
+"opencost" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+Update Complete. Happy Helming!
+
+
+Create the monitoring namespace and install the Prometheus stack:
+
+# Create monitoring namespace
+kubectl create namespace monitoring
+
+# Install kube-prometheus-stack (includes Prometheus, Grafana, Alertmanager)
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set grafana.adminPassword=observability-demo \
+  --set prometheus.prometheusSpec.retention=7d
+
+
+Output:
+
+NAME: prometheus
+LAST DEPLOYED: Mon Dec 30 10:00:00 2025
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+NOTES:
+kube-prometheus-stack has been installed. Check its status by running:
+  kubectl --namespace monitoring get pods -l "release=prometheus"
+
+Install Loki for Logging​
+# Install Loki with Promtail for log collection
+helm install loki grafana/loki-stack \
+  --namespace monitoring \
+  --set promtail.enabled=true \
+  --set loki.persistence.enabled=true \
+  --set loki.persistence.size=10Gi
+
+
+Output:
+
+NAME: loki
+LAST DEPLOYED: Mon Dec 30 10:01:00 2025
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+
+Install Jaeger for Tracing​
+# Install Jaeger with OTLP collector enabled
+helm install jaeger jaegertracing/jaeger \
+  --namespace monitoring \
+  --set collector.service.otlp.grpc.enabled=true \
+  --set collector.service.otlp.http.enabled=true \
+  --set query.ingress.enabled=false
+
+
+Output:
+
+NAME: jaeger
+LAST DEPLOYED: Mon Dec 30 10:02:00 2025
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+
+Install OpenCost for Cost Monitoring​
+# Install OpenCost connected to Prometheus
+helm install opencost opencost/opencost \
+  --namespace monitoring \
+  --set prometheus.internal.serviceName=prometheus-kube-prometheus-prometheus \
+  --set prometheus.internal.namespaceName=monitoring
+
+
+Output:
+
+NAME: opencost
+LAST DEPLOYED: Mon Dec 30 10:03:00 2025
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+
+Verify All Components Running​
+kubectl get pods -n monitoring
+
+
+Output:
+
+NAME                                                     READY   STATUS    RESTARTS   AGE
+alertmanager-prometheus-kube-prometheus-alertmanager-0   2/2     Running   0          3m
+jaeger-agent-daemonset-xxxxx                             1/1     Running   0          2m
+jaeger-collector-yyyyy                                   1/1     Running   0          2m
+jaeger-query-zzzzz                                       1/1     Running   0          2m
+loki-0                                                   1/1     Running   0          2m
+loki-promtail-xxxxx                                      1/1     Running   0          2m
+opencost-yyyyy                                           1/1     Running   0          1m
+prometheus-grafana-xxxxx                                 3/3     Running   0          3m
+prometheus-kube-prometheus-operator-yyyyy                1/1     Running   0          3m
+prometheus-kube-state-metrics-zzzzz                      1/1     Running   0          3m
+prometheus-prometheus-kube-prometheus-prometheus-0       2/2     Running   0          3m
+
+
+All components are running. The observability infrastructure is ready to receive telemetry.
+
+Part 2: Instrument Task API with Metrics, Traces, and Logs​
+
+With the stack deployed, instrument Task API to emit telemetry.
+
+Application Dependencies​
+
+Add observability libraries to your Task API:
+
+# requirements.txt (or pyproject.toml)
+fastapi>=0.109.0
+uvicorn>=0.25.0
+prometheus-client>=0.19.0
+opentelemetry-api>=1.22.0
+opentelemetry-sdk>=1.22.0
+opentelemetry-instrumentation-fastapi>=0.43b0
+opentelemetry-exporter-otlp>=1.22.0
+structlog>=24.1.0
+
+Complete Instrumented Application​
+# main.py - Task API with full observability
+import time
+import structlog
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, Response, HTTPException
+from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+# Configure structured logging with trace correlation
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer()
+    ]
+)
+logger = structlog.get_logger()
+
+# Configure tracing
+trace.set_tracer_provider(TracerProvider())
+otlp_exporter = OTLPSpanExporter(
+    endpoint="jaeger-collector.monitoring:4317",
+    insecure=True
+)
+trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(otlp_exporter))
+tracer = trace.get_tracer(__name__)
+
+# Define Prometheus metrics
+REQUEST_COUNT = Counter(
+    "task_api_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"]
+)
+
+REQUEST_LATENCY = Histogram(
+    "task_api_request_duration_seconds",
+    "Request latency in seconds",
+    ["method", "endpoint"],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+)
+
+TASK_OPERATIONS = Counter(
+    "task_api_operations_total",
+    "Task operations count",
+    ["operation", "status"]
+)
+
+# In-memory task store (replace with database in production)
+tasks: dict = {}
+
+class Task(BaseModel):
+    title: str
+    priority: str = "medium"
+    completed: bool = False
+
+class TaskResponse(BaseModel):
+    id: str
+    title: str
+    priority: str
+    completed: bool
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("task_api_starting", version="1.0.0")
+    yield
+    logger.info("task_api_shutting_down")
+
+app = FastAPI(title="Task API", lifespan=lifespan)
+
+# Instrument FastAPI with OpenTelemetry
+FastAPIInstrumentor.instrument_app(app)
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    """Add metrics and logging to every request"""
+    start_time = time.time()
+
+    # Get trace context for log correlation
+    span = trace.get_current_span()
+    trace_id = format(span.get_span_context().trace_id, "032x") if span else "no-trace"
+
+    response = await call_next(request)
+
+    latency = time.time() - start_time
+
+    # Record metrics
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+    ).inc()
+
+    REQUEST_LATENCY.labels(
+        method=request.method,
+        endpoint=request.url.path
+    ).observe(latency)
+
+    # Structured log with trace correlation
+    logger.info(
+        "http_request",
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+        latency_ms=round(latency * 1000, 2),
+        trace_id=trace_id
+    )
+
+    return response
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Kubernetes probes"""
+    return {"status": "healthy", "version": "1.0.0"}
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.post("/tasks", response_model=TaskResponse, status_code=201)
+async def create_task(task: Task):
+    """Create a new task"""
+    with tracer.start_as_current_span("create_task") as span:
+        task_id = f"task-{len(tasks) + 1}"
+        span.set_attribute("task.id", task_id)
+        span.set_attribute("task.priority", task.priority)
+
+        tasks[task_id] = {
+            "id": task_id,
+            "title": task.title,
+            "priority": task.priority,
+            "completed": task.completed
+        }
+
+        TASK_OPERATIONS.labels(operation="create", status="success").inc()
+        logger.info("task_created", task_id=task_id, priority=task.priority)
+
+        return TaskResponse(**tasks[task_id])
+
+@app.get("/tasks/{task_id}", response_model=TaskResponse)
+async def get_task(task_id: str):
+    """Get a task by ID"""
+    with tracer.start_as_current_span("get_task") as span:
+        span.set_attribute("task.id", task_id)
+
+        if task_id not in tasks:
+            TASK_OPERATIONS.labels(operation="get", status="not_found").inc()
+            logger.warning("task_not_found", task_id=task_id)
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        TASK_OPERATIONS.labels(operation="get", status="success").inc()
+        return TaskResponse(**tasks[task_id])
+
+@app.put("/tasks/{task_id}/complete")
+async def complete_task(task_id: str):
+    """Mark a task as completed"""
+    with tracer.start_as_current_span("complete_task") as span:
+        span.set_attribute("task.id", task_id)
+
+        if task_id not in tasks:
+            TASK_OPERATIONS.labels(operation="complete", status="not_found").inc()
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        tasks[task_id]["completed"] = True
+        TASK_OPERATIONS.labels(operation="complete", status="success").inc()
+        logger.info("task_completed", task_id=task_id)
+
+        return {"status": "completed", "task_id": task_id}
+
+
+Output (application logs on startup):
+
+{"event": "task_api_starting", "version": "1.0.0", "level": "info", "timestamp": "2025-12-30T10:10:00Z"}
+
+Kubernetes Deployment with Observability​
+# task-api-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: default
+  labels:
+    app: task-api
+    cost-center: platform
+    team: agents
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+        cost-center: platform
+        team: agents
+    spec:
+      containers:
+      - name: task-api
+        image: ghcr.io/panaversity/task-api:1.0.0
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://jaeger-collector.monitoring:4317"
+        - name: OTEL_SERVICE_NAME
+          value: "task-api"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  namespace: default
+  labels:
+    app: task-api
+spec:
+  selector:
+    app: task-api
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+
+ServiceMonitor for Prometheus​
+# task-api-servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: task-api
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: task-api
+  namespaceSelector:
+    matchNames:
+    - default
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+
+
+Apply the manifests:
+
+kubectl apply -f task-api-deployment.yaml
+kubectl apply -f task-api-servicemonitor.yaml
+
+
+Output:
+
+deployment.apps/task-api created
+service/task-api created
+servicemonitor.monitoring.coreos.com/task-api created
+
+Part 3: Define SLOs for Task API​
+
+Define Service Level Objectives that matter for a task management API.
+
+SLO Targets​
+SLI	SLO Target	Error Budget (30 days)
+Availability	99.9%	43.2 minutes downtime
+Latency (P95)	< 200ms	0.1% requests may exceed
+PrometheusRule for SLO Recording and Alerting​
+# task-api-slo-rules.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: task-api-slo
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: task-api-slo-recording
+    interval: 30s
+    rules:
+    # Availability SLI: Successful requests / Total requests
+    - record: task_api:availability:5m
+      expr: |
+        sum(rate(task_api_requests_total{status!~"5.."}[5m]))
+        /
+        sum(rate(task_api_requests_total[5m]))
+
+    # Latency SLI: Requests under 200ms / Total requests
+    - record: task_api:latency_sli:5m
+      expr: |
+        sum(rate(task_api_request_duration_seconds_bucket{le="0.2"}[5m]))
+        /
+        sum(rate(task_api_request_duration_seconds_count[5m]))
+
+    # Error budget burn rate (how fast we're consuming budget)
+    - record: task_api:error_budget_burn_rate:5m
+      expr: |
+        1 - task_api:availability:5m
+
+    # 1-hour error budget burn rate for alerting
+    - record: task_api:error_budget_burn_rate:1h
+      expr: |
+        1 - (
+          sum(rate(task_api_requests_total{status!~"5.."}[1h]))
+          /
+          sum(rate(task_api_requests_total[1h]))
+        )
+
+  - name: task-api-slo-alerts
+    rules:
+    # Fast burn: 2% of monthly budget in 1 hour (14.4x burn rate)
+    - alert: TaskAPIHighErrorBudgetBurn
+      expr: |
+        task_api:error_budget_burn_rate:5m > (14.4 * 0.001)
+        and
+        task_api:error_budget_burn_rate:1h > (14.4 * 0.001)
+      for: 2m
+      labels:
+        severity: critical
+        service: task-api
+      annotations:
+        summary: "Task API burning error budget rapidly"
+        description: "Error rate {{ $value | humanizePercentage }} is consuming error budget at 14.4x normal rate. At this rate, monthly budget exhausted in 2 days."
+        runbook_url: "https://docs.panaversity.com/runbooks/task-api-high-error-rate"
+
+    # Slow burn: 10% of monthly budget in 6 hours (2x burn rate)
+    - alert: TaskAPIElevatedErrorBudgetBurn
+      expr: |
+        task_api:error_budget_burn_rate:1h > (2 * 0.001)
+      for: 30m
+      labels:
+        severity: warning
+        service: task-api
+      annotations:
+        summary: "Task API error budget consumption elevated"
+        description: "Error rate is elevated. Investigate before it becomes critical."
+
+    # Latency SLO breach
+    - alert: TaskAPILatencySLOBreach
+      expr: |
+        task_api:latency_sli:5m < 0.999
+      for: 10m
+      labels:
+        severity: warning
+        service: task-api
+      annotations:
+        summary: "Task API P95 latency exceeding 200ms"
+        description: "{{ $value | humanizePercentage }} of requests complete under 200ms (target: 99.9%)"
+
+
+Apply the rules:
+
+kubectl apply -f task-api-slo-rules.yaml
+
+
+Output:
+
+prometheusrule.monitoring.coreos.com/task-api-slo created
+
+
+Verify rules are loaded:
+
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+curl -s localhost:9090/api/v1/rules | jq '.data.groups[].name' | grep task-api
+
+
+Output:
+
+"task-api-slo-recording"
+"task-api-slo-alerts"
+
+Part 4: Create Task API SLO Dashboard in Grafana​
+
+Create a comprehensive dashboard showing availability, latency, error budget, and golden signals.
+
+Dashboard JSON​
+{
+  "title": "Task API SLO Dashboard",
+  "uid": "task-api-slo",
+  "timezone": "browser",
+  "panels": [
+    {
+      "title": "Availability (SLO: 99.9%)",
+      "type": "gauge",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "targets": [{
+        "expr": "task_api:availability:5m * 100",
+        "legendFormat": "Availability %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 99,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              {"value": 99.9, "color": "green"},
+              {"value": 99.5, "color": "yellow"},
+              {"value": 0, "color": "red"}
+            ]
+          },
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "title": "P95 Latency (SLO: <200ms)",
+      "type": "gauge",
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(task_api_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+        "legendFormat": "P95 Latency (ms)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 500,
+          "thresholds": {
+            "steps": [
+              {"value": 200, "color": "green"},
+              {"value": 300, "color": "yellow"},
+              {"value": 400, "color": "red"}
+            ]
+          },
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "title": "Error Budget Remaining",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+      "targets": [{
+        "expr": "(1 - ((1 - task_api:availability:5m) / 0.001)) * 100",
+        "legendFormat": "Budget %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {"value": 50, "color": "green"},
+              {"value": 20, "color": "yellow"},
+              {"value": 0, "color": "red"}
+            ]
+          },
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "title": "Error Budget Burn Rate",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+      "targets": [{
+        "expr": "task_api:error_budget_burn_rate:1h / 0.001",
+        "legendFormat": "Burn Rate (x normal)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {"value": 1, "color": "green"},
+              {"value": 2, "color": "yellow"},
+              {"value": 14.4, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{
+        "expr": "sum(rate(task_api_requests_total[5m]))",
+        "legendFormat": "Requests/sec"
+      }]
+    },
+    {
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{
+        "expr": "sum(rate(task_api_requests_total{status=~\"5..\"}[5m])) / sum(rate(task_api_requests_total[5m])) * 100",
+        "legendFormat": "Error %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {"value": 0.1, "color": "green"},
+              {"value": 0.5, "color": "yellow"},
+              {"value": 1, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Latency Distribution",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(task_api_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(task_api_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(task_api_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "title": "Task Operations",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [{
+        "expr": "sum(rate(task_api_operations_total[5m])) by (operation, status)",
+        "legendFormat": "{{operation}} ({{status}})"
+      }]
+    }
+  ]
+}
+
+
+Import the dashboard to Grafana:
+
+# Port-forward to Grafana
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80 &
+
+# Login: admin / observability-demo
+# Import dashboard via UI: Dashboards > Import > Paste JSON
+
+
+Output (after import):
+
+Dashboard "Task API SLO Dashboard" imported successfully
+URL: http://localhost:3000/d/task-api-slo
+
+Part 5: Set Up Multi-Burn-Rate Alerts​
+
+The PrometheusRule from Part 3 already defines multi-burn-rate alerts. Now configure Alertmanager to route them appropriately.
+
+Alertmanager Configuration​
+# alertmanager-config.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-prometheus-kube-prometheus-alertmanager
+  namespace: monitoring
+stringData:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+
+    route:
+      receiver: 'default-receiver'
+      group_by: ['alertname', 'service']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+
+      routes:
+      # Critical alerts page immediately
+      - match:
+          severity: critical
+        receiver: 'pagerduty-critical'
+        continue: true
+
+      # Warning alerts go to Slack
+      - match:
+          severity: warning
+        receiver: 'slack-warnings'
+
+    receivers:
+    - name: 'default-receiver'
+      # Default: log to stdout (for demo)
+      webhook_configs:
+      - url: 'http://alertmanager-webhook-logger:8080/webhook'
+
+    - name: 'pagerduty-critical'
+      # In production: configure PagerDuty integration
+      webhook_configs:
+      - url: 'http://alertmanager-webhook-logger:8080/pagerduty'
+
+    - name: 'slack-warnings'
+      # In production: configure Slack webhook
+      webhook_configs:
+      - url: 'http://alertmanager-webhook-logger:8080/slack'
+
+
+Apply and verify:
+
+kubectl apply -f alertmanager-config.yaml
+kubectl rollout restart statefulset/alertmanager-prometheus-kube-prometheus-alertmanager -n monitoring
+
+
+Output:
+
+secret/alertmanager-prometheus-kube-prometheus-alertmanager configured
+statefulset.apps/alertmanager-prometheus-kube-prometheus-alertmanager restarted
+
+Verify Alert Rules​
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-alertmanager 9093:9093 &
+curl -s localhost:9093/api/v2/status | jq '.config.route'
+
+
+Output:
+
+{
+  "receiver": "default-receiver",
+  "group_by": ["alertname", "service"],
+  "routes": [
+    {"match": {"severity": "critical"}, "receiver": "pagerduty-critical"},
+    {"match": {"severity": "warning"}, "receiver": "slack-warnings"}
+  ]
+}
+
+Part 6: Configure Cost Allocation Labels​
+
+Cost allocation was configured in the Deployment (Part 2). Now verify OpenCost is collecting the data.
+
+Verify Cost Labels​
+kubectl get pods -n default --show-labels | grep task-api
+
+
+Output:
+
+task-api-xxxxx   1/1   Running   app=task-api,cost-center=platform,team=agents
+task-api-yyyyy   1/1   Running   app=task-api,cost-center=platform,team=agents
+task-api-zzzzz   1/1   Running   app=task-api,cost-center=platform,team=agents
+
+Query OpenCost​
+kubectl port-forward -n monitoring svc/opencost 9003:9003 &
+curl -s "localhost:9003/allocation/compute?window=1d&aggregate=namespace" | jq '.data[0]'
+
+
+Output:
+
+{
+  "default": {
+    "cpuCost": 0.0432,
+    "memoryCost": 0.0216,
+    "totalCost": 0.0648,
+    "cpuEfficiency": 0.15,
+    "memoryEfficiency": 0.45
+  },
+  "monitoring": {
+    "cpuCost": 0.1296,
+    "memoryCost": 0.0864,
+    "totalCost": 0.2160,
+    "cpuEfficiency": 0.35,
+    "memoryEfficiency": 0.60
+  }
+}
+
+Cost by Team Label​
+curl -s "localhost:9003/allocation/compute?window=1d&aggregate=label:team" | jq '.data[0]'
+
+
+Output:
+
+{
+  "agents": {
+    "cpuCost": 0.0432,
+    "memoryCost": 0.0216,
+    "totalCost": 0.0648
+  }
+}
+
+
+The team=agents label enables cost attribution to specific teams.
+
+Part 7: Finalize and Test observability-cost-engineer Skill​
+
+You've built an observability-cost-engineer skill throughout this chapter. Now verify it can deploy this complete stack.
+
+Test Your Skill​
+Using my observability-cost-engineer skill, deploy a complete observability stack
+for a new FastAPI service called "order-service" with:
+- 99.9% availability SLO
+- P95 latency target of 150ms
+- Cost allocation labels: cost-center=commerce, team=orders
+
+Verify Skill Output​
+
+Your skill should produce:
+
+Helm commands for stack installation (if not already deployed)
+ServiceMonitor for the new service
+PrometheusRule with SLO recording rules and multi-burn-rate alerts
+Dashboard JSON for the service
+Deployment YAML with proper labels and probes
+Identify Gaps​
+
+If your skill missed any of these, update it:
+
+My observability-cost-engineer skill doesn't include multi-burn-rate alerting patterns.
+Update it to include the 14.4x and 2x burn rate thresholds for fast and slow burns,
+with proper alert annotations including runbook URLs.
+
+Complete System Verification Checklist​
+
+Run through this checklist to verify your complete observability stack:
+
+Infrastructure Verification​
+# All observability pods running
+kubectl get pods -n monitoring | grep -E "prometheus|grafana|loki|jaeger|opencost"
+
+
+Expected: All pods in Running state.
+
+Metrics Verification​
+# Query Prometheus for Task API metrics
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+curl -s "localhost:9090/api/v1/query?query=task_api_requests_total" | jq '.data.result | length'
+
+
+Expected: Non-zero result indicating metrics are being collected.
+
+Tracing Verification​
+# Generate a trace
+curl -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{"title":"Test task"}'
+
+# Query Jaeger for traces
+kubectl port-forward -n monitoring svc/jaeger-query 16686:16686 &
+# Open http://localhost:16686, search for service=task-api
+
+
+Expected: Traces visible in Jaeger UI.
+
+Logging Verification​
+# Query Loki for Task API logs
+kubectl port-forward -n monitoring svc/loki 3100:3100 &
+curl -s "localhost:3100/loki/api/v1/query?query={namespace=\"default\",app=\"task-api\"}" | jq '.data.result | length'
+
+
+Expected: Logs found for Task API.
+
+SLO Verification​
+# Check SLO recording rules
+curl -s "localhost:9090/api/v1/query?query=task_api:availability:5m" | jq '.data.result[0].value[1]'
+
+
+Expected: Value close to 1.0 (100% availability).
+
+Cost Verification​
+# Check cost allocation
+curl -s "localhost:9003/allocation/compute?window=1d&aggregate=label:team" | jq 'keys'
+
+
+Expected: ["agents"] or similar team labels.
+
+Component	Verification Command	Expected Result
+Prometheus	kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus	Running
+Grafana	kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana	Running
+Loki	kubectl get pods -n monitoring -l app.kubernetes.io/name=loki	Running
+Jaeger	kubectl get pods -n monitoring -l app.kubernetes.io/name=jaeger	Running
+OpenCost	kubectl get pods -n monitoring -l app.kubernetes.io/name=opencost	Running
+Metrics flowing	Query task_api_requests_total	Non-empty result
+Traces visible	Jaeger UI search	Traces found
+Logs aggregated	Loki query	Logs returned
+SLO calculated	Query task_api:availability:5m	~1.0
+Costs tracked	OpenCost API	Cost data by team
+Try With AI​
+Prompt 1: Extend the Stack​
+I've deployed the complete observability stack for Task API. Now I want to add
+observability for a new microservice called "notification-service" that sends
+emails and push notifications. What instrumentation do I need to add, and what
+SLOs make sense for a notification service?
+
+
+What you're learning: Applying observability patterns to different service types. Notification services have different reliability characteristics than synchronous APIs.
+
+Prompt 2: Debug with Observability​
+My Task API SLO dashboard shows availability dropped to 99.5% in the last hour.
+Walk me through how to use the observability stack to identify the root cause.
+What should I check in Prometheus, Jaeger, and Loki?
+
+
+What you're learning: Using the three pillars together for incident investigation. Metrics tell you something is wrong, traces show where, logs explain why.
+
+Prompt 3: Optimize Costs​
+OpenCost shows my monitoring namespace costs $0.22/day but my application
+namespace only costs $0.06/day. Is this ratio normal? How can I optimize
+observability costs without losing visibility?
+
+
+What you're learning: FinOps for observability infrastructure. Retention policies, sampling rates, and resource right-sizing reduce costs while maintaining visibility.
+
+Safety note: When testing alerts, use a non-production environment. Triggering real PagerDuty pages or Slack notifications during testing creates alert fatigue and undermines trust in the alerting system. Always configure test receivers that log but don't notify during development.
+
+Reflect on Your Skill​
+
+This capstone integrated everything from Chapter 85. Your observability-cost-engineer skill should now be production-ready.
+
+Final Skill Test​
+Using my observability-cost-engineer skill, explain how to add observability
+to a new Dapr-enabled microservice. Include metrics, traces, logs, SLOs,
+alerts, and cost allocation. The service uses Dapr Actors for state management.
+
+Verify Complete Coverage​
+
+Your skill should address:
+
+ Prometheus metrics via ServiceMonitor
+ OpenTelemetry tracing with Dapr correlation
+ Structured logging with trace_id
+ SLO definition with error budgets
+ Multi-burn-rate alerting rules
+ Cost allocation labels
+ Dapr-specific observability (actor metrics, workflow spans)
+Skill Improvement​
+
+If any area is weak:
+
+My observability-cost-engineer skill is weak on Dapr-specific observability.
+Update it to include Dapr Configuration CRD for tracing, ServiceMonitor for
+Dapr sidecars, and dashboard panels for actor activation counts.
+
+
+Your skill is now a Digital FTE component. Any AI agent system you build can use this skill to achieve production-grade observability. The patterns you've encoded work for Task API today and any microservice tomorrow.

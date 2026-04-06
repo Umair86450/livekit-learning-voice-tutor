@@ -1,0 +1,485 @@
+Gemini Live Fundamentals
+
+In Chapter 112, you connected directly to OpenAI's Realtime API. You mastered WebRTC negotiation, PCM16 audio at 24kHz, and native speech-to-speech processing.
+
+Now you explore Google's approach. The Gemini Live API takes a different path: WebSocket instead of WebRTC, multimodal by design, and capabilities OpenAI does not offer. This lesson teaches you to establish your first Gemini Live connection and understand what makes it distinctive.
+
+Gemini 2.5 Flash Native Audio: What Changes​
+
+Google announced Gemini 2.5 Flash Native Audio in May 2025. Unlike cascaded pipelines, this model processes audio directly:
+
+Traditional Pipeline:
+User Speaks → STT → Text → LLM → Text → TTS → Agent Speaks
+                         4 conversion steps
+
+Gemini Native Audio:
+User Speaks → gemini-2.5-flash-native-audio-preview → Agent Speaks
+                         Direct processing
+
+
+The model "hears" your voice, including tone, pace, and emotion. It generates speech with matching qualities.
+
+What Makes Gemini Live Distinctive​
+Capability	Traditional Pipeline	OpenAI Realtime	Gemini Live
+Native audio	No	Yes	Yes
+Affective dialog	No	Limited	Advanced
+Proactive audio	No	No	Yes
+Voice + vision	No	Limited	Native
+Voices	Varies by TTS	10+	30 HD
+Languages	Varies by STT	10+	24+
+Live translation	External	No	70+ language pairs
+
+Affective dialog: The model detects frustration, sadness, or excitement in your voice and adapts its response tone accordingly.
+
+Proactive audio: The model decides when to speak. In smart device scenarios, it stays silent for background conversation and responds only to device-directed queries.
+
+These capabilities transform what voice agents can do.
+
+The Live API Protocol​
+
+Gemini Live API uses WebSocket for bidirectional streaming:
+
+Connection Flow​
+┌─────────────┐                          ┌─────────────────────┐
+│   Client    │                          │   Gemini Live API   │
+│ (Your Code) │                          │       Server        │
+└──────┬──────┘                          └──────────┬──────────┘
+       │                                            │
+       │  1. WebSocket connect (with API key)       │
+       │  ─────────────────────────────────────────>│
+       │                                            │
+       │  2. Connection accepted                    │
+       │  <─────────────────────────────────────────│
+       │                                            │
+       │  3. Send session config                    │
+       │  ─────────────────────────────────────────>│
+       │                                            │
+       │  4. Session established                    │
+       │  <─────────────────────────────────────────│
+       │                                            │
+       │  5. Stream audio chunks                    │
+       │  ═════════════════════════════════════════>│
+       │                                            │
+       │  6. Receive audio responses                │
+       │  <═════════════════════════════════════════│
+       │                                            │
+       │  7. Receive transcripts, events            │
+       │  <═════════════════════════════════════════│
+       │                                            │
+
+Key Differences from OpenAI Realtime​
+Aspect	OpenAI Realtime	Gemini Live API
+Transport	WebRTC	WebSocket
+Audio format	24kHz PCM16	16kHz PCM16
+Control plane	DataChannel	Same WebSocket
+SDP/ICE negotiation	Required	Not needed
+Browser native	Yes (via RTCPeerConnection)	Requires audio worklet
+
+WebSocket is simpler to implement server-side. No SDP negotiation. No ICE candidate exchange. Connect, authenticate, stream.
+
+Audio Format Requirements​
+
+Gemini Live API has different audio requirements than OpenAI:
+
+Parameter	Requirement
+Sample Rate	16,000 Hz (16kHz)
+Bit Depth	16-bit signed integer (PCM16)
+Channels	Mono (1 channel)
+Encoding	Little-endian, base64 for transport
+Why 16kHz Instead of 24kHz?​
+
+Google's speech models are optimized for 16kHz. This is sufficient for voice intelligibility while reducing bandwidth. Human speech energy concentrates below 8kHz; 16kHz sampling captures this with margin.
+
+Audio Conversion​
+
+If your source uses different specifications:
+
+import numpy as np
+from scipy import signal
+
+def convert_to_gemini_format(
+    audio: np.ndarray,
+    source_rate: int,
+    source_channels: int
+) -> bytes:
+    """Convert audio to Gemini Live API format."""
+
+    # Convert to mono if stereo
+    if source_channels == 2:
+        audio = audio.mean(axis=1)
+
+    # Resample to 16kHz
+    if source_rate != 16000:
+        num_samples = int(len(audio) * 16000 / source_rate)
+        audio = signal.resample(audio, num_samples)
+
+    # Normalize to [-1, 1] range
+    audio = audio / np.max(np.abs(audio))
+
+    # Convert to 16-bit PCM
+    audio_int16 = (audio * 32767).astype(np.int16)
+
+    # Return as little-endian bytes
+    return audio_int16.tobytes()
+
+
+Output:
+
+>>> import numpy as np
+>>> # Simulate 48kHz stereo audio
+>>> audio = np.random.randn(48000, 2)  # 1 second at 48kHz stereo
+>>> converted = convert_to_gemini_format(audio, 48000, 2)
+>>> print(f"Output bytes: {len(converted)}")
+Output bytes: 32000
+>>> # 16000 samples * 2 bytes/sample = 32000 bytes for 1 second
+
+Voice Selection: 30 HD Voices​
+
+Gemini Live API offers 30 HD voices across 24 languages. Each voice has distinct characteristics:
+
+English Voices​
+Voice	Character	Best For
+Puck	Youthful, energetic	Consumer apps, gaming
+Charon	Deep, authoritative	Business, finance
+Kore	Warm, nurturing	Healthcare, education
+Fenrir	Dynamic, expressive	Creative, entertainment
+Aoede	Clear, professional	Information delivery
+Orbit	Neutral, balanced	General purpose
+Orus	Calm, measured	Support, guidance
+Vesta	Friendly, approachable	Customer service
+Language Coverage​
+Category	Languages
+European	English, Spanish, French, German, Italian, Portuguese, Dutch, Polish, Russian
+Asian	Mandarin, Japanese, Korean, Hindi, Vietnamese, Thai, Indonesian
+Middle Eastern	Arabic, Turkish, Hebrew
+Other	Brazilian Portuguese, Ukrainian, Czech, Romanian
+Voice Selection Strategy​
+
+Choose voice based on:
+
+Target audience: Match formality and energy to user expectations
+Use case: Support calls need warmth; financial advice needs authority
+Language: Native voices for each language, not translated
+Brand alignment: Voice becomes your agent's personality
+Session Configuration​
+
+Configure your session before streaming audio:
+
+Configuration Message​
+session_config = {
+    "setup": {
+        "model": "models/gemini-2.5-flash-native-audio-preview",
+        "generation_config": {
+            "response_modalities": ["AUDIO"],
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": "Puck"  # From 30 HD voices
+                    }
+                }
+            }
+        },
+        "system_instruction": {
+            "parts": [{
+                "text": """
+                You are a helpful voice assistant for Task Manager.
+                Keep responses concise - under 30 words.
+                Confirm actions you take.
+                """
+            }]
+        }
+    }
+}
+
+Configuration Options​
+Option	Values	Purpose
+model	gemini-2.5-flash-native-audio-preview	Model version
+response_modalities	["AUDIO"], ["TEXT"], ["AUDIO", "TEXT"]	Output types
+voice_name	Puck, Charon, Kore, etc.	Voice personality
+system_instruction	Text	Agent personality and constraints
+Turn Detection​
+
+Gemini Live handles turn detection automatically. The model uses voice activity detection to determine when you have finished speaking:
+
+# Optional: Customize turn detection
+"realtime_input_config": {
+    "turn_detection": {
+        "create_response": True,     # Auto-respond when user stops
+        "threshold": 0.5,            # VAD sensitivity
+        "silence_duration_ms": 700   # Silence before turn ends
+    }
+}
+
+Complete Connection Implementation​
+
+Here is a complete implementation connecting to Gemini Live API:
+
+import asyncio
+import json
+import base64
+import os
+from google import genai
+from google.genai import types
+
+class GeminiLiveConnection:
+    """Direct connection to Gemini Live API."""
+
+    def __init__(self):
+        self.client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+        self.session = None
+
+    async def connect(
+        self,
+        voice: str = "Puck",
+        instructions: str = "You are a helpful voice assistant."
+    ):
+        """Establish connection to Gemini Live API."""
+
+        # Configure the model
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice
+                    )
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part(text=instructions)]
+            )
+        )
+
+        # Connect via the Live API
+        async with self.client.aio.live.connect(
+            model="gemini-2.5-flash-native-audio-preview",
+            config=config
+        ) as session:
+            self.session = session
+            print(f"[gemini] Connected with voice: {voice}")
+
+            # Start the conversation loop
+            await self._conversation_loop()
+
+    async def _conversation_loop(self):
+        """Handle bidirectional audio streaming."""
+
+        # Start microphone input task
+        mic_task = asyncio.create_task(self._stream_microphone())
+
+        # Process responses from Gemini
+        try:
+            async for response in self.session.receive():
+                await self._handle_response(response)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            mic_task.cancel()
+
+    async def _stream_microphone(self):
+        """Stream microphone audio to Gemini."""
+        import sounddevice as sd
+
+        # Audio capture settings
+        sample_rate = 16000
+        channels = 1
+        chunk_duration = 0.1  # 100ms chunks
+
+        def audio_callback(indata, frames, time_info, status):
+            if status:
+                print(f"[audio] {status}")
+
+            # Convert to bytes and send
+            audio_bytes = (indata * 32767).astype('int16').tobytes()
+            asyncio.create_task(self._send_audio(audio_bytes))
+
+        # Start streaming
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=channels,
+            dtype='float32',
+            callback=audio_callback,
+            blocksize=int(sample_rate * chunk_duration)
+        ):
+            print("[gemini] Microphone streaming started")
+            while True:
+                await asyncio.sleep(0.1)
+
+    async def _send_audio(self, audio_bytes: bytes):
+        """Send audio chunk to Gemini."""
+        if self.session:
+            await self.session.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[
+                        types.Blob(
+                            mime_type="audio/pcm",
+                            data=base64.b64encode(audio_bytes).decode()
+                        )
+                    ]
+                )
+            )
+
+    async def _handle_response(self, response):
+        """Handle responses from Gemini."""
+
+        # Check for audio data
+        if hasattr(response, 'data') and response.data:
+            # Play audio response
+            audio_data = base64.b64decode(response.data)
+            await self._play_audio(audio_data)
+
+        # Check for text transcript
+        if hasattr(response, 'text') and response.text:
+            print(f"[agent] {response.text}")
+
+        # Check for turn completion
+        if hasattr(response, 'server_content'):
+            if response.server_content.turn_complete:
+                print("[gemini] Turn complete")
+
+    async def _play_audio(self, audio_bytes: bytes):
+        """Play received audio through speakers."""
+        import sounddevice as sd
+        import numpy as np
+
+        # Convert from PCM16 bytes to numpy array
+        audio = np.frombuffer(audio_bytes, dtype=np.int16)
+        audio = audio.astype(np.float32) / 32767
+
+        # Play through speakers
+        sd.play(audio, samplerate=16000)
+
+
+async def main():
+    """Run a voice conversation with Gemini."""
+    conn = GeminiLiveConnection()
+
+    try:
+        await conn.connect(
+            voice="Puck",
+            instructions="""
+            You are a voice assistant for Task Manager.
+            Help users check, create, and complete tasks.
+            Keep responses under 30 words.
+            Be friendly and conversational.
+            """
+        )
+    except KeyboardInterrupt:
+        print("\n[exit] Shutting down...")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+Output:
+
+[gemini] Connected with voice: Puck
+[gemini] Microphone streaming started
+
+User: "What tasks do I have today?"
+[agent] You have three tasks today: review the proposal, send invoices, and prepare for the team meeting.
+[gemini] Turn complete
+
+User: "Mark the invoices as done"
+[agent] Done! I've marked 'send invoices' as complete. Two tasks remaining.
+[gemini] Turn complete
+
+Event Types Reference​
+
+Gemini Live API sends various event types:
+
+Session Events​
+Event	Description
+setup_complete	Connection established, ready for audio
+tool_call	Function calling requested
+tool_call_cancellation	Function call cancelled
+Audio Events​
+Event	Description
+server_content.model_turn	Model started responding
+server_content.turn_complete	Model finished responding
+server_content.interrupted	User interrupted model
+Content Types​
+Type	Description
+audio	Base64-encoded PCM16 audio
+text	Transcript of audio content
+inline_data	Image or other binary data
+Comparison: OpenAI vs Gemini​
+
+Now that you have seen both APIs, compare the approaches:
+
+Aspect	OpenAI Realtime	Gemini Live
+Transport	WebRTC (complex)	WebSocket (simpler)
+Audio rate	24kHz	16kHz
+Browser support	Native RTCPeerConnection	Requires audio worklet
+Server implementation	Harder (ICE, DTLS)	Easier (plain WebSocket)
+Multimodal	Audio + limited vision	Audio + full vision
+Affective dialog	Basic	Advanced
+Proactive audio	No	Yes
+Voice selection	10+ voices	30 HD voices
+Language support	10+	24+ with translation
+
+Choose OpenAI when: Browser-native is critical, you are already invested in OpenAI ecosystem, or you need mature function calling.
+
+Choose Gemini when: Multimodal is essential, you need affective dialog, proactive audio matters, or you prefer simpler server implementation.
+
+Try With AI​
+Prompt 1: Architecture Comparison​
+I've implemented voice agents with both OpenAI Realtime and Gemini Live API.
+Help me understand the architectural differences:
+
+1. Why does OpenAI use WebRTC while Gemini uses WebSocket?
+2. What are the latency implications of each approach?
+3. For a browser-based voice agent, which requires less client code?
+4. My agent needs to see the user's screen while conversing. Which API?
+
+Use diagrams to show the connection flow differences.
+
+
+What you are learning: Protocol trade-offs. Understanding why each company made different architectural choices helps you select the right tool.
+
+Prompt 2: Voice Selection Strategy​
+I'm building a voice agent for three scenarios:
+
+1. Customer support for a luxury hotel (English, Spanish)
+2. Financial advisor for retirees (needs to feel trustworthy)
+3. Gaming companion for teenagers (needs energy)
+
+From Gemini's 30 HD voices, help me:
+1. Select appropriate voices for each scenario
+2. Explain why each voice fits the audience
+3. Consider language requirements
+4. Suggest fallback voices if primary is unavailable
+
+
+What you are learning: Voice personality design. The voice is your agent's first impression---matching it to audience expectations is critical for adoption.
+
+Prompt 3: Migration Planning​
+I have an existing voice agent built with Pipecat using Deepgram STT + GPT-4 + Cartesia TTS.
+
+I want to evaluate migrating to Gemini Live API native audio. Help me:
+
+1. What functionality would I gain?
+2. What would I lose (Pipecat features, provider flexibility)?
+3. Estimate the latency difference
+4. Estimate the cost difference for 10,000 4-minute calls/month
+5. What's your recommendation?
+
+My agent does customer support with occasional screen sharing requests.
+
+
+What you are learning: Migration decision-making. Real projects must weigh gains against losses when adopting new technologies.
+
+Safety Note​
+
+Direct API access means direct responsibility:
+
+Content filtering: Gemini has built-in safety filters, but review your use case against Google's acceptable use policies. Some content categories may be restricted.
+
+Audio persistence: Understand data retention. Google processes audio for the session; review your GDPR, HIPAA, or industry-specific obligations.
+
+Rate limiting: The Live API has concurrent connection limits. Implement connection pooling for high-volume production use.
+
+Cost monitoring: Native audio processing is billed by duration and token count. Implement usage tracking to avoid surprise bills.
+
+Test thoroughly with representative conversations before exposing to real users.

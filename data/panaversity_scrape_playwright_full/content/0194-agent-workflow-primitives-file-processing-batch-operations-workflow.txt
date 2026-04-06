@@ -1,0 +1,253 @@
+Batch Operations Workflow
+
+You've got 87 screenshots. Renaming them one by one would take 43 minutes. Renaming them with a script takes 30 seconds.
+
+But the real difference isn't speed.
+
+You asked the agent to rename your screenshots. It gave you renamed screenshots AND a script called rename-screenshots.sh. You didn't ask for the script. The agent anticipated that you'd need to do this again next month and solved beyond your request. That's the pattern this lesson teaches: don't just solve the problem: solve the category of problems.
+
+Your screenshots are named things like Screenshot 2024-01-15 at 10.23.45.png. The auto-generated names made sense to your operating system. They make no sense to you. Let's fix that, and make sure the fix is permanent.
+
+The Conversation​
+
+Open Claude Code. Describe the problem.
+
+You: I have lots of screenshots with ugly names like 'Screenshot 2024-01-15
+at 10.23.45.png'. Help me rename them to something organized like
+'screenshot-001.png', 'screenshot-002.png', etc.
+
+
+Watch what Claude Code does.
+
+Claude Code: I'll analyze your screenshots and prepare a rename plan.
+Let me first see what we're working with.
+
+[Runs: ls ~/Screenshots/*.png | head -10]
+[Runs: ls ~/Screenshots/*.png | wc -l]
+
+I found 87 screenshots. Before I rename anything, here's what I'll do:
+
+| Current Name                              | New Name           |
+|-------------------------------------------|--------------------|
+| Screenshot 2024-01-15 at 10.23.45.png     | screenshot-001.png |
+| Screenshot 2024-01-15 at 14.30.22.png     | screenshot-002.png |
+| Screenshot 2024-02-03 at 09.15.11.png     | screenshot-003.png |
+| Screenshot 2024-02-14 at 16.42.08.png     | screenshot-004.png |
+| ... (83 more files)                       | ...                |
+
+The files will be numbered in chronological order based on
+their creation date.
+
+Should I proceed with this plan, or would you like a different
+naming pattern?
+
+
+You look at the preview. Something's wrong. The agent threw away useful information: the dates. screenshot-001.png tells you nothing about when the screenshot was taken. Six months from now, you'll have no idea what screenshot-047.png contains or why you took it.
+
+You: Actually, include the date. Make it 'screenshot-2024-01-15-001.png'
+so I can see when each screenshot was taken.
+
+Claude Code: Good thinking. Keeping the date makes files easier to find later.
+Here's the updated plan:
+
+| Current Name                              | New Name                      |
+|-------------------------------------------|-------------------------------|
+| Screenshot 2024-01-15 at 10.23.45.png     | screenshot-2024-01-15-001.png |
+| Screenshot 2024-01-15 at 14.30.22.png     | screenshot-2024-01-15-002.png |
+| Screenshot 2024-02-03 at 09.15.11.png     | screenshot-2024-02-03-001.png |
+| Screenshot 2024-02-14 at 16.42.08.png     | screenshot-2024-02-14-001.png |
+| ... (83 more files)                       | ...                           |
+
+Notice that files from the same day get sequential numbers within
+that day (001, 002, etc.).
+
+I'll also create a reusable script so you can run this pattern
+on new screenshots later.
+
+Proceed?
+
+
+You're satisfied. You give the go-ahead.
+
+You: Yes, do it.
+
+Claude Code:
+[Runs: mkdir -p ~/Screenshots/renamed]
+[Runs: # Rename loop with logging...]
+
+Done. Here's what happened:
+
+SUMMARY
+- Files renamed: 87
+- New location: ~/Screenshots/renamed/
+- Script created: rename-screenshots.sh
+
+CHANGE LOG (first 10):
+  Screenshot 2024-01-15 at 10.23.45.png → screenshot-2024-01-15-001.png
+  Screenshot 2024-01-15 at 14.30.22.png → screenshot-2024-01-15-002.png
+  Screenshot 2024-02-03 at 09.15.11.png → screenshot-2024-02-03-001.png
+  ...
+
+The full log is saved in rename-log.txt.
+
+To rename future screenshots, run:
+  ./rename-screenshots.sh ~/Screenshots
+
+
+87 files renamed. A reusable script created. A log of every change. You did this by having a conversation.
+
+When Batch Operations Go Sideways​
+
+The smooth version above is what happens when everything works. Here's what happens when it doesn't.
+
+Scenario: Naming Collision​
+
+You run the script and the agent reports:
+
+Claude Code: Warning: Two files would both become
+"screenshot-2024-03-15-001.png" because they were
+created within the same second.
+
+Conflicting files:
+  Screenshot 2024-03-15 at 09.00.00.png (from Downloads)
+  Screenshot 2024-03-15 at 09.00.00.png (from Desktop)
+
+Options:
+1. Add time to the name: screenshot-2024-03-15-0900-001.png
+2. Add a suffix: screenshot-2024-03-15-001a.png and 001b.png
+3. Skip the conflict and let me handle it manually
+
+Which approach?
+
+
+Why this matters: Batch operations that assume unique names will silently overwrite files. Good agents detect conflicts before they cause data loss. When you see this pattern, it means the agent detected a potential data loss scenario before it happened.
+
+Scenario: Partial Failure​
+
+The script processes 80 of 87 files, then:
+
+Claude Code: Error on file 81: "Screenshot 2024-04-01 at ?.??.??.png"
+The filename contains question marks that can't be parsed.
+
+Progress: 80 of 87 renamed successfully.
+Failed: 7 files with non-standard characters in filenames.
+
+The 80 successful renames are in ~/Screenshots/renamed/.
+The 7 failed files are still in the original location.
+
+Want me to show you the failed files so we can handle them individually?
+
+
+What you should do: Don't panic. The agent left failed files untouched (the originals are safe). Handle the exceptions individually. Then update the script to handle unusual characters in future runs.
+
+This is why the preview step matters. If you'd caught the question-mark filenames in the preview, you could have handled them before the batch run.
+
+Don't Fix the File: Fix the Rule​
+
+This is the central lesson of batch operations. When something goes wrong, resist the urge to fix the affected files and move on. Fix the rule that caused the error.
+
+The rename script choked on filenames with question marks? Don't rename those 7 files manually: update rename-screenshots.sh to handle special characters, then rerun it on the failed files. The naming collision? Don't move two files by hand: update the script to detect same-second conflicts.
+
+Every edge case you fix in the script is an edge case that never bites you again. Every error makes the system smarter. This is how one-time solutions evolve into robust automation.
+
+The agent didn't just rename files. It created a script. That's the difference between solving a problem once and solving a category of problems. Next month when you have 50 new screenshots, you run ./rename-screenshots.sh and they're all named consistently.
+
+The Pattern​
+
+Here's what made this work:
+
+"Show me what you'll do before doing it."
+
+
+This single request triggers the preview-before-action pattern. The agent will:
+
+Analyze the current state
+Generate a proposed plan
+Show you the plan
+Wait for approval
+
+And the second key request:
+
+"Create a script I can reuse for this."
+
+
+This triggers script generation instead of one-time execution. The agent produces:
+
+A working script file
+Instructions for running it
+Built-in logging
+
+Together, these patterns transform tedious manual work into reviewed, logged, reusable automation.
+
+Why Scripts Matter​
+
+Consider the difference:
+
+Approach	What You Get	Next Time
+One-time commands	Files renamed	Start over from scratch
+Script generation	Files renamed + rename-screenshots.sh	Run one command
+
+The first approach solves the problem. The second approach solves the category of problems. Code becomes the interface between your intent and recurring tasks.
+
+The script also serves as documentation. Six months from now, you might forget exactly how you wanted screenshots named. Open rename-screenshots.sh and the logic is right there, preserved in code.
+
+The Key Requests​
+
+Remember these phrases for batch operations:
+
+What You Want	What to Say
+See the plan first	"Show me what you'll do before doing it"
+Get reusable code	"Create a script I can reuse for this"
+Keep a record	"Log every change you make"
+Change the plan	"Actually, make it [new pattern] instead"
+Limit scope	"Just do the first 5 files to test"
+
+You're not memorizing bash syntax. You're learning how to direct an agent effectively.
+
+What You're Building​
+
+By now in this chapter, you've learned:
+
+Lesson	Pattern
+1. First Workflow	"Help me understand"
+2. Safety First	"Back up before changing"
+3. Categorize with Rules	"Write rules first"
+4. Batch Operations	"Show me first, create a script"
+
+Each pattern builds on the last. You understand your files. You protect them with backups. You document your rules. Now you transform repetitive tasks into reusable automation.
+
+Your scripts are powerful. They rename 87 files in seconds. But what happens when a script does the WRONG thing to 87 files in seconds? Speed amplifies mistakes exactly as much as it amplifies productivity. You need a recovery workflow that works as fast as the scripts that caused the problem.
+
+Try With AI: Extended Practice​
+
+Prompt 1: Complex Naming Patterns
+
+I want to rename my screenshots but the pattern is more complex:
+- Group by month into folders (2024-01/, 2024-02/, etc.)
+- Within each folder, name files screenshot-001.png, screenshot-002.png
+- Show me the folder structure and file mapping before doing anything
+
+Can you handle this multi-step organization?
+
+
+What you're practicing: Compound requests. You're asking the agent to both reorganize (create folders) and rename (change filenames). Watch how it breaks down the complex task.
+
+Prompt 2: Dry Run Mode
+
+I want to see exactly what commands you would run to rename these files,
+but don't actually run them yet. Show me the bash commands you'd execute
+so I can understand what's happening.
+
+
+What you're practicing: Understanding the mechanics. By asking to see the commands without execution, you learn what's happening "under the hood" while staying in control.
+
+Prompt 3: Content-Aware Operations
+
+I have 200 PDF invoices named "Invoice_12345.pdf". I want to rename them
+to include the client name, but the client name is INSIDE the PDF, not in
+the filename. Can you extract it and use it in the rename?
+
+
+What you're practicing: Content-aware batch operations. You're moving beyond filename-based operations to using file contents as input. This is how real automation handles documents where the metadata you need is inside the file, not in its name.
+
+Flashcards Study Aid​

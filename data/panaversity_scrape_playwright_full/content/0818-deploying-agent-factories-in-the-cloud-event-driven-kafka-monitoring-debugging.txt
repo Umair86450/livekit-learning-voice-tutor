@@ -1,0 +1,481 @@
+Monitoring and Debugging Kafka
+
+It's 3 AM. Your pager goes off. The order processing system stopped sending confirmation emails two hours ago. You check the notification service logs—no errors. The service is running, polling Kafka, and processing messages. So where are the orders?
+
+You discover the consumer group has 47,000 messages of lag on one partition. Those orders are sitting in Kafka, unprocessed. Your consumer has been processing, but slower than the incoming rate. For two hours, the gap widened silently until a customer complained.
+
+This scenario illustrates why Kafka monitoring isn't optional—it's your early warning system. In this lesson, you'll learn to monitor consumer lag, inspect topics and consumer groups with CLI tools, diagnose common failures, and configure alerts that catch problems before customers do.
+
+Consumer Lag: The Most Important Metric​
+
+Consumer lag is the difference between where producers are writing (the log-end offset) and where your consumer has processed (the current offset). It tells you whether your consumer is keeping up with the production rate.
+
+Partition 0:
+  Log-end offset (latest):  10,000
+  Consumer offset:           8,500
+  LAG = 10,000 - 8,500 = 1,500 messages behind
+
+
+Why lag matters more than throughput:
+
+Metric	What It Tells You
+Messages/second	How fast you're processing right now
+Consumer lag	Whether you're processing faster than producers write
+Lag trend	Whether you're falling behind, catching up, or stable
+
+A consumer processing 1,000 msg/sec sounds fast—until you realize producers are writing 1,200 msg/sec. Your lag grows by 200 messages every second. Within an hour, you're 720,000 messages behind.
+
+Monitoring Lag with kafka-consumer-groups.sh​
+
+The primary tool for checking consumer lag is kafka-consumer-groups.sh. On a Strimzi cluster, you can execute it inside a Kafka pod:
+
+# Check lag for a specific consumer group
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --group notification-service
+
+
+Output:
+
+GROUP                TOPIC         PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID                                    HOST            CLIENT-ID
+notification-service task-created  0          8500            10000           1500            consumer-1-abc123                              /10.244.0.15    consumer-1
+notification-service task-created  1          9800            9800            0               consumer-1-abc123                              /10.244.0.15    consumer-1
+notification-service task-created  2          7200            9500            2300            consumer-2-def456                              /10.244.0.16    consumer-2
+
+
+Reading this output:
+
+Column	Meaning
+CURRENT-OFFSET	Last committed offset for this partition
+LOG-END-OFFSET	Latest message offset in the partition
+LAG	Messages waiting to be processed
+CONSUMER-ID	Which consumer instance owns this partition
+HOST	IP address of the consumer
+
+From this output, you can see:
+
+Partition 1 is caught up (lag = 0)
+Partition 0 has 1,500 messages of lag
+Partition 2 has 2,300 messages of lag—the worst performer
+consumer-2 on partition 2 might be slower or handling more complex messages
+Interpreting Lag Patterns​
+
+Different lag patterns indicate different problems:
+
+Pattern	What It Means	Likely Cause
+All partitions have similar, growing lag	Overall throughput issue	Consumer processing too slow, need to scale or optimize
+One partition has much higher lag	Partition-specific issue	Hot partition (uneven key distribution), slow message type, stuck consumer
+Lag spikes then recovers	Transient issue	Consumer restart, rebalance, temporary slow processing
+Lag stays constant and low	Healthy state	Consumer keeping pace with production
+Lag at 0 for all partitions	Caught up	Healthy, or no messages being produced
+Lag Alert Thresholds​
+
+Setting appropriate thresholds depends on your tolerance for processing delay:
+
+# Example alert thresholds for a notification service
+alert_rules:
+  # Warning: lag growing but not critical yet
+  consumer_lag_warning:
+    threshold: 1000
+    duration: "5m"
+    message: "Consumer lag above 1000 for 5 minutes"
+
+  # Critical: significant delay, may miss SLAs
+  consumer_lag_critical:
+    threshold: 10000
+    duration: "2m"
+    message: "Consumer lag above 10000 - potential message loss risk"
+
+  # Emergency: approaching retention limit
+  consumer_lag_emergency:
+    threshold: 100000
+    duration: "1m"
+    message: "Consumer lag near retention limit - data loss imminent"
+
+
+Rule of thumb: Alert when lag exceeds what you can process in 1/3 of your retention period. If retention is 7 days and you process 10,000 msg/hour, alert around 50,000 lag.
+
+Inspecting Topics with kafka-topics.sh​
+
+When troubleshooting, you often need to understand the topic structure—how many partitions, replication factor, and configuration:
+
+# List all topics
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+
+
+Output:
+
+__consumer_offsets
+__strimzi-topic-operator-kstreams-topic-store-changelog
+task-completed
+task-created
+task-updated
+
+# Describe a specific topic
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --topic task-created
+
+
+Output:
+
+Topic: task-created	TopicId: ABC123xyz	PartitionCount: 3	ReplicationFactor: 1	Configs: retention.ms=604800000,cleanup.policy=delete
+	Topic: task-created	Partition: 0	Leader: 0	Replicas: 0	Isr: 0
+	Topic: task-created	Partition: 1	Leader: 0	Replicas: 0	Isr: 0
+	Topic: task-created	Partition: 2	Leader: 0	Replicas: 0	Isr: 0
+
+
+Key information:
+
+PartitionCount: 3 partitions (can run up to 3 parallel consumers)
+ReplicationFactor: 1 (dev setting—no fault tolerance)
+Configs: 7-day retention, delete cleanup policy
+Leader: Broker ID handling reads/writes for this partition
+Isr: In-Sync Replicas—brokers that have the latest data
+Checking Under-Replicated Partitions​
+
+Under-replicated partitions are partitions where one or more replicas have fallen behind the leader. This indicates broker health issues:
+
+# Find under-replicated partitions
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --under-replicated-partitions
+
+
+Healthy output (no problems):
+
+(empty - no under-replicated partitions)
+
+
+Unhealthy output:
+
+Topic: task-created	Partition: 0	Leader: 0	Replicas: 0,1,2	Isr: 0,1
+Topic: task-created	Partition: 2	Leader: 1	Replicas: 0,1,2	Isr: 1,2
+
+
+This shows:
+
+Partition 0: Broker 2 is not in ISR (expected 3 replicas, only 2 in sync)
+Partition 2: Broker 0 is not in ISR
+
+Diagnosing under-replication:
+
+Symptom	Likely Cause	Fix
+One broker missing from all ISRs	Broker down or slow	Check broker pod status, restart if needed
+Random partitions under-replicated	Network issues	Check pod connectivity, cluster networking
+All partitions under-replicated	Cluster-wide problem	Check all broker health, disk space, memory
+Reading Messages with kafka-console-consumer.sh​
+
+When debugging, you often need to see what's actually in a topic:
+
+# Read messages from beginning
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic task-created \
+  --from-beginning \
+  --max-messages 5
+
+
+Output:
+
+{"id": "task-1", "title": "Buy groceries", "created_at": "2025-01-15T10:00:00Z"}
+{"id": "task-2", "title": "Call dentist", "created_at": "2025-01-15T10:01:00Z"}
+{"id": "task-3", "title": "Review PR", "created_at": "2025-01-15T10:02:00Z"}
+{"id": "task-4", "title": "Deploy to staging", "created_at": "2025-01-15T10:03:00Z"}
+{"id": "task-5", "title": "Write tests", "created_at": "2025-01-15T10:04:00Z"}
+Processed a total of 5 messages
+
+
+Useful options:
+
+# Read from a specific partition
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic task-created \
+  --partition 2 \
+  --offset 100 \
+  --max-messages 3
+
+# Include keys and metadata
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic task-created \
+  --from-beginning \
+  --property print.key=true \
+  --property print.timestamp=true \
+  --max-messages 3
+
+
+Output with keys and timestamps:
+
+CreateTime:1705312800000	task-1	{"id": "task-1", "title": "Buy groceries"}
+CreateTime:1705312860000	task-2	{"id": "task-2", "title": "Call dentist"}
+CreateTime:1705312920000	task-3	{"id": "task-3", "title": "Review PR"}
+
+Common Errors and Troubleshooting​
+
+The Kafka ecosystem has specific error patterns. Understanding them speeds up debugging:
+
+Error	Cause	Fix
+NOT_ENOUGH_REPLICAS	ISR count below min.insync.replicas	Check broker health; ensure enough brokers are up
+COORDINATOR_NOT_AVAILABLE	Consumer group coordinator not ready	Wait and retry; usually transient during startup
+REBALANCE_IN_PROGRESS	Consumer group is rebalancing	Wait for completion; check for flapping consumers
+OFFSET_OUT_OF_RANGE	Requested offset doesn't exist	Adjust auto.offset.reset; offset may have been deleted by retention
+UNKNOWN_TOPIC_OR_PARTITION	Topic doesn't exist	Create topic first; check for typos in topic name
+REQUEST_TIMED_OUT	Broker didn't respond in time	Check broker health, network, or increase timeout
+LEADER_NOT_AVAILABLE	Partition has no leader	Wait for leader election; check broker health
+Debugging a Slow Consumer​
+
+When a consumer is falling behind, use this systematic approach:
+
+Step 1: Confirm the lag
+
+kubectl exec -it task-events-kafka-0 -n kafka -- \
+  /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --group notification-service
+
+
+Step 2: Check if lag is growing
+
+# Run the describe command twice, 30 seconds apart
+# Compare LAG values - if growing, consumer is too slow
+
+
+Step 3: Check partition distribution
+
+If one partition has much higher lag:
+  - Check message key distribution (is one key getting all traffic?)
+  - Check if messages on that partition are slower to process
+  - Consider repartitioning or rebalancing
+
+
+Step 4: Check consumer performance
+
+# Add timing to your consumer
+import time
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg and not msg.error():
+        start = time.time()
+        process_message(msg)
+        duration = time.time() - start
+
+        if duration > 0.1:  # 100ms threshold
+            print(f"SLOW: {duration:.2f}s for partition {msg.partition()}")
+
+
+Step 5: Scale if needed
+
+# Check current consumer count
+kubectl get pods -l app=notification-service -n kafka
+
+# Scale up if you have fewer consumers than partitions
+kubectl scale deployment notification-service --replicas=3 -n kafka
+
+JMX Metrics for Production Monitoring​
+
+Kafka exposes detailed metrics via JMX (Java Management Extensions). In production, you'll export these to Prometheus or another monitoring system.
+
+Key broker metrics:
+
+Metric	What It Measures	Alert Threshold
+kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions	Count of under-replicated partitions	> 0 for 5 minutes
+kafka.server:type=BrokerTopicMetrics,name=BytesInPerSec	Incoming bytes/second	Depends on capacity
+kafka.server:type=BrokerTopicMetrics,name=MessagesInPerSec	Incoming messages/second	Depends on capacity
+kafka.network:type=RequestMetrics,name=TotalTimeMs	Request latency	99th percentile > 500ms
+kafka.log:type=LogFlushStats,name=LogFlushRateAndTimeMs	Disk flush latency	> 100ms average
+
+Key consumer metrics:
+
+Metric	What It Measures	Alert Threshold
+kafka.consumer:type=consumer-fetch-manager-metrics,client-id=*,topic=*,partition=*,name=records-lag	Per-partition lag	> 10000 for 5 minutes
+kafka.consumer:type=consumer-fetch-manager-metrics,client-id=*,name=records-consumed-rate	Consumption rate	Depends on expected rate
+kafka.consumer:type=consumer-coordinator-metrics,client-id=*,name=rebalance-latency-avg	Average rebalance time	> 30 seconds
+Strimzi Metrics with Prometheus​
+
+Strimzi provides built-in support for Prometheus metrics. Enable them in your Kafka resource:
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: task-events
+spec:
+  kafka:
+    version: 4.1.1
+    metadataVersion: 4.1-IV0
+    # ... other config ...
+    metricsConfig:
+      type: jmxPrometheusExporter
+      valueFrom:
+        configMapKeyRef:
+          name: kafka-metrics
+          key: kafka-metrics-config.yml
+
+
+Then create the metrics ConfigMap:
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-metrics
+data:
+  kafka-metrics-config.yml: |
+    lowercaseOutputName: true
+    rules:
+    - pattern: kafka.server<type=(.+), name=(.+), clientId=(.+), topic=(.+), partition=(.*)><>Value
+      name: kafka_server_$1_$2
+      type: GAUGE
+      labels:
+        clientId: "$3"
+        topic: "$4"
+        partition: "$5"
+    - pattern: kafka.server<type=(.+), name=(.+)><>Value
+      name: kafka_server_$1_$2
+      type: GAUGE
+
+Building an Alert Runbook​
+
+When alerts fire, you need clear steps. Here's a template runbook:
+
+Alert: Consumer Lag Critical (> 10,000)
+
+1. CONFIRM the alert
+   $ kubectl exec -it task-events-kafka-0 -n kafka -- \
+       /opt/kafka/bin/kafka-consumer-groups.sh \
+       --bootstrap-server localhost:9092 \
+       --describe --group <consumer-group>
+
+2. IDENTIFY the pattern
+   - All partitions lagging → Processing too slow overall
+   - One partition lagging → Hot partition or stuck consumer
+
+3. CHECK consumer health
+   $ kubectl get pods -l app=<consumer-app> -n <namespace>
+   $ kubectl logs <consumer-pod> --tail=100
+
+4. CHECK for rebalancing
+   Look for "Revoking" or "Assigned" in logs
+   Frequent rebalancing = consumers timing out
+
+5. SCALE if needed
+   $ kubectl scale deployment <consumer-app> --replicas=<N>
+   (only helps if partitions > consumers)
+
+6. IF still lagging after 15 minutes
+   - Check for slow external dependencies (DB, API calls)
+   - Consider increasing max.poll.records for batch processing
+   - Escalate if data loss risk (lag approaching retention)
+
+
+Alert: Under-Replicated Partitions > 0
+
+1. IDENTIFY which partitions
+   $ kubectl exec -it task-events-kafka-0 -n kafka -- \
+       /opt/kafka/bin/kafka-topics.sh \
+       --bootstrap-server localhost:9092 \
+       --describe --under-replicated-partitions
+
+2. CHECK broker status
+   $ kubectl get pods -l strimzi.io/cluster=task-events -n kafka
+   Look for pods not in Running state
+
+3. CHECK broker logs
+   $ kubectl logs task-events-kafka-<N> -n kafka --tail=200
+   Look for: disk errors, OOM, connection failures
+
+4. IF broker pod is down
+   $ kubectl describe pod task-events-kafka-<N> -n kafka
+   Check Events section for failure reason
+
+5. IF broker is slow
+   - Check disk usage: df -h on broker
+   - Check memory: possible GC pressure
+   - Check network: latency between brokers
+
+Reflect on Your Skill​
+
+You built a kafka-events skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kafka-events skill, diagnose a consumer lag issue and identify which consumer is falling behind.
+Does my skill show how to use kafka-consumer-groups.sh and interpret lag metrics?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain consumer lag metrics and what causes lag growth?
+Did it show how to use Kafka CLI tools for debugging (kafka-topics.sh, kafka-consumer-groups.sh)?
+Improve Your Skill​
+
+If you found gaps:
+
+My kafka-events skill is missing monitoring and debugging patterns (consumer lag, offset inspection, CLI tools).
+Update it to include how to diagnose and resolve common Kafka operational issues.
+
+Try With AI​
+
+Setup: You're on-call and receive an alert about your Kafka cluster.
+
+Prompt 1: Interpret monitoring output
+
+I'm debugging a Kafka consumer issue. Here's my kafka-consumer-groups output:
+
+GROUP          TOPIC        PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+order-service  orders       0          45000           50000           5000
+order-service  orders       1          49500           50000           500
+order-service  orders       2          42000           50000           8000
+order-service  orders       3          49800           50000           200
+
+I have 2 consumer instances running. What patterns do you see, and what
+should I check first? Walk me through a systematic diagnosis.
+
+
+What you're learning: AI helps identify asymmetric lag patterns—partition 2 is significantly behind, suggesting either a hot partition, slow message processing, or an issue with the consumer assigned to it.
+
+Prompt 2: Build a troubleshooting checklist
+
+Create a troubleshooting checklist for this Kafka error:
+
+"NOT_ENOUGH_REPLICAS: Messages are rejected because there are fewer in-sync
+replicas than required: 2"
+
+My cluster has 3 brokers and topics with replication.factor=3
+and min.insync.replicas=2.
+
+What are all the possible causes and how do I diagnose each one?
+
+
+What you're learning: AI walks through ISR mechanics and helps you understand why this error occurs (at least one broker is not in sync), plus diagnostic steps for each scenario.
+
+Prompt 3: Design alerting for your system
+
+I'm setting up alerting for a Kafka-based event processing system. We have:
+
+- 3 topics: orders (high priority), notifications (medium), analytics (low)
+- SLA: orders must be processed within 5 minutes, others within 1 hour
+- Retention: 7 days for all topics
+- Traffic: orders 1000/min, notifications 5000/min, analytics 50000/min
+
+Help me design alert thresholds for consumer lag on each topic.
+Consider: SLA requirements, traffic rates, and what "critical" means for each.
+
+
+What you're learning: AI collaborates on translating business SLAs into technical alert thresholds, showing how to differentiate alert severity based on topic priority and processing requirements.
+
+Safety note: When running diagnostic commands on production Kafka clusters, use read-only commands (--describe, --list) rather than commands that modify state. Never reset consumer offsets or delete topics without understanding the implications.

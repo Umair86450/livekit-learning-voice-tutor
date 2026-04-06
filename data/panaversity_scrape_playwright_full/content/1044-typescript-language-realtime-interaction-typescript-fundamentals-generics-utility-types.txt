@@ -1,0 +1,449 @@
+Generics and Utility Types
+
+You're building an AI chat application. The backend returns different response types: chat completions, tool calls, streaming chunks, usage statistics. Each follows the same wrapper pattern: data, model, usage. Do you write separate types for each? That creates duplication. Do you use any? That defeats type safety.
+
+TypeScript's answer is generics: define the pattern once, fill in the specifics later. Combined with utility types that transform existing types, you can model complex AI APIs without repetition.
+
+This lesson teaches you to build reusable type patterns. By the end, you'll define a single APIResponse<T> interface that works for any AI response type, and you'll use utility types to create configuration variations without duplicating code.
+
+Generic Functions: One Pattern, Many Types​
+
+In Python, you might write functions that work with any type:
+
+def first_item(items: list) -> any:
+    return items[0] if items else None
+
+
+The problem: any loses type information. TypeScript's generics preserve it.
+
+The Identity Function​
+
+The simplest generic function returns exactly what you give it:
+
+function identity<T>(value: T): T {
+  return value;
+}
+
+// TypeScript infers T from usage
+const num = identity(42);        // num: number
+const str = identity("hello");   // str: string
+const arr = identity([1, 2, 3]); // arr: number[]
+
+
+Output:
+
+num is 42 (type: number)
+str is "hello" (type: string)
+arr is [1, 2, 3] (type: number[])
+
+
+The <T> declares a type parameter. When you call identity(42), TypeScript infers T = number. The return type is also number, not any.
+
+Generic Array Functions​
+
+Here's a practical example: get the first element of any array:
+
+function firstElement<T>(arr: T[]): T | undefined {
+  return arr[0];
+}
+
+const firstNumber = firstElement([10, 20, 30]);  // number | undefined
+const firstString = firstElement(["a", "b"]);    // string | undefined
+
+
+Output:
+
+firstNumber: 10
+firstString: "a"
+
+
+Compare to Python's approach with type hints:
+
+from typing import TypeVar, List, Optional
+
+T = TypeVar('T')
+
+def first_element(arr: List[T]) -> Optional[T]:
+    return arr[0] if arr else None
+
+
+The concepts are identical. TypeScript's syntax puts the type parameter inline with <T>.
+
+Generic Interfaces: Reusable Data Structures​
+
+AI APIs return responses with common structure. Instead of defining separate types:
+
+// DON'T: Repetitive types
+type ChatAPIResponse = {
+  data: ChatMessage;
+  usage: { tokens: number };
+  model: string;
+};
+
+type ToolAPIResponse = {
+  data: ToolCall;
+  usage: { tokens: number };
+  model: string;
+};
+
+
+Define a generic wrapper once:
+
+// DO: Generic wrapper
+interface APIResponse<T> {
+  data: T;
+  usage: { tokens: number };
+  model: string;
+}
+
+// Use with any data type
+type ChatResponse = APIResponse<ChatMessage>;
+type ToolResponse = APIResponse<ToolCall>;
+type StreamResponse = APIResponse<StreamChunk>;
+
+Complete Example: AI Response Types​
+// Define the data types
+interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+interface ToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+// Generic wrapper works with both
+interface APIResponse<T> {
+  data: T;
+  usage: { prompt_tokens: number; completion_tokens: number };
+  model: string;
+  created: number;
+}
+
+// Create specific response types
+type ChatAPIResponse = APIResponse<ChatMessage>;
+type ToolAPIResponse = APIResponse<ToolCall>;
+
+// Function that processes any API response
+function logResponse<T>(response: APIResponse<T>): void {
+  console.log(`Model: ${response.model}`);
+  console.log(`Tokens used: ${response.usage.completion_tokens}`);
+  console.log(`Data:`, response.data);
+}
+
+// Usage
+const chatResponse: ChatAPIResponse = {
+  data: { role: "assistant", content: "Hello!" },
+  usage: { prompt_tokens: 10, completion_tokens: 5 },
+  model: "gpt-4o",
+  created: Date.now()
+};
+
+logResponse(chatResponse);
+
+
+Output:
+
+Model: gpt-4o
+Tokens used: 5
+Data: { role: 'assistant', content: 'Hello!' }
+
+
+The logResponse function works with any APIResponse<T>. TypeScript ensures you only access properties that exist on the wrapper, not on the specific data type.
+
+Utility Types: Transform Existing Types​
+
+TypeScript includes built-in utility types that create new types from existing ones. These prevent duplication when you need variations of a type.
+
+Partial: Make All Properties Optional​
+
+AI configurations often have defaults. You want to accept partial configs:
+
+type ChatConfig = {
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  stream: boolean;
+};
+
+// Partial makes ALL properties optional
+type PartialChatConfig = Partial<ChatConfig>;
+
+// Equivalent to:
+// type PartialChatConfig = {
+//   model?: string;
+//   temperature?: number;
+//   maxTokens?: number;
+//   stream?: boolean;
+// };
+
+// Now you can pass incomplete configs
+function createChat(config: PartialChatConfig = {}): ChatConfig {
+  return {
+    model: config.model ?? "gpt-4o",
+    temperature: config.temperature ?? 0.7,
+    maxTokens: config.maxTokens ?? 1000,
+    stream: config.stream ?? false
+  };
+}
+
+const chat1 = createChat();                    // All defaults
+const chat2 = createChat({ model: "gpt-3.5" }); // Override model only
+const chat3 = createChat({ temperature: 0, stream: true });
+
+
+Output:
+
+chat1: { model: "gpt-4o", temperature: 0.7, maxTokens: 1000, stream: false }
+chat2: { model: "gpt-3.5", temperature: 0.7, maxTokens: 1000, stream: false }
+chat3: { model: "gpt-4o", temperature: 0, maxTokens: 1000, stream: true }
+
+Required: Make All Properties Required​
+
+The opposite of Partial. Useful when you have a type with optional properties but need a complete version:
+
+type UserInput = {
+  query: string;
+  context?: string;
+  maxResults?: number;
+};
+
+// Required makes ALL properties required
+type CompleteUserInput = Required<UserInput>;
+
+// Now context and maxResults are mandatory
+function processComplete(input: CompleteUserInput): void {
+  // All properties guaranteed to exist
+  console.log(`Query: ${input.query}`);
+  console.log(`Context: ${input.context}`);
+  console.log(`Max results: ${input.maxResults}`);
+}
+
+Pick: Select Specific Properties​
+
+Extract only the properties you need:
+
+type ChatConfig = {
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  stream: boolean;
+};
+
+// Pick only stream-related properties
+type StreamConfig = Pick<ChatConfig, "stream" | "model">;
+
+// Equivalent to:
+// type StreamConfig = {
+//   model: string;
+//   stream: boolean;
+// };
+
+function enableStreaming(config: StreamConfig): void {
+  console.log(`Streaming from ${config.model}: ${config.stream}`);
+}
+
+enableStreaming({ model: "gpt-4o", stream: true });
+
+
+Output:
+
+Streaming from gpt-4o: true
+
+Omit: Exclude Specific Properties​
+
+The opposite of Pick. Remove properties you don't need:
+
+type FullMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  metadata: Record<string, unknown>;
+};
+
+// Omit internal properties for API requests
+type MessagePayload = Omit<FullMessage, "id" | "timestamp" | "metadata">;
+
+// Equivalent to:
+// type MessagePayload = {
+//   role: "user" | "assistant";
+//   content: string;
+// };
+
+function sendMessage(payload: MessagePayload): void {
+  console.log(`[${payload.role}]: ${payload.content}`);
+}
+
+sendMessage({ role: "user", content: "Hello AI!" });
+
+
+Output:
+
+[user]: Hello AI!
+
+Record: Create Object Types with Known Keys​
+
+Record<K, V> creates an object type where all keys are type K and all values are type V:
+
+// Map model names to their configurations
+type ModelName = "gpt-4o" | "gpt-3.5" | "claude-3";
+
+type ModelInfo = {
+  maxTokens: number;
+  costPer1k: number;
+};
+
+const models: Record<ModelName, ModelInfo> = {
+  "gpt-4o": { maxTokens: 128000, costPer1k: 0.005 },
+  "gpt-3.5": { maxTokens: 16000, costPer1k: 0.0005 },
+  "claude-3": { maxTokens: 200000, costPer1k: 0.008 }
+};
+
+// TypeScript ensures all keys are covered
+function getModelInfo(name: ModelName): ModelInfo {
+  return models[name]; // Always exists
+}
+
+console.log(getModelInfo("gpt-4o"));
+
+
+Output:
+
+{ maxTokens: 128000, costPer1k: 0.005 }
+
+Generic Constraints: Limiting Type Parameters​
+
+Sometimes you need generics that only work with certain types. Use extends to constrain:
+
+// Only accept objects (not primitives)
+function getProperty<T extends object, K extends keyof T>(
+  obj: T,
+  key: K
+): T[K] {
+  return obj[key];
+}
+
+const config = { model: "gpt-4o", temperature: 0.7 };
+const model = getProperty(config, "model"); // string
+const temp = getProperty(config, "temperature"); // number
+
+// This would error:
+// getProperty("hello", "length"); // Error: string is not an object
+
+Why Constraints Matter​
+
+Without constraints, you might try operations that don't work on all types:
+
+// BAD: No constraint
+function getLength<T>(value: T): number {
+  return value.length; // Error: T doesn't have .length
+}
+
+// GOOD: Constrain to types with length
+function getLength<T extends { length: number }>(value: T): number {
+  return value.length; // Works: T guaranteed to have .length
+}
+
+console.log(getLength("hello"));     // 5
+console.log(getLength([1, 2, 3]));   // 3
+console.log(getLength({ length: 10 })); // 10
+
+
+Output:
+
+5
+3
+10
+
+Practical Example: AI Streaming Types​
+
+Combine generics and constraints for streaming AI responses:
+
+// Base interface for streamable content
+interface Streamable {
+  type: string;
+}
+
+// Specific chunk types
+interface ContentChunk extends Streamable {
+  type: "content";
+  delta: string;
+}
+
+interface ToolChunk extends Streamable {
+  type: "tool_call";
+  name: string;
+  arguments: string;
+}
+
+interface DoneChunk extends Streamable {
+  type: "done";
+  usage: { tokens: number };
+}
+
+// Generic handler that only accepts Streamable types
+function processChunk<T extends Streamable>(chunk: T): void {
+  console.log(`Processing ${chunk.type} chunk`);
+}
+
+// Works with any Streamable
+const content: ContentChunk = { type: "content", delta: "Hello" };
+const done: DoneChunk = { type: "done", usage: { tokens: 50 } };
+
+processChunk(content);
+processChunk(done);
+
+
+Output:
+
+Processing content chunk
+Processing done chunk
+
+Python to TypeScript Comparison​
+Python	TypeScript
+TypeVar('T')	<T>
+Generic[T]	interface Name<T>
+Optional[T]	T | undefined or Partial<T>
+Dict[str, T]	Record<string, T>
+@dataclass fields	Interface properties
+
+The mental model is the same: define a type variable, use it to express relationships between inputs and outputs.
+
+Try With AI​
+Prompt 1: Build a Generic Cache​
+Create a generic Cache<T> class in TypeScript that:
+- Stores values of type T with string keys
+- Has get(key: string): T | undefined
+- Has set(key: string, value: T): void
+- Has clear(): void
+
+Then create CacheResult type that uses Partial to make all cache
+metadata optional. Show how the cache works with ChatMessage objects.
+
+
+What you're learning: How generics enable reusable data structures that maintain type safety across different value types.
+
+Prompt 2: API Response Variations​
+Define a base APIError type with code, message, and details properties.
+Use utility types to create:
+1. PartialError (all optional, for partial updates)
+2. ErrorSummary (Pick only code and message)
+3. ErrorWithoutDetails (Omit details for logging)
+
+Show an example of each type in use with AI API error handling.
+
+
+What you're learning: How utility types reduce duplication by deriving new types from existing ones instead of writing them from scratch.
+
+Prompt 3: Constrained Generic Function​
+Write a generic function extractField<T extends object, K extends keyof T>
+that takes an array of objects and a key, returning an array of values
+for that key. Use it to extract all 'content' fields from an array of
+ChatMessage objects.
+
+What happens if you try to use it with a primitive type like string?
+
+
+What you're learning: How generic constraints prevent runtime errors by catching invalid type usage at compile time.

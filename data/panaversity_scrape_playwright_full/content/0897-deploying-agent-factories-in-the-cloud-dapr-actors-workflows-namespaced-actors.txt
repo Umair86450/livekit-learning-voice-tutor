@@ -1,0 +1,482 @@
+Namespaced Actors for Multi-Tenancy
+
+Your TaskActor works brilliantly for a single customer. But now you're building a SaaS platform where hundreds of companies use your AI task management system. Acme Corporation and Globex Industries both use TaskActors, but their data must never mix.
+
+The nightmare scenario:
+
+Customer: Acme Corporation
+Request: GET /actors/TaskActor/task-123
+
+Expected: Acme's task-123 (Q4 budget review)
+Actual: Globex's task-123 (Confidential merger plan)
+
+Result: Data breach, lawsuit, destroyed reputation
+
+
+This isn't hypothetical. Multi-tenant data leaks have cost companies billions in settlements, lost customers, and regulatory fines. The 2021 Microsoft Power Apps breach exposed 38 million records across multiple organizations because of misconfigured tenant isolation.
+
+You could solve this with careful actor ID naming (acme-task-123, globex-task-123), but that's fragile. A bug in your ID generation logic becomes a data breach. What you need is architectural isolation: a design where cross-tenant access is impossible by construction, not convention.
+
+Dapr's namespaced actors provide exactly this.
+
+What Are Namespaced Actors?​
+
+Namespaced actors deploy the same actor type into different Kubernetes namespaces, each with isolated state. Dapr's official documentation states it clearly:
+
+"With actor namespacing, the same actor type can be deployed into different namespaces. You can call instances of these actors in the same namespace."
+
+The key insight: Kubernetes namespace + separate state store = complete tenant isolation.
+
+                    NAMESPACED ACTORS ARCHITECTURE
+                    ==============================
+
+     ┌─────────────────────────────────────────────────────────────┐
+     │                    KUBERNETES CLUSTER                        │
+     │                                                              │
+     │  ┌─────────────────────────┐  ┌─────────────────────────┐  │
+     │  │    NAMESPACE: tenant-a   │  │    NAMESPACE: tenant-b   │  │
+     │  │                          │  │                          │  │
+     │  │  ┌──────────────────┐   │  │  ┌──────────────────┐   │  │
+     │  │  │    TaskActor     │   │  │  │    TaskActor     │   │  │
+     │  │  │  (tenant-a copy) │   │  │  │  (tenant-b copy) │   │  │
+     │  │  └────────┬─────────┘   │  │  └────────┬─────────┘   │  │
+     │  │           │             │  │           │             │  │
+     │  │           ▼             │  │           ▼             │  │
+     │  │  ┌──────────────────┐   │  │  ┌──────────────────┐   │  │
+     │  │  │   State Store    │   │  │  │   State Store    │   │  │
+     │  │  │   (Redis DB 1)   │   │  │  │   (Redis DB 2)   │   │  │
+     │  │  └──────────────────┘   │  │  └──────────────────┘   │  │
+     │  │                          │  │                          │  │
+     │  │  ┌──────────────────┐   │  │  ┌──────────────────┐   │  │
+     │  │  │  Dapr Sidecar    │   │  │  │  Dapr Sidecar    │   │  │
+     │  │  │  (app-id: task)  │   │  │  │  (app-id: task)  │   │  │
+     │  │  └──────────────────┘   │  │  └──────────────────┘   │  │
+     │  │                          │  │                          │  │
+     │  │  CANNOT access          │  │  CANNOT access          │  │
+     │  │  tenant-b actors     ✗  │  │  tenant-a actors     ✗  │  │
+     │  └─────────────────────────┘  └─────────────────────────┘  │
+     │                                                              │
+     │  ┌────────────────────────────────────────────────────────┐ │
+     │  │                DAPR CONTROL PLANE                       │ │
+     │  │  ┌────────────────────────────────────────────────┐    │ │
+     │  │  │            Placement Service                    │    │ │
+     │  │  │  - Tracks actors by namespace                   │    │ │
+     │  │  │  - tenant-a sidecars get ONLY tenant-a actors   │    │ │
+     │  │  │  - tenant-b sidecars get ONLY tenant-b actors   │    │ │
+     │  │  └────────────────────────────────────────────────┘    │ │
+     │  └────────────────────────────────────────────────────────┘ │
+     └─────────────────────────────────────────────────────────────┘
+
+The Isolation Guarantee​
+
+Namespaced actors enforce isolation at three levels:
+
+Isolation Layer	What It Prevents
+Namespace boundary	Apps in namespace-a cannot invoke actors in namespace-b
+Placement service	Sidecars only receive actor locations for their own namespace
+State store	Each namespace uses a separate state store (or separate database within shared infrastructure)
+
+This is defense in depth. Even if application code has a bug that tries to access another tenant's actor, the infrastructure blocks it.
+
+Configuring Namespace Isolation​
+Step 1: Create Kubernetes Namespaces​
+# Create namespaces for two tenants
+kubectl create namespace tenant-acme
+kubectl create namespace tenant-globex
+
+# Verify namespaces
+kubectl get namespaces | grep tenant
+
+
+Output:
+
+tenant-acme    Active   5s
+tenant-globex  Active   5s
+
+Step 2: Configure Separate State Stores​
+
+Each namespace needs its own state store component. You can use:
+
+Separate Redis instances (highest isolation)
+Same Redis instance with different databases (practical for most cases)
+Same database with key prefixes (minimum isolation, not recommended for actors)
+
+Here's the recommended approach using Redis database isolation:
+
+# components/tenant-acme/statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: tenant-acme
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis-master.redis.svc.cluster.local:6379
+    - name: redisPassword
+      secretKeyRef:
+        name: redis-secret
+        key: password
+    - name: actorStateStore
+      value: "true"
+    - name: redisDB
+      value: "1"  # Tenant Acme uses Redis DB 1
+
+# components/tenant-globex/statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: tenant-globex
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis-master.redis.svc.cluster.local:6379
+    - name: redisPassword
+      secretKeyRef:
+        name: redis-secret
+        key: password
+    - name: actorStateStore
+      value: "true"
+    - name: redisDB
+      value: "2"  # Tenant Globex uses Redis DB 2
+
+
+Critical configuration: The actorStateStore: "true" metadata is required for any state store used by actors. Without it, actors cannot persist state.
+
+Apply the components:
+
+kubectl apply -f components/tenant-acme/statestore.yaml
+kubectl apply -f components/tenant-globex/statestore.yaml
+
+Step 3: Deploy Actors to Each Namespace​
+
+Deploy the same TaskActor service to both namespaces:
+
+# k8s/tenant-acme/task-actor-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-actor-service
+  namespace: tenant-acme
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: task-actor
+  template:
+    metadata:
+      labels:
+        app: task-actor
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "task-actor"
+        dapr.io/app-port: "8000"
+        dapr.io/enable-actors: "true"
+    spec:
+      containers:
+        - name: task-actor
+          image: your-registry/task-actor:v1.0
+          ports:
+            - containerPort: 8000
+
+# k8s/tenant-globex/task-actor-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-actor-service
+  namespace: tenant-globex  # Only difference: namespace
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: task-actor
+  template:
+    metadata:
+      labels:
+        app: task-actor
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "task-actor"  # Same app-id in both namespaces
+        dapr.io/app-port: "8000"
+        dapr.io/enable-actors: "true"
+    spec:
+      containers:
+        - name: task-actor
+          image: your-registry/task-actor:v1.0
+          ports:
+            - containerPort: 8000
+
+
+Notice that app-id is the same in both namespaces. This is intentional. The namespace provides the isolation, not the app-id.
+
+kubectl apply -f k8s/tenant-acme/task-actor-deployment.yaml
+kubectl apply -f k8s/tenant-globex/task-actor-deployment.yaml
+
+How Placement Service Enforces Isolation​
+
+The Dapr Placement service is the key to namespace isolation for actors. Here's what happens:
+
+             PLACEMENT SERVICE ISOLATION
+             ===========================
+
+  Sidecar in tenant-acme                Placement Service
+  ┌─────────────────────┐              ┌─────────────────────┐
+  │  "Where is         │              │                     │
+  │   TaskActor/task-1  │──Request──>│  Check namespace:   │
+  │   in MY namespace?" │              │  tenant-acme        │
+  └─────────────────────┘              │                     │
+                                        │  Return actors     │
+  ┌─────────────────────┐              │  ONLY in           │
+  │  Response:          │<──Response──│  tenant-acme        │
+  │  TaskActor/task-1   │              │                     │
+  │  is on pod-xyz      │              │  NEVER reveal      │
+  └─────────────────────┘              │  tenant-globex     │
+                                        │  actor locations   │
+                                        └─────────────────────┘
+
+
+The Placement service maintains separate actor registries per namespace. Sidecars in tenant-acme only receive placement information for actors in tenant-acme. They literally cannot discover actors in other namespaces.
+
+Cross-Namespace Communication: Blocked by Design​
+
+What happens if code in tenant-acme tries to invoke an actor in tenant-globex?
+
+# Code running in tenant-acme namespace
+from dapr.actor import ActorProxy, ActorId
+
+# Attempt to access actor in another namespace
+proxy = ActorProxy.create(
+    "TaskActor",
+    ActorId("task-123"),
+    TaskActorInterface
+)
+
+# This will FAIL - no route to tenant-globex actors
+result = await proxy.get_task()  # Error: Actor not found
+
+
+The invocation fails because:
+
+The sidecar asks Placement: "Where is TaskActor/task-123?"
+Placement only knows about actors in tenant-acme
+If the actor doesn't exist in tenant-acme, it returns "not found"
+Even if an actor with the same ID exists in tenant-globex, it's invisible
+
+This is the isolation guarantee: actors in different namespaces are mutually invisible.
+
+State Store Isolation Patterns​
+Pattern	Isolation Level	Use When
+Separate Redis instances	Maximum	Regulatory requirements (HIPAA, SOC2), large tenants
+Same Redis, different DBs	High	Most SaaS use cases, good balance of isolation and efficiency
+Same Redis, key prefixes	Minimum	NOT recommended for actors (Dapr doesn't prefix automatically)
+etcd with key prefixes	Medium	When using etcd and DB separation isn't available
+Redis Database Isolation (Recommended)​
+
+Redis supports 16 logical databases (0-15 by default). Each database is isolated:
+
+Redis Instance
+┌────────────────────────────────────────────┐
+│                                            │
+│  DB 0: Default (don't use)                 │
+│                                            │
+│  DB 1: tenant-acme                         │
+│  ┌──────────────────────────────────────┐  │
+│  │ TaskActor||task-1 -> {...}           │  │
+│  │ TaskActor||task-2 -> {...}           │  │
+│  └──────────────────────────────────────┘  │
+│                                            │
+│  DB 2: tenant-globex                       │
+│  ┌──────────────────────────────────────┐  │
+│  │ TaskActor||task-1 -> {...}           │  │
+│  │ TaskActor||task-3 -> {...}           │  │
+│  └──────────────────────────────────────┘  │
+│                                            │
+│  DB 3-15: Available for more tenants       │
+│                                            │
+└────────────────────────────────────────────┘
+
+
+Notice that both tenants can have task-1. They're completely separate in different Redis databases.
+
+etcd with Prefix Isolation​
+
+If you're using etcd, configure keyPrefixPath:
+
+# components/tenant-acme/statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: tenant-acme
+spec:
+  type: state.etcd
+  version: v1
+  metadata:
+    - name: endpoints
+      value: etcd.etcd.svc.cluster.local:2379
+    - name: actorStateStore
+      value: "true"
+    - name: keyPrefixPath
+      value: "/tenants/acme/"  # All keys prefixed with this path
+
+SQLite with Table Isolation​
+
+For SQLite (useful in development or edge deployments):
+
+# components/tenant-acme/statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: tenant-acme
+spec:
+  type: state.sqlite
+  version: v1
+  metadata:
+    - name: connectionString
+      value: "/data/actors.db"
+    - name: actorStateStore
+      value: "true"
+    - name: tableName
+      value: "tenant_acme_actors"  # Separate table per tenant
+
+Self-Hosted Mode: Environment Variables​
+
+For local development or self-hosted Dapr, set the namespace via environment variable:
+
+# Terminal 1: Run tenant-acme actor service
+export NAMESPACE=tenant-acme
+dapr run --app-id task-actor --app-port 8000 -- python main.py
+
+# Terminal 2: Run tenant-globex actor service
+export NAMESPACE=tenant-globex
+dapr run --app-id task-actor --app-port 8001 -- python main.py
+
+
+Each instance uses its own namespace for actor isolation.
+
+Security Considerations​
+
+Namespace isolation protects against accidental cross-tenant access, but additional measures harden security:
+
+Threat	Mitigation
+Malicious actor code	Namespace RBAC prevents accessing other namespace resources
+Network sniffing	mTLS encrypts all inter-sidecar communication
+State store access	Separate credentials per namespace state store
+Placement service compromise	Run Placement in isolated namespace with minimal access
+RBAC for Namespace Isolation​
+# rbac/tenant-acme-role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: tenant-acme
+  name: tenant-actor-role
+rules:
+  - apiGroups: ["dapr.io"]
+    resources: ["components"]
+    verbs: ["get", "list"]
+    # Can only access components in tenant-acme
+
+Reflect on Your Skill​
+
+You extended your dapr-deployment skill to include actor patterns. Does it now cover multi-tenant deployment scenarios?
+
+Test Your Skill​
+Using my dapr-deployment skill, design a multi-tenant TaskActor deployment
+for a SaaS platform with 50 customers. Each customer needs complete state
+isolation. What's the most efficient approach?
+
+
+Does your skill recommend:
+
+Kubernetes namespace per tenant?
+Separate state stores (or Redis DBs)?
+Why Placement service isolation is critical?
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain WHY separate state stores are required?
+Did it mention the Placement service's role in isolation?
+Did it cover what happens if code tries cross-namespace access?
+Improve Your Skill​
+
+If you found gaps:
+
+My dapr-deployment skill covers basic namespacing but not the security
+rationale. Update it to include:
+- Why each namespace needs its own state store (not just app isolation)
+- How Placement service enforces namespace boundaries
+- What fails when cross-namespace actor access is attempted
+- Best practices for Redis DB isolation vs separate instances
+- When to use separate Redis instances (compliance requirements)
+
+Try With AI​
+
+Open your AI companion (Claude, ChatGPT, Gemini) and explore these scenarios.
+
+Prompt 1: Design Multi-Tenant Architecture​
+I'm building a SaaS task management platform. Each customer (tenant) should
+have completely isolated TaskActors. I expect 100 tenants initially, growing
+to 1000.
+
+Help me design the namespace and state store strategy:
+- Should each tenant get a Kubernetes namespace?
+- How do I handle state store isolation with Redis?
+- What happens when I scale to 1000 tenants (Redis only has 16 DBs)?
+- What's the operational overhead of managing 1000 namespaces?
+
+Don't give me code yet; I want to understand the architectural trade-offs
+first.
+
+
+What you're learning: How to scale multi-tenant actor systems. The AI helps you understand when namespace-per-tenant works and when you need alternative partitioning strategies (like dedicated Redis instances per tenant group).
+
+Prompt 2: Verify Isolation Works​
+I've deployed namespaced actors to tenant-acme and tenant-globex. How do I
+verify the isolation actually works?
+
+Help me create a test plan:
+1. How do I confirm actors can't discover each other across namespaces?
+2. How do I verify state stores are truly separate?
+3. What logs or metrics show isolation is enforced?
+4. How would I detect if isolation accidentally breaks?
+
+Show me specific kubectl commands and API calls to test this.
+
+
+What you're learning: Validation strategies for multi-tenant isolation. The AI helps you build confidence that your security boundaries work before going to production.
+
+Prompt 3: Handle Compliance Requirements​
+My healthcare SaaS platform needs HIPAA compliance. Each hospital tenant
+must have data that never touches another tenant's data, even in memory.
+
+Current plan: Kubernetes namespace per tenant with Redis DB isolation.
+
+Questions:
+- Is Redis DB isolation sufficient for HIPAA, or do I need separate instances?
+- What about the Placement service - does it have any shared state?
+- How do I audit cross-tenant access attempts?
+- What documentation do I need for compliance auditors?
+
+Help me understand the compliance implications of my architecture choices.
+
+
+What you're learning: How regulatory requirements affect actor deployment. The AI helps you understand when logical isolation is sufficient and when physical separation is required.
+
+Safety Note​
+
+Multi-tenant isolation failures can expose sensitive customer data. Always:
+
+Test isolation in staging before production
+Use separate state stores, not just namespace separation
+Enable audit logging for actor invocations
+Conduct periodic penetration testing of tenant boundaries
+Have a data breach response plan even with strong isolation
+
+AI suggestions for isolation patterns should be validated against your specific compliance requirements (HIPAA, SOC2, GDPR, etc.) and reviewed by your security team.

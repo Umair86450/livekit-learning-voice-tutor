@@ -1,0 +1,379 @@
+Building Blocks and Components
+
+You learned Kafka directly in Chapter 82. You wrote code that knew about brokers, topics, and consumer groups. If you wanted to switch from Kafka to RabbitMQ, you'd rewrite your messaging code. Different SDK, different connection logic, different error handling.
+
+Now imagine a different world. You write code that says "publish this message" or "save this state." You don't specify where or how. That decision lives in a configuration file. To switch from Kafka to RabbitMQ, you change one YAML file. Your application code doesn't change at all.
+
+This is Dapr's abstraction model: building blocks provide the API (what you can do), and components provide the implementation (how it actually happens). This lesson explores how this separation works and why it matters for portable, maintainable distributed systems.
+
+Building Blocks: The Portable APIs​
+
+A building block is a Dapr capability exposed through an HTTP or gRPC API. It defines what you can do, not how it's done underneath.
+
+Think of building blocks like a universal remote control. The remote has buttons for "power," "volume," and "channel." It doesn't care if you're controlling a Samsung TV, a Sony TV, or a projector. Same interface, different devices.
+
+The Seven Building Blocks (This Chapter)​
+Building Block	API Endpoint	What It Does
+Service Invocation	/v1.0/invoke/{app-id}/method/{method}	Call other services with automatic discovery and mTLS
+State Management	/v1.0/state/{store}	Key-value storage with consistency options
+Pub/Sub	/v1.0/publish/{pubsub}/{topic}	Event messaging with CloudEvents format
+Bindings	/v1.0/bindings/{binding}	Input/output triggers for external systems
+Jobs	/v1.0/jobs/{name}	Schedule and manage recurring tasks
+Secrets	/v1.0/secrets/{store}/{key}	Retrieve secrets from configured stores
+Configuration	/v1.0/configuration/{store}	Dynamic configuration with change subscriptions
+Building Blocks NOT in This Chapter​
+Building Block	Why Deferred
+Actors	Stateful virtual actors require a separate mental model (Chapter 89)
+Workflows	Long-running orchestration builds on actors (Chapter 89)
+What the API Looks Like​
+
+When you use the state management building block, your code makes HTTP calls like:
+
+POST http://localhost:3500/v1.0/state/statestore
+Content-Type: application/json
+
+[
+  {
+    "key": "task-123",
+    "value": {"title": "Buy groceries", "status": "pending"}
+  }
+]
+
+
+Notice what's missing from this request:
+
+No Redis host or port
+No authentication credentials
+No connection pooling configuration
+No retry logic
+
+Your code says "save this state." Dapr handles everything else.
+
+Components: The Pluggable Implementations​
+
+A component is a Dapr configuration that binds a building block to a specific backend technology.
+
+Continuing the remote control analogy: the component is the IR (infrared) blaster pointed at your specific TV. The remote (building block) doesn't change. The blaster (component) tells Dapr "when someone uses state management, talk to this Redis server."
+
+Same Building Block, Different Components​
+
+The state management building block can use any of these components:
+
+Component Type	Backend	Use Case
+state.redis	Redis	Development, caching, simple state
+state.postgresql	PostgreSQL	Production, relational queries needed
+state.mongodb	MongoDB	Document-oriented state
+state.azure.cosmosdb	Azure Cosmos DB	Global distribution, multi-region
+state.aws.dynamodb	AWS DynamoDB	AWS-native, serverless scaling
+
+The pub/sub building block has similar flexibility:
+
+Component Type	Backend	Use Case
+pubsub.redis	Redis Streams	Development, simple messaging
+pubsub.kafka	Apache Kafka	Production event streaming (Ch82)
+pubsub.rabbitmq	RabbitMQ	Traditional message queuing
+pubsub.azure.servicebus	Azure Service Bus	Azure-native messaging
+pubsub.gcp.pubsub	Google Cloud Pub/Sub	GCP-native messaging
+The Key Insight: Same API, Different Backend​
+
+This is the single most important concept in Dapr.
+
+Your application code calls the building block API:
+
+from dapr.clients import DaprClient
+
+with DaprClient() as client:
+    client.publish_event(
+        pubsub_name='pubsub',  # References the component name
+        topic_name='task-events',
+        data='{"task_id": "123"}'
+    )
+
+
+What happens next depends entirely on which component is configured with the name pubsub:
+
+If pubsub is configured as pubsub.redis → Message goes to Redis Streams
+If pubsub is configured as pubsub.kafka → Message goes to Kafka
+If pubsub is configured as pubsub.rabbitmq → Message goes to RabbitMQ
+
+Your code doesn't know or care. The component YAML makes that decision.
+
+The Connection to Chapter 82​
+
+In Chapter 82, you wrote Kafka-specific code:
+
+from aiokafka import AIOKafkaProducer
+
+producer = AIOKafkaProducer(
+    bootstrap_servers='kafka-bootstrap:9092',
+    value_serializer=lambda v: json.dumps(v).encode()
+)
+await producer.start()
+await producer.send_and_wait('task-events', value={'task_id': '123'})
+
+
+With Dapr, that same functionality becomes:
+
+from dapr.clients import DaprClient
+
+with DaprClient() as client:
+    client.publish_event(
+        pubsub_name='kafka-pubsub',
+        topic_name='task-events',
+        data='{"task_id": "123"}'
+    )
+
+
+The Dapr version is simpler and portable. Change the component configuration, and you've switched message brokers without touching code.
+
+Component YAML Structure​
+
+Every Dapr component is defined in a YAML file with a consistent structure. Understanding this structure helps you read, write, and debug component configurations.
+
+Anatomy of a Component​
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: default
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis:6379
+    - name: redisPassword
+      value: ""
+
+
+Let's examine each part:
+
+Field	Purpose	Example Values
+apiVersion	Dapr component API version	Always dapr.io/v1alpha1
+kind	Resource type	Always Component
+metadata.name	Name your code references	statestore, pubsub, kafka-events
+metadata.namespace	Kubernetes namespace	default, production
+spec.type	Building block + backend	state.redis, pubsub.kafka
+spec.version	Component version	v1 (most components)
+spec.metadata	Backend-specific config	Host, credentials, options
+How Your Code Finds the Component​
+
+When your code calls:
+
+client.save_state(store_name='statestore', key='task-123', value='...')
+
+
+Dapr looks for a component where metadata.name equals statestore. The spec.type tells Dapr which building block (state) and which implementation (Redis) to use.
+
+Component Examples​
+
+Redis State Store:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis-master.default.svc.cluster.local:6379
+
+
+Kafka Pub/Sub:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: task-events-kafka-bootstrap.kafka.svc.cluster.local:9092
+    - name: consumerGroup
+      value: dapr-consumer
+    - name: authType
+      value: none
+
+
+Kubernetes Secrets Store:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kubernetes-secrets
+spec:
+  type: secretstores.kubernetes
+  version: v1
+  metadata: []
+
+
+Notice that some components need extensive configuration (Kafka needs broker addresses and consumer groups), while others need almost none (Kubernetes secrets store uses the cluster's built-in secrets API).
+
+Swapping Backends: The Portability Payoff​
+
+Here's where Dapr's abstraction model pays dividends.
+
+Scenario: Development vs Production​
+
+Development (simple setup):
+
+# components/pubsub-dev.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis:6379
+
+
+Production (robust messaging):
+
+# components/pubsub-prod.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: kafka-cluster.production.svc.cluster.local:9092
+    - name: consumerGroup
+      value: task-api-consumers
+    - name: authRequired
+      value: "true"
+    - name: saslUsername
+      secretKeyRef:
+        name: kafka-credentials
+        key: username
+
+
+Your application code is identical in both environments. It publishes to pubsub and subscribes to topics. The infrastructure decision—Redis in dev, Kafka in production—lives entirely in configuration.
+
+Why This Matters​
+Concern	Without Dapr	With Dapr
+Code changes for new backend	Rewrite with new SDK	Change YAML file
+Testing with different infra	Mock or run full infra	Swap to simpler component
+Multi-cloud deployment	Different code per cloud	Different component YAML
+Local development	Full infra stack	Lightweight components
+Scoping Components to Specific Apps​
+
+By default, Dapr components are available to all applications in a namespace. You can restrict which apps can access a component using scopes.
+
+Why Scope Components?​
+Security: Only the payment service should access payment secrets
+Isolation: Dev and staging environments shouldn't share state stores
+Resource management: High-volume apps get dedicated components
+How to Scope​
+
+Add a scopes field to your component:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: payment-secrets
+spec:
+  type: secretstores.kubernetes
+  version: v1
+  metadata: []
+  scopes:
+    - payment-service
+    - billing-service
+
+
+Only applications with dapr.io/app-id: payment-service or dapr.io/app-id: billing-service can access this secrets store.
+
+No Scopes = Available to All​
+
+If you omit the scopes field, the component is available to every Dapr-enabled app in the namespace.
+
+Key Vocabulary​
+Term	Definition
+Building Block	A Dapr capability exposed as an API (state, pub/sub, invoke, etc.)
+Component	A YAML configuration binding a building block to a specific backend
+Pluggable	Can be swapped without code changes
+Component Spec	The spec section of component YAML defining type and configuration
+Scopes	Restrict which apps can access a component
+Reflect on Your Skill​
+
+You built a dapr-deployment skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my dapr-deployment skill, explain the difference between a Dapr building block and a Dapr component. Give me a concrete example with state management.
+
+
+Does your skill clearly distinguish these concepts?
+
+Identify Gaps​
+
+Ask yourself:
+
+Does my skill explain that building blocks are APIs and components are implementations?
+Does it include component YAML structure guidance?
+Can it help me swap backends by changing YAML?
+Improve Your Skill​
+
+If you found gaps:
+
+My dapr-deployment skill doesn't clearly explain building blocks vs components.
+Update it to include:
+1. Building blocks = portable APIs (state, pubsub, invoke, etc.)
+2. Components = pluggable implementations (state.redis, pubsub.kafka, etc.)
+3. Same code works with different backends by changing component YAML
+
+Try With AI​
+
+You now understand Dapr's abstraction model. Use AI to explore how this applies to your own systems.
+
+Setup​
+
+Open your AI assistant with context about Dapr. These prompts help you apply concepts to real scenarios.
+
+Prompt 1: Building Block vs Component​
+What's the difference between a Dapr building block and a Dapr component?
+Give me a concrete example using state management with Redis.
+Show me how the same application code would work if I switched to PostgreSQL.
+
+
+What you're learning: The building block/component separation is Dapr's core innovation. This prompt forces you to articulate the abstraction clearly and see how it enables backend swapping.
+
+Prompt 2: Component YAML Analysis​
+Here's a Dapr component YAML. Explain what each field does:
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis:6379
+    - name: redisPassword
+      secretKeyRef:
+        name: redis-secret
+        key: password
+
+
+What you're learning: Reading component YAML fluently is essential for debugging and configuration. Notice the secretKeyRef pattern—Dapr can pull sensitive values from secret stores instead of hardcoding them.
+
+Prompt 3: Backend Swapping Strategy​
+How would I swap from Redis pub/sub to Kafka pub/sub in Dapr without changing my application code?
+Show me both component YAML files and explain what stays the same vs what changes.
+
+
+What you're learning: This is the portability payoff. You'll see that your code references pubsub_name='pubsub' and the component YAML decides whether that means Redis or Kafka. The swap is purely configuration.
+
+Safety Note​
+
+When configuring components with credentials, never hardcode passwords in YAML files. Use secretKeyRef to reference Kubernetes secrets, or configure the secrets building block to pull from external vaults. Lesson 8 covers secrets management patterns in detail.

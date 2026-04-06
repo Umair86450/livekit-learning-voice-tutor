@@ -1,0 +1,691 @@
+Capstone: Conversational TaskManager Agent
+
+You've mastered ChatKit architecture (L01), connected agents (L02), implemented streaming (L03), managed conversation history (L04), handled sessions (L05), configured authentication (L06), and integrated React UI (L07). Now you'll combine everything into a production conversational product—a TaskManager agent that users can chat with naturally to create, update, and query tasks.
+
+This is Layer 4: Spec-Driven Integration. You'll start with a specification BEFORE writing any code, compose the intelligence you've built across this chapter, and produce a working Digital FTE component ready for deployment (Part 7).
+
+What Makes This Layer 4​
+
+In Layer 1, the book taught you ChatKit primitives directly. In Layer 2, you collaborated with AI to implement features. In Layer 3, you designed reusable components (conversation patterns, session handlers). Now in Layer 4, you orchestrate everything through specification.
+
+The workflow:
+
+Write LEARNING-SPEC.md (what the agent should do)
+Compose components from Lessons 1-7
+Validate against specification
+Test complete conversation flow
+
+The specification drives implementation. The components are already built. Your job is system design and orchestration.
+
+The Conversational TaskManager Vision​
+
+Instead of REST API calls like POST /tasks {"title": "..."}, users have natural conversations:
+
+User: "Create a task to review the quarterly report" Agent: "I've created a task: 'Review quarterly report' with priority normal. Would you like to set a due date or assign it?"
+
+User: "Set it for Friday and mark it high priority" Agent: "Updated! Task 'Review quarterly report' is now high priority with due date Friday, January 5th."
+
+User (next session, next day): "What tasks do I have?" Agent: "You have 3 open tasks: 1) Review quarterly report (high priority, due Friday)..."
+
+The agent remembers context across sessions, isolates users, streams responses token-by-token, and integrates with the React chat UI you built in Lesson 7.
+
+System Architecture​
+
+Here's what you're integrating:
+
+┌─────────────────────────────────────────────────────────┐
+│                    React Chat UI (L07)                  │
+│  - useChatKit hook with auth                            │
+│  - Page context injection                               │
+│  - Custom fetch for metadata                            │
+└────────────────┬────────────────────────────────────────┘
+                 │ HTTPS
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│           Next.js API Proxy (httpOnly cookies)          │
+│  /api/chatkit → Backend ChatKit endpoint                │
+└────────────────┬────────────────────────────────────────┘
+                 │ Internal
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│             TaskManager ChatKit Server                  │
+│                                                          │
+│  ┌──────────────────────────────────────────┐           │
+│  │   respond() Method                       │           │
+│  │  - Receive: thread, input, context       │           │
+│  │  - Extract user intent                   │           │
+│  │  - Call TaskManager Agent                │           │
+│  │  - Stream events back                    │           │
+│  └────────────┬─────────────────────────────┘           │
+│               │                                          │
+│               ▼                                          │
+│  ┌──────────────────────────────────────────┐           │
+│  │   TaskManager Agent (OpenAI/Google/      │           │
+│  │   Anthropic SDK from Ch62-65)            │           │
+│  │  - Tools: create_task, list_tasks,       │           │
+│  │    update_task, delete_task              │           │
+│  │  - Instructions: Natural conversation    │           │
+│  └────────────┬─────────────────────────────┘           │
+│               │                                          │
+│               ▼                                          │
+│  ┌──────────────────────────────────────────┐           │
+│  │   Conversation History Manager (L04)     │           │
+│  │  - Load thread history from store        │           │
+│  │  - Build context for agent               │           │
+│  └──────────────────────────────────────────┘           │
+│                                                          │
+│  ┌──────────────────────────────────────────┐           │
+│  │   Session Manager (L05)                  │           │
+│  │  - Create/resume sessions                │           │
+│  │  - User isolation via RequestContext     │           │
+│  └──────────────────────────────────────────┘           │
+│                                                          │
+│  ┌──────────────────────────────────────────┐           │
+│  │   Authentication (L06)                   │           │
+│  │  - Validate auth token                   │           │
+│  │  - Extract user identity                 │           │
+│  └──────────────────────────────────────────┘           │
+└─────────────────────────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│              Task Database (SQLModel)                    │
+│  - tasks table with user_id isolation                   │
+└─────────────────────────────────────────────────────────┘
+
+
+Key Integration Points:
+
+L02 patterns: Agent connection via stream_agent_response()
+L03 patterns: Streaming implementation with ThreadStreamEvent
+L04 patterns: Conversation history loading
+L05 patterns: Session lifecycle via RequestContext
+L06 patterns: Authentication and user identity
+L07 patterns: React UI integration with metadata injection
+Step 1: Write Your Specification​
+
+Before any implementation, write a complete specification. This is the LEARNING-SPEC.md pattern—you're learning to think specification-first.
+
+SPEC.md Template​
+
+Create specs/capstone-taskmanager-chatkit/spec.md:
+
+# Conversational TaskManager ChatKit Agent
+
+## Intent
+
+A conversational agent that allows users to manage tasks through natural language using ChatKit Server. Users can create, update, list, and delete tasks via chat, with conversation history persisting across sessions and user isolation ensuring privacy.
+
+## Success Criteria
+
+### Core Functionality
+- ✅ User can create task via natural language ("Create task: review report")
+- ✅ User can list tasks ("What tasks do I have?")
+- ✅ User can update task ("Mark task 3 as complete")
+- ✅ User can delete task ("Delete task 5")
+- ✅ Agent understands task attributes (title, priority, status, due date)
+
+### Conversation Quality
+- ✅ Agent responds in natural language (not JSON)
+- ✅ Agent confirms actions clearly ("Created task: 'Review report'")
+- ✅ Agent provides context when listing ("You have 3 open tasks...")
+- ✅ Agent handles ambiguity ("Which task do you want to update?")
+
+### Technical Requirements
+- ✅ Streaming: Responses stream token-by-token (L03 pattern)
+- ✅ History: Conversation persists across page reloads (L04 pattern)
+- ✅ Sessions: Users can resume conversations (L05 pattern)
+- ✅ Authentication: Users see only their tasks (L06 pattern)
+- ✅ React UI: Works with useChatKit hook from L07
+
+### Data Isolation
+- ✅ User A cannot see User B's tasks
+- ✅ Tasks linked to user via user_id from auth token
+- ✅ RequestContext provides user identity to agent
+
+## Constraints
+
+### What We're Building
+- ChatKit server extending `ChatKitServer` base class
+- TaskManager agent using OpenAI/Google/Anthropic SDK
+- Task database with SQLModel (Chapter 70 patterns)
+- React chat UI with authentication
+
+### What We're NOT Building
+- Complex task hierarchies (parent/child tasks) — out of scope
+- Task sharing between users — isolated only
+- Advanced NLP intent detection — agent SDK handles this
+- Persistent conversation branching — linear history only
+
+## Architecture
+
+### Backend Components
+
+**1. ChatKitTaskManagerServer** (extends ChatKitServer)
+~~~python
+class ChatKitTaskManagerServer(ChatKitServer):
+    async def respond(
+        self,
+        thread: ThreadMetadata,
+        input: UserMessageItem | None,
+        context: RequestContext
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        # Extract user_id from context
+        # Load conversation history from thread
+        # Create TaskManager agent with tools
+        # Stream agent response
+~~~
+
+**2. TaskManager Agent** (from Ch62-65 SDK)
+- Tools: create_task, list_tasks, update_task, delete_task
+- Instructions: Natural conversation, confirm actions
+- Model: gpt-4o / claude-sonnet-4 / gemini-2.0-flash
+
+**3. Task Database** (SQLModel from Ch70)
+- Table: tasks (id, user_id, title, priority, status, due_date, created_at)
+- User isolation via user_id foreign key
+
+### Frontend Components
+
+**4. React Chat UI** (from L07)
+- useChatKit hook with custom fetch
+- Auth token injection
+- Page context metadata
+
+**5. Next.js API Proxy** (from L07)
+- Route: /api/chatkit
+- Extracts httpOnly auth cookie
+- Forwards to backend with Authorization header
+
+## Validation Scenarios
+
+### Scenario 1: Create Task
+**User message:** "Create a task to review the Q4 report with high priority"
+**Expected:**
+- Agent calls create_task tool with parsed attributes
+- Database creates task with user_id from auth
+- Agent streams: "Created high priority task: 'Review Q4 report'. Would you like to set a due date?"
+
+### Scenario 2: List Tasks
+**User message:** "What tasks do I have?"
+**Expected:**
+- Agent calls list_tasks tool
+- Database queries tasks WHERE user_id = current_user
+- Agent streams natural list: "You have 2 open tasks: 1) Review Q4 report (high priority)..."
+
+### Scenario 3: Resume Session
+**User:** Creates task, closes browser
+**User:** Reopens chat next day, says "Show my tasks"
+**Expected:**
+- Conversation history loads from thread
+- Agent remembers previous context
+- Lists tasks including the one from yesterday
+
+### Scenario 4: User Isolation
+**User A:** Creates "Confidential project" task
+**User B:** Says "Show all tasks"
+**Expected:**
+- User B sees ONLY their tasks (not User A's)
+- Database isolation via user_id filter
+- No data leakage
+
+### Scenario 5: Streaming Quality
+**User message:** "Create 3 tasks: review report, update slides, email team"
+**Expected:**
+- Agent streams response incrementally (not all at once)
+- UI updates token-by-token
+- User sees "thinking" behavior before full response
+
+## Success Evals
+
+**Definition of Done:**
+- ✅ All 5 validation scenarios pass
+- ✅ Code follows L02-L07 integration patterns
+- ✅ Specification → Implementation alignment verified
+- ✅ No security vulnerabilities (SQL injection, auth bypass)
+- ✅ Ready for deployment (Chapter 76+ database, Part 7 cloud)
+
+
+What you learned by writing this specification:
+
+Clear success criteria prevent scope creep
+Constraints define what you're NOT building (as important as what you are)
+Validation scenarios are testable (not vague goals)
+Architecture section maps to components you've already built
+Step 2: Implementation Checklist​
+
+With specification complete, implement by composing L01-L07 components:
+
+Backend Implementation​
+# File: src/chatkit_taskmanager_server.py
+
+from chatkit import ChatKitServer, ThreadMetadata, UserMessageItem, ThreadStreamEvent, RequestContext
+from chatkit.agents import stream_agent_response
+from agents import Agent, Runner, Tool  # OpenAI SDK (Ch62)
+from typing import AsyncIterator
+from datetime import datetime
+
+# Import your Task model from Chapter 70
+from models import Task, create_task_in_db, list_tasks_from_db, update_task_in_db
+
+class ChatKitTaskManagerServer(ChatKitServer):
+    """
+    Conversational TaskManager using ChatKit Server.
+
+    Integrates:
+    - L02: Agent connection via stream_agent_response()
+    - L03: Streaming with ThreadStreamEvent
+    - L04: Conversation history from thread.items
+    - L05: Session management via RequestContext
+    - L06: Authentication from context.user_id
+    """
+
+    async def respond(
+        self,
+        thread: ThreadMetadata,
+        input: UserMessageItem | None,
+        context: RequestContext
+    ) -> AsyncIterator[ThreadStreamEvent]:
+        """
+        Main conversation handler.
+
+        Pattern from L01-L07:
+        1. Extract user_id from RequestContext (L06)
+        2. Load conversation history from thread (L04)
+        3. Create TaskManager agent with tools
+        4. Stream response (L03)
+        """
+
+        # L06: Extract authenticated user
+        user_id = context.metadata.get("user_id")
+        if not user_id:
+            yield self._error_event("Authentication required")
+            return
+
+        # L04: Build conversation history
+        conversation_history = self._build_history(thread)
+
+        # Create TaskManager agent with user-scoped tools
+        agent = self._create_taskmanager_agent(user_id)
+
+        # Get user's message
+        user_message = input.content if input else ""
+
+        # L02 + L03: Run agent and stream response
+        result = await Runner.run_streamed(
+            agent=agent,
+            messages=conversation_history + [{"role": "user", "content": user_message}]
+        )
+
+        # L03: Stream events to UI
+        async for event in stream_agent_response(context, result):
+            yield event
+
+    def _build_history(self, thread: ThreadMetadata) -> list[dict]:
+        """
+        L04: Convert thread items to agent message format.
+        """
+        history = []
+        for item in thread.items or []:
+            if item.type == "user_message":
+                history.append({"role": "user", "content": item.content})
+            elif item.type == "assistant_message":
+                history.append({"role": "assistant", "content": item.content})
+        return history
+
+    def _create_taskmanager_agent(self, user_id: str) -> Agent:
+        """
+        Create agent with user-scoped task tools.
+
+        Tools isolate data by user_id automatically.
+        """
+
+        # Tool 1: Create task
+        async def create_task(title: str, priority: str = "normal", due_date: str | None = None):
+            """Create a new task for the user."""
+            task = await create_task_in_db(
+                user_id=user_id,
+                title=title,
+                priority=priority,
+                due_date=due_date
+            )
+            return f"Created task #{task.id}: '{task.title}' (priority: {task.priority})"
+
+        # Tool 2: List tasks
+        async def list_tasks(status: str = "open"):
+            """List user's tasks filtered by status."""
+            tasks = await list_tasks_from_db(user_id=user_id, status=status)
+            if not tasks:
+                return "You have no tasks."
+
+            task_list = "\n".join([
+                f"{i+1}. {task.title} (priority: {task.priority}, status: {task.status})"
+                for i, task in enumerate(tasks)
+            ])
+            return f"You have {len(tasks)} {status} tasks:\n{task_list}"
+
+        # Tool 3: Update task
+        async def update_task(task_id: int, status: str | None = None, priority: str | None = None):
+            """Update task status or priority."""
+            task = await update_task_in_db(
+                user_id=user_id,  # Ensures user can only update their tasks
+                task_id=task_id,
+                status=status,
+                priority=priority
+            )
+            return f"Updated task #{task.id}: '{task.title}'"
+
+        # Create agent with tools
+        return Agent(
+            name="TaskManager",
+            tools=[
+                Tool(function=create_task),
+                Tool(function=list_tasks),
+                Tool(function=update_task)
+            ],
+            instructions="""
+            You are a helpful task management assistant.
+
+            When users ask to create, list, or update tasks, use your tools to help them.
+
+            Guidelines:
+            - Respond naturally (not in JSON)
+            - Confirm actions clearly: "Created task: 'X'"
+            - When listing tasks, provide context: "You have 3 open tasks..."
+            - If user request is ambiguous, ask clarifying questions
+            - Use friendly, conversational tone
+
+            Remember: All tools automatically filter by the authenticated user,
+            so users only see their own tasks.
+            """
+        )
+
+    def _error_event(self, message: str):
+        """Helper to yield error events."""
+        # Implementation depends on ChatKit error event format
+        pass
+
+
+# FastAPI integration (from Chapter 70)
+from fastapi import FastAPI
+from chatkit.integrations.fastapi import create_chatkit_routes
+
+app = FastAPI()
+server = ChatKitTaskManagerServer()
+
+# Mount ChatKit routes
+app.include_router(create_chatkit_routes(server), prefix="/chatkit")
+
+
+Output (example conversation):
+
+User: "Create a high priority task to review the security audit"
+
+Agent (streaming): "I've created a high priority task: 'Review the security audit'.
+Would you like to set a due date for this?"
+
+User: "Set it for next Friday"
+
+Agent (streaming): "Done! Task 'Review the security audit' is now scheduled for
+Friday, January 12th with high priority."
+
+Frontend Implementation​
+
+Use the React UI from Lesson 7 with TaskManager-specific configuration:
+
+// File: app/components/TaskManagerChat.tsx
+
+'use client';
+
+import { useChatKit, ChatKit } from '@openai/chatkit-react';
+import { useAuth } from '@/hooks/useAuth'; // Your auth hook
+
+export function TaskManagerChat() {
+  const { user, authToken } = useAuth();
+
+  const { control } = useChatKit({
+    api: {
+      url: '/api/chatkit',  // Next.js proxy (L07)
+      domainKey: 'taskmanager',
+
+      // L07: Custom fetch for auth + metadata
+      fetch: async (url: string, options: RequestInit) => {
+        // Inject user identity
+        const modifiedOptions = { ...options };
+
+        if (modifiedOptions.body && typeof modifiedOptions.body === 'string') {
+          const parsed = JSON.parse(modifiedOptions.body);
+          if (parsed.params?.input) {
+            parsed.params.input.metadata = {
+              user_id: user.id,
+              user_email: user.email,
+              ...parsed.params.input.metadata
+            };
+            modifiedOptions.body = JSON.stringify(parsed);
+          }
+        }
+
+        return fetch(url, modifiedOptions);
+      }
+    }
+  });
+
+  return (
+    <div className="h-screen flex flex-col">
+      <header className="p-4 border-b">
+        <h1>TaskManager Assistant</h1>
+        <p className="text-sm text-gray-600">
+          Manage your tasks through conversation
+        </p>
+      </header>
+
+      <div className="flex-1 overflow-hidden">
+        <ChatKit control={control} />
+      </div>
+    </div>
+  );
+}
+
+
+Integration points from L07:
+
+useChatKit hook with custom fetch
+Metadata injection for user identity
+httpOnly cookie auth via Next.js proxy
+Step 3: Testing Validation Scenarios​
+
+Test each scenario from your specification:
+
+Test 1: Create Task​
+# Start server
+uv run fastapi dev src/main.py
+
+# In React UI chat:
+User: "Create a task to update the deployment documentation"
+
+# Expected streaming response:
+"I've created a task: 'Update the deployment documentation' with normal priority.
+Would you like to set a due date or change the priority?"
+
+# Verify in database:
+SELECT * FROM tasks WHERE user_id = 'current_user_id';
+# Should show new task
+
+Test 2: List Tasks​
+User: "Show me all my tasks"
+
+# Expected response:
+"You have 2 open tasks:
+1. Update the deployment documentation (priority: normal)
+2. Review security audit (priority: high, due: Friday, January 12th)"
+
+Test 3: Resume Session​
+# 1. Create task
+User: "Create task: write unit tests"
+# Agent responds
+
+# 2. Close browser
+
+# 3. Reopen chat (new browser session)
+User: "What did we talk about?"
+
+# Expected:
+# Agent has access to conversation history (L04)
+# Can reference "write unit tests" task created earlier
+
+Test 4: User Isolation​
+# Terminal 1: User A
+curl -H "Authorization: Bearer USER_A_TOKEN" \
+  http://localhost:8000/chatkit \
+  -d '{"message": "Show my tasks"}'
+
+# Terminal 2: User B
+curl -H "Authorization: Bearer USER_B_TOKEN" \
+  http://localhost:8000/chatkit \
+  -d '{"message": "Show my tasks"}'
+
+# Verify:
+# User A sees only User A's tasks
+# User B sees only User B's tasks
+# No data leakage
+
+Test 5: Streaming Quality​
+# Watch network tab in browser DevTools
+User: "Create 5 tasks for the week"
+
+# Expected:
+# - SSE stream opens
+# - Tokens arrive progressively (not all at once)
+# - UI updates incrementally
+# - Stream closes when complete
+
+
+Safety Note: In production (Chapter 76+), replace in-memory storage with PostgreSQL. Add database connection pooling, proper error handling, and logging. Part 7 (Cloud-Native Development) covers deployment with proper infrastructure.
+
+What You Built​
+
+You created a production-ready conversational agent by:
+
+Specification Quality:
+
+Wrote complete LEARNING-SPEC.md before any code
+Defined success criteria, constraints, and validation scenarios
+Prevented scope creep by documenting non-goals
+
+Component Composition:
+
+ChatKit server (L01-L02 patterns)
+Streaming responses (L03 patterns)
+Conversation history (L04 patterns)
+Session management (L05 patterns)
+Authentication (L06 patterns)
+React UI integration (L07 patterns)
+
+System Integration:
+
+Backend agent with natural language understanding
+Database with user isolation
+Frontend chat interface
+Authentication flow
+Streaming infrastructure
+
+Digital FTE Foundation: This is a deployable component. With Chapter 76 (database persistence) and Part 7 (cloud deployment), you have a sellable product. Users don't interact with REST APIs—they chat with an intelligent agent that manages their tasks.
+
+Reflection: Spec-Driven vs Vibe Coding​
+
+If you had built this without a specification:
+
+What features would you implement? (All of them? None of them?)
+How would you know when you're done? (When it "feels right"?)
+How would you validate correctness? (Manual testing until it works?)
+How would you communicate requirements to AI? (Iterative prompting?)
+
+With specification-first approach:
+
+Features defined upfront (clear scope)
+Success criteria measurable (5 validation scenarios)
+Implementation guided by contract (spec → code alignment)
+AI executes specification precisely (minimal iteration)
+
+This is the paradigm shift Chapter 71 teaches. Specifications aren't documentation—they're executable contracts. When specifications are clear, AI agents execute flawlessly. When specifications are vague, you get Vibe Coding chaos.
+
+Try With AI: Extend Your Agent​
+
+Now that you have a working conversational TaskManager, enhance it with AI as your co-learning partner.
+
+Extension 1: Add Task Priority Intelligence​
+
+Specification to write:
+
+When user creates task without specifying priority, agent should:
+- Analyze task description for urgency keywords
+- Suggest priority based on patterns
+- Ask user to confirm
+
+Examples:
+- "urgent review" → suggest high priority
+- "when you have time" → suggest low priority
+- "deadline tomorrow" → suggest high priority
+
+
+Prompt AI:
+
+I want the agent to intelligently suggest task priorities. Here's my specification: [paste above]. Implement this by modifying the create_task tool instructions. The agent should analyze the task title and suggest priority, but always let the user override.
+
+
+What you're learning: How to extend agent intelligence through instruction refinement (not code changes). The agent's reasoning improves, but the architecture stays the same.
+
+Extension 2: Add Context Window Management​
+
+Challenge: Conversation history grows over time. Eventually, you exceed the model's context window.
+
+Specification to write:
+
+When conversation history exceeds N messages:
+- Summarize older messages
+- Keep recent messages verbatim
+- Preserve important task IDs and references
+
+Strategy:
+- Last 10 messages: full context
+- Messages 11-50: summarized
+- Messages 51+: pruned entirely
+
+
+Prompt AI:
+
+Design a context window management strategy for the TaskManager. I need to keep recent conversation verbatim but summarize older messages. Here's my approach: [paste above]. How would you implement this in the `_build_history` method?
+
+
+What you're learning: Advanced conversation engineering. As agents handle longer interactions, context management becomes critical. You're thinking about memory optimization, not just basic functionality.
+
+Extension 3: Add Conversational Task Updates​
+
+Current limitation: User must say "Update task 3 to high priority" (explicit task ID)
+
+Enhancement: User should say "Mark the security audit task as complete" (natural reference)
+
+Specification to write:
+
+Agent should:
+1. Understand natural task references ("the security audit task")
+2. Query database to find matching task
+3. If multiple matches, ask user to clarify
+4. If single match, execute update
+5. Confirm with full task details
+
+Edge cases:
+- No matching task → "I don't see a task matching 'X'"
+- Multiple matches → "I found 2 tasks about 'security'. Which one: 1) ... 2) ..."
+
+
+Prompt AI:
+
+I want users to reference tasks naturally instead of by ID. Here's the specification: [paste above]. Should I add a 'find_task_by_description' tool, or can the agent use the existing list_tasks tool to search first? What's the cleanest architecture?
+
+
+What you're learning: Conversational UX design. The best interfaces understand intent without requiring rigid syntax. You're collaborating with AI to design natural interactions.
+
+Safety Note: These extensions increase conversation complexity. Test thoroughly with edge cases (empty task lists, multiple matches, ambiguous references). Production systems need comprehensive error handling and user feedback for edge cases.
+
+Next Chapter: Chapter 72 (OpenAI Apps SDK) teaches you to build ChatGPT custom apps with interactive widgets—elevating conversations from text to visual interfaces with buttons, forms, and dynamic UI components.

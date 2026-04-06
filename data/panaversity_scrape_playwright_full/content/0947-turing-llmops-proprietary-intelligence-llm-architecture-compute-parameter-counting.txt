@@ -1,0 +1,423 @@
+Parameter Counting and Model Sizes
+
+When someone says "Llama-3-8B has 8 billion parameters," what does that actually mean? And why does it matter for fine-tuning? This lesson demystifies model sizes by teaching you to count parameters yourself. You'll understand exactly where those billions come from and how model size relates to capability, cost, and memory requirements.
+
+Knowing how to count parameters transforms you from someone who reads model cards to someone who can verify them. When you understand that 50% of an LLM's parameters live in the FFN layers, you can make informed decisions about which components to target during fine-tuning.
+
+What is a Parameter?​
+
+A parameter is a learnable weight in a neural network. During training, these weights are adjusted to minimize loss. In a transformer:
+
+Embedding weights: Map tokens to vectors (and back)
+Attention weights: Q, K, V projections and output projection
+FFN weights: Up-projection and down-projection matrices
+Layer norm weights: Scale and shift parameters
+
+Every parameter is a floating-point number. At FP16 precision, each parameter takes 2 bytes. So:
+
+Model memory (bytes) = Parameters × Bytes per parameter
+8 billion × 2 bytes = 16 GB
+
+
+This is why an 8B model needs roughly 16GB of VRAM just to load the weights at FP16.
+
+The Parameter Counting Formula​
+
+Here's the formula for counting transformer parameters:
+
+Total Parameters = Embedding + (Attention + FFN + LayerNorm) × Layers + Output Head
+
+
+Let's break down each component.
+
+1. Embedding Layer​
+
+The embedding table maps vocabulary tokens to hidden vectors:
+
+Embedding Parameters = Vocabulary Size × Hidden Dimension
+
+
+For Llama-3-8B:
+
+Vocabulary: 128,256 tokens
+Hidden dimension: 4,096
+Embedding = 128,256 × 4,096 = 525,336,576 ≈ 525M parameters
+
+2. Attention Layer (per layer)​
+
+Each attention layer has:
+
+Component	Formula	Llama-3-8B
+Q projection	hidden × hidden	4,096 × 4,096 = 16.8M
+K projection	hidden × kv_heads × head_dim	4,096 × 8 × 128 = 4.2M
+V projection	hidden × kv_heads × head_dim	4,096 × 8 × 128 = 4.2M
+Output projection	hidden × hidden	4,096 × 4,096 = 16.8M
+
+Note: Llama-3 uses Grouped Query Attention (GQA), where K and V projections are smaller than Q. This saves parameters and memory.
+
+Attention per layer ≈ 16.8M + 4.2M + 4.2M + 16.8M = 42M parameters
+
+3. FFN Layer (per layer)​
+
+The Feed-Forward Network has:
+
+Component	Formula	Llama-3-8B
+Gate projection	hidden × intermediate	4,096 × 14,336 = 58.7M
+Up projection	hidden × intermediate	4,096 × 14,336 = 58.7M
+Down projection	intermediate × hidden	14,336 × 4,096 = 58.7M
+
+Llama uses a gated FFN (SwiGLU), so there are three projections instead of two:
+
+FFN per layer = 58.7M × 3 = 176M parameters
+
+4. Layer Normalization (per layer)​
+
+Each layer has 2 layer norms, each with scale and shift:
+
+LayerNorm per layer = 2 × (2 × hidden) = 2 × (2 × 4,096) = 16,384 ≈ 0.016M
+
+
+This is negligible compared to attention and FFN.
+
+5. Output Head​
+
+The output projection maps hidden states back to vocabulary:
+
+Output Head = Hidden × Vocabulary = 4,096 × 128,256 = 525M
+
+
+Note: Some models tie the output head to the embedding weights (same matrix). Llama-3 uses separate weights.
+
+Complete Calculation: Llama-3-8B​
+
+Now let's sum everything:
+
+Component	Formula	Parameters
+Embedding	128,256 × 4,096	525M
+Attention × 32 layers	42M × 32	1,344M
+FFN × 32 layers	176M × 32	5,632M
+LayerNorm × 32 layers	0.016M × 32	0.5M
+Output Head	128,256 × 4,096	525M
+Total		8,027M ≈ 8B
+
+The name "8B" comes from this calculation. The actual parameter count varies slightly based on exact architecture details.
+
+Where Do the Parameters Live?​
+Parameter Distribution in Llama-3-8B:
+┌─────────────────────────────────────────────────────────────────┐
+│ FFN (70%)                                                       │
+│ ████████████████████████████████████████████████████████████████│
+├─────────────────────────────────────────────────────────────────┤
+│ Attention (17%)                                                 │
+│ ████████████████                                                │
+├─────────────────────────────────────────────────────────────────┤
+│ Embedding + Output (13%)                                        │
+│ ████████████                                                    │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Key insight: The FFN layers contain ~70% of all parameters. This is why some fine-tuning techniques (like LoRA) focus on attention matrices - they're a smaller, more targeted intervention.
+
+Python Code: Count Parameters Programmatically​
+
+You can verify parameter counts with code:
+
+from transformers import AutoModelForCausalLM, AutoConfig
+
+def count_parameters(model_name: str) -> dict:
+    """Count parameters by component for a transformer model."""
+
+    # Load config only (no weights)
+    config = AutoConfig.from_pretrained(model_name)
+
+    # Extract architecture details
+    vocab_size = config.vocab_size
+    hidden_size = config.hidden_size
+    num_layers = config.num_hidden_layers
+    intermediate_size = config.intermediate_size
+    num_heads = config.num_attention_heads
+    num_kv_heads = getattr(config, 'num_key_value_heads', num_heads)
+    head_dim = hidden_size // num_heads
+
+    # Calculate per-component parameters
+    embedding = vocab_size * hidden_size
+
+    # Attention (Q is full, K/V are grouped)
+    q_proj = hidden_size * hidden_size
+    k_proj = hidden_size * (num_kv_heads * head_dim)
+    v_proj = hidden_size * (num_kv_heads * head_dim)
+    o_proj = hidden_size * hidden_size
+    attention_per_layer = q_proj + k_proj + v_proj + o_proj
+
+    # FFN (gated: gate + up + down)
+    ffn_per_layer = 3 * hidden_size * intermediate_size
+
+    # Layer norms (negligible but include for completeness)
+    layernorm_per_layer = 4 * hidden_size  # 2 norms × (scale + shift)
+
+    # Total per layer
+    per_layer = attention_per_layer + ffn_per_layer + layernorm_per_layer
+
+    # Output head (often tied to embedding, but count separately)
+    output_head = hidden_size * vocab_size
+
+    total = embedding + (per_layer * num_layers) + output_head
+
+    return {
+        "model": model_name,
+        "vocab_size": vocab_size,
+        "hidden_size": hidden_size,
+        "num_layers": num_layers,
+        "embedding": embedding,
+        "attention_per_layer": attention_per_layer,
+        "ffn_per_layer": ffn_per_layer,
+        "total_attention": attention_per_layer * num_layers,
+        "total_ffn": ffn_per_layer * num_layers,
+        "output_head": output_head,
+        "total_parameters": total,
+        "total_billions": total / 1e9
+    }
+
+# Count parameters for Llama-3.2-1B
+result = count_parameters("meta-llama/Llama-3.2-1B")
+for key, value in result.items():
+    if isinstance(value, int) and value > 1000:
+        print(f"{key}: {value:,}")
+    else:
+        print(f"{key}: {value}")
+
+
+Output:
+
+model: meta-llama/Llama-3.2-1B
+vocab_size: 128256
+hidden_size: 2048
+num_layers: 16
+embedding: 262,668,288
+attention_per_layer: 12,582,912
+ffn_per_layer: 50,331,648
+total_attention: 201,326,592
+total_ffn: 805,306,368
+output_head: 262,668,288
+total_parameters: 1,531,969,536
+total_billions: 1.53
+
+
+This code works for any Hugging Face model. Try it with meta-llama/Llama-3.1-8B to verify the 8B calculation.
+
+Model Size Tiers: Choosing the Right Model​
+
+Models come in distinct size tiers, each with different trade-offs:
+
+Size Tier	Examples	VRAM (FP16)	Quality	Latency	Use Case
+1-3B	Llama-3.2-1B, Phi-3-mini	2-6 GB	Good for focused tasks	Very fast	Mobile, edge, rapid prototyping
+7-8B	Llama-3-8B, Mistral-7B	14-16 GB	Strong general capability	Fast	Best for Colab T4 fine-tuning
+13B	Llama-2-13B	26 GB	Better reasoning	Moderate	Single high-end GPU
+30-34B	CodeLlama-34B	68 GB	Excellent capability	Slow	Multi-GPU or cloud
+70B+	Llama-3-70B	140+ GB	Near-frontier performance	Very slow	Cluster deployment
+The Sweet Spot: 7-8B Models​
+
+For fine-tuning on consumer hardware (like Colab T4), 7-8B models hit the sweet spot:
+
+Fits with quantization: 8B in 4-bit = ~5GB, leaving room for training
+Strong capability: Sufficient parameters for complex reasoning
+Practical latency: Generates ~30 tokens/second on T4
+Good fine-tuning transfer: Enough capacity to learn domain patterns
+When to Go Smaller (1-3B)​
+Mobile or edge deployment
+Latency-critical applications
+Very narrow task (classification, extraction)
+Limited compute budget
+When to Go Larger (70B+)​
+Complex multi-step reasoning required
+Frontier quality expectations
+Production with cloud GPU budget
+RAG over large knowledge bases
+Scaling Laws: The Pattern Behind Model Sizes​
+
+Research by OpenAI and others revealed predictable relationships between model size and performance:
+
+The Core Relationship​
+Loss ∝ (Parameters)^(-0.076) × (Compute)^(-0.050) × (Data)^(-0.095)
+
+
+In plain terms:
+
+Doubling parameters reduces loss by ~5%
+Doubling compute reduces loss by ~3.5%
+Doubling data reduces loss by ~6.5%
+Implications for Model Selection​
+If you want...	You need...
+10% better loss	~4× parameters
+Meaningful quality jump	~10× parameters
+Human-level on benchmark	Depends on task complexity
+Compute-Optimal Training (Chinchilla)​
+
+The Chinchilla research showed that many models were undertrained for their size:
+
+Optimal tokens = 20 × Parameters
+
+
+For an 8B model: 20 × 8B = 160B tokens of training data
+
+Why this matters for fine-tuning: Your fine-tuning dataset is tiny compared to pre-training (thousands vs. billions of tokens). You're making surgical adjustments, not training from scratch. This is why LoRA (small adapter matrices) works so well.
+
+From Parameters to Memory​
+
+Converting parameters to memory requirements:
+
+Memory (bytes) = Parameters × Bytes per parameter
+
+Precision Levels​
+Precision	Bytes/Param	8B Model	Notes
+FP32	4	32 GB	Full precision, rarely used
+FP16/BF16	2	16 GB	Standard training precision
+INT8	1	8 GB	8-bit quantization
+INT4/NF4	0.5	4 GB	4-bit quantization (QLoRA)
+Quick Memory Estimates​
+
+Use this mental shortcut:
+
+VRAM for loading ≈ Parameters (B) × 2 (for FP16)
+VRAM for loading ≈ Parameters (B) × 0.5 (for INT4)
+
+
+Examples:
+
+Llama-3-8B at FP16: 8 × 2 = 16 GB
+Llama-3-8B at INT4: 8 × 0.5 = 4 GB
+Llama-3-70B at FP16: 70 × 2 = 140 GB
+Llama-3-70B at INT4: 70 × 0.5 = 35 GB
+
+Note: Training requires additional memory for gradients, optimizer states, and activations. Lesson 4 covers the complete VRAM budget.
+
+Practice: Estimate Model Parameters​
+
+Given this configuration, estimate the total parameters:
+
+Model: Custom-LLM-2B
+- Vocabulary: 50,000
+- Hidden dimension: 2,048
+- Layers: 24
+- FFN intermediate: 8,192
+- Attention heads: 16 (no GQA)
+
+
+Work through it:
+
+Embedding: 50,000 × 2,048 = 102,400,000 = 102.4M
+
+Attention per layer:
+
+Q: 2,048 × 2,048 = 4.2M
+K: 2,048 × 2,048 = 4.2M (no GQA, full size)
+V: 2,048 × 2,048 = 4.2M
+O: 2,048 × 2,048 = 4.2M
+Total attention: 16.8M per layer
+
+FFN per layer:
+
+3 × 2,048 × 8,192 = 50.3M per layer
+
+Per layer total: 16.8M + 50.3M = 67.1M
+
+All layers: 67.1M × 24 = 1,610M
+
+Output head: 2,048 × 50,000 = 102.4M
+
+Total: 102.4M + 1,610M + 102.4M = 1,815M ≈ 1.8B
+
+The model name "2B" is approximately correct (the ~10% difference comes from rounding and minor components).
+
+Verifying Model Cards​
+
+Model cards on Hugging Face claim parameter counts. Verify them:
+
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B",
+    torch_dtype="auto",
+    device_map="cpu"
+)
+
+# Count actual loaded parameters
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+print(f"Total parameters: {total_params:,}")
+print(f"Trainable parameters: {trainable_params:,}")
+print(f"In billions: {total_params / 1e9:.2f}B")
+
+
+Output:
+
+Total parameters: 1,235,814,400
+Trainable parameters: 1,235,814,400
+In billions: 1.24B
+
+
+This matches the expected ~1.2B for Llama-3.2-1B.
+
+Summary Table: Common Models​
+
+Reference table for quick lookups:
+
+Model	Parameters	Layers	Hidden	Heads	FFN	VRAM (FP16)	VRAM (4-bit)
+Llama-3.2-1B	1.2B	16	2,048	32	8,192	2.4 GB	0.7 GB
+Llama-3-8B	8.0B	32	4,096	32	14,336	16 GB	5 GB
+Mistral-7B	7.2B	32	4,096	32	14,336	14.4 GB	4.5 GB
+Llama-3-70B	70B	80	8,192	64	28,672	140 GB	40 GB
+Try With AI​
+
+Now that you can count parameters, explore the implications with your AI companion.
+
+Prompt 1: Verify Your Understanding​
+I calculated that Llama-3-8B has these parameter distributions:
+- FFN: 5.6B (70%)
+- Attention: 1.3B (17%)
+- Embeddings: 1.0B (13%)
+
+If I'm fine-tuning with LoRA targeting only Q and V matrices in attention:
+1. What percentage of total parameters am I adapting?
+2. Why is LoRA effective despite touching so few parameters?
+3. Would targeting FFN layers be more or less effective?
+
+Help me connect parameter distribution to fine-tuning strategy.
+
+
+What you're learning: Understanding parameter distribution informs fine-tuning decisions.
+
+Prompt 2: Size Selection for Your Use Case​
+I want to fine-tune a model for Task API (structured task management).
+My constraints:
+- Colab Free Tier (T4 GPU, 15GB VRAM)
+- Want to train, not just inference
+- Task complexity: extracting entities and generating JSON
+
+Help me analyze:
+1. What size model should I target? Explain the trade-off.
+2. Is 1B sufficient for JSON generation or do I need 7B?
+3. How would my choice change if I had an A100 (40GB VRAM)?
+
+Walk me through the selection process.
+
+
+What you're learning: Selecting the right model size balances capability, constraints, and use case.
+
+Prompt 3: Scaling Law Implications​
+I learned about scaling laws: doubling parameters gives ~5% loss improvement.
+
+But I'm fine-tuning, not pre-training. Help me understand:
+1. Do scaling laws apply to fine-tuning the same way as pre-training?
+2. For a narrow task (Task API), is an 8B model "overkill"?
+3. What's the relationship between task complexity and model size?
+
+Challenge my assumption that bigger is always better for fine-tuning.
+
+
+What you're learning: Scaling laws provide context, but fine-tuning follows different dynamics than pre-training.
+
+Safety Note​
+
+When loading large models for parameter counting, use device_map="cpu" to avoid GPU memory issues. For models above 13B, use low_cpu_mem_usage=True or just load the config (AutoConfig.from_pretrained) which doesn't download weights. Loading 70B weights on a consumer machine will exhaust RAM and potentially crash your system.

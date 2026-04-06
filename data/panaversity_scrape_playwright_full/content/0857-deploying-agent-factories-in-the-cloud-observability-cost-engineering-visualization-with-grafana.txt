@@ -1,0 +1,516 @@
+Visualization with Grafana
+
+Your Prometheus server is collecting thousands of metrics every 30 seconds. The data exists. But when your Task API starts throwing 500 errors at 3 AM, can you answer these questions in under 60 seconds?
+
+Is the error rate actually increasing, or was it a blip?
+Which endpoint is failing?
+When did the problem start?
+Is it correlated with increased traffic or resource saturation?
+
+Raw PromQL queries won't cut it. You need dashboards that surface the answers instantly—before your users notice and before your on-call engineer has their first coffee.
+
+Grafana transforms your Prometheus metrics into operational intelligence. This lesson teaches you to build dashboards that make metrics actionable: panels for the 4 golden signals, variables for multi-service filtering, and community dashboard imports that save hours of configuration.
+
+The 4 Golden Signals: What Every Dashboard Needs​
+
+Google's Site Reliability Engineering book defines four golden signals that every service dashboard must display. These aren't arbitrary—they're the minimum information needed to diagnose most production issues:
+
+Signal	What It Measures	Why It Matters
+Latency	Time to serve requests	User experience degrades with slow responses
+Traffic	Request volume (req/sec)	Context for other signals; high traffic explains high errors
+Errors	Failed request percentage	Direct indicator of user-visible problems
+Saturation	Resource utilization %	Leading indicator; high saturation predicts future failures
+
+Your Task API dashboard will include all four signals. When something breaks, you'll look at the dashboard and know within seconds whether it's a latency spike, error surge, traffic overload, or resource exhaustion.
+
+Grafana Dashboard Architecture​
+
+Before creating panels, understand how Grafana structures dashboards:
+
+Dashboard (JSON)
+├── Settings (title, uid, tags, time range)
+├── Variables (namespace, service, pod filters)
+├── Annotations (deployment markers, alerts)
+├── Rows (collapsible groups)
+│   ├── Panel 1 (time series, gauge, stat, table)
+│   ├── Panel 2
+│   └── Panel 3
+└── Links (related dashboards)
+
+
+Everything in Grafana is ultimately JSON. You can create dashboards through the UI, but the underlying model is a JSON document. This matters because:
+
+Version control: Export dashboards as JSON and store in Git
+Reproducibility: Deploy identical dashboards across environments
+Automation: Generate dashboards programmatically
+Creating Your First Dashboard: Task API Golden Signals​
+
+Let's build a dashboard for the Task API metrics you instrumented in Lesson 2.
+
+Step 1: Access Grafana​
+
+If you installed kube-prometheus-stack via Helm, Grafana is already running:
+
+kubectl port-forward svc/prometheus-grafana 3000:80 -n monitoring
+
+
+Output:
+
+Forwarding from 127.0.0.1:3000 -> 3000
+
+
+Open http://localhost:3000 in your browser. Default credentials are admin / prom-operator (or whatever you set in Helm values).
+
+Step 2: Create a New Dashboard​
+Click the + icon in the left sidebar
+Select Dashboard
+Click Add visualization
+
+You'll see an empty panel with a query editor.
+
+Step 3: Build the Latency Panel (P95)​
+
+The first golden signal is latency. Configure your panel:
+
+Query (PromQL):
+
+histogram_quantile(0.95,
+  sum(rate(task_api_request_duration_seconds_bucket{namespace="$namespace", service="task-api"}[5m]))
+  by (le)
+)
+
+
+Panel Settings:
+
+Title: P95 Latency
+Panel type: Time series
+Unit: seconds (s)
+Legend: P95
+
+Click Apply to add the panel to your dashboard.
+
+Output (Visual): The panel displays a line graph showing the 95th percentile latency over time. Spikes indicate periods when 5% of requests took longer than usual.
+
+Step 4: Build the Traffic Panel (Requests/Second)​
+
+Query (PromQL):
+
+sum(rate(task_api_requests_total{namespace="$namespace", service="task-api"}[5m]))
+
+
+Panel Settings:
+
+Title: Request Rate
+Panel type: Time series
+Unit: requests/sec (reqps)
+Legend: Requests/sec
+
+Output (Visual): A line showing request volume over time. Traffic patterns reveal usage spikes (lunch hour, batch jobs) and help contextualize errors.
+
+Step 5: Build the Error Rate Panel​
+
+Query (PromQL):
+
+sum(rate(task_api_requests_total{namespace="$namespace", service="task-api", status=~"5.."}[5m]))
+/
+sum(rate(task_api_requests_total{namespace="$namespace", service="task-api"}[5m]))
+* 100
+
+
+Panel Settings:
+
+Title: Error Rate
+Panel type: Gauge
+Unit: percent (0-100)
+Thresholds:
+Green: 0-1
+Yellow: 1-5
+Red: 5-100
+
+Output (Visual): A gauge showing current error percentage. Green means healthy; yellow is warning territory; red requires immediate attention.
+
+Step 6: Build the Saturation Panel (CPU)​
+
+Query (PromQL):
+
+sum(rate(container_cpu_usage_seconds_total{namespace="$namespace", pod=~"task-api.*"}[5m]))
+/
+sum(container_spec_cpu_quota{namespace="$namespace", pod=~"task-api.*"} / container_spec_cpu_period{namespace="$namespace", pod=~"task-api.*"})
+* 100
+
+
+Panel Settings:
+
+Title: CPU Saturation
+Panel type: Gauge
+Unit: percent (0-100)
+Thresholds:
+Green: 0-70
+Yellow: 70-85
+Red: 85-100
+
+Output (Visual): A gauge showing CPU utilization as percentage of limits. High saturation (>85%) indicates your pods are resource-constrained and may need scaling.
+
+Dashboard Variables: Multi-Service Filtering​
+
+Hardcoding namespace="default" in every query limits reusability. Dashboard variables let users filter dynamically.
+
+Creating a Namespace Variable​
+Click the gear icon (Dashboard settings) in the top right
+Select Variables in the left menu
+Click Add variable
+
+Configure:
+
+Name: namespace
+Type: Query
+Data source: Prometheus
+Query: label_values(kube_namespace_labels, namespace)
+Regex: Leave empty (or filter with /(default|production|staging)/)
+Multi-value: Enable
+Include All option: Enable
+
+Output: A dropdown appears at the top of your dashboard. Selecting a namespace filters all panels.
+
+Creating a Service Variable​
+
+Add another variable:
+
+Name: service
+Type: Query
+Data source: Prometheus
+Query: label_values(task_api_requests_total{namespace="$namespace"}, service)
+
+This variable depends on the namespace selection—Grafana refreshes the service list when namespace changes.
+
+Using Variables in Queries​
+
+Update your panel queries to use variables:
+
+# Before (hardcoded)
+sum(rate(task_api_requests_total{namespace="default", service="task-api"}[5m]))
+
+# After (variable-based)
+sum(rate(task_api_requests_total{namespace="$namespace", service="$service"}[5m]))
+
+
+Now the same dashboard works for any service in any namespace.
+
+The Dashboard JSON Model​
+
+Everything you built through the UI exists as JSON. Export your dashboard:
+
+Click the share icon (top right)
+Select Export
+Toggle Export for sharing externally
+Click Save to file
+
+Here's a simplified version of the Task API Golden Signals dashboard:
+
+{
+  "dashboard": {
+    "uid": "task-api-golden-signals",
+    "title": "Task API - Golden Signals",
+    "tags": ["task-api", "golden-signals", "sre"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "templating": {
+      "list": [
+        {
+          "name": "namespace",
+          "type": "query",
+          "datasource": "prometheus",
+          "query": "label_values(kube_namespace_labels, namespace)",
+          "current": { "text": "default", "value": "default" },
+          "multi": true,
+          "includeAll": true
+        },
+        {
+          "name": "service",
+          "type": "query",
+          "datasource": "prometheus",
+          "query": "label_values(task_api_requests_total{namespace=\"$namespace\"}, service)",
+          "current": { "text": "task-api", "value": "task-api" }
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "P95 Latency",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(task_api_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$service\"}[5m])) by (le))",
+            "legendFormat": "P95"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 0.5, "color": "yellow" },
+                { "value": 1, "color": "red" }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "title": "Request Rate",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "targets": [
+          {
+            "expr": "sum(rate(task_api_requests_total{namespace=\"$namespace\", service=\"$service\"}[5m]))",
+            "legendFormat": "Requests/sec"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": { "unit": "reqps" }
+        }
+      },
+      {
+        "title": "Error Rate",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+        "targets": [
+          {
+            "expr": "sum(rate(task_api_requests_total{namespace=\"$namespace\", service=\"$service\", status=~\"5..\"}[5m])) / sum(rate(task_api_requests_total{namespace=\"$namespace\", service=\"$service\"}[5m])) * 100",
+            "legendFormat": "Error %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 1, "color": "yellow" },
+                { "value": 5, "color": "red" }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "title": "CPU Saturation",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+        "targets": [
+          {
+            "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", pod=~\"task-api.*\"}[5m])) / sum(container_spec_cpu_quota{namespace=\"$namespace\", pod=~\"task-api.*\"} / container_spec_cpu_period{namespace=\"$namespace\", pod=~\"task-api.*\"}) * 100",
+            "legendFormat": "CPU %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 70, "color": "yellow" },
+                { "value": 85, "color": "red" }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+
+
+Store this JSON in your Git repository under observability/dashboards/task-api-golden-signals.json. Deploy it via ConfigMap with the kube-prometheus-stack's dashboard provisioning.
+
+Importing Community Dashboards​
+
+Don't reinvent the wheel. Grafana.com hosts thousands of community dashboards. For Kubernetes monitoring, the most popular include:
+
+Dashboard ID	Name	Use Case
+315	Kubernetes Cluster Monitoring	Cluster-wide resource view
+6417	Kubernetes Pods	Pod-level resource metrics
+13770	Kubernetes Node Exporter	Node hardware metrics
+11074	Node Exporter Full	Detailed host metrics
+Import a Dashboard​
+In Grafana, click + → Import
+Enter dashboard ID: 6417
+Click Load
+Select your Prometheus datasource
+Click Import
+
+Output: The "Kubernetes Pods" dashboard appears with pre-built panels for CPU, memory, network, and filesystem metrics per pod.
+
+Customize the Imported Dashboard​
+
+Community dashboards are starting points. Customize for your needs:
+
+Clone before modifying: Click Settings → Save As to create a copy
+Update variables: Add your namespace/service variables
+Add custom panels: Include your application-specific metrics
+Remove noise: Delete panels you don't need
+Dashboard Design Best Practices​
+
+Follow these patterns for dashboards that scale:
+
+1. Organize with Rows​
+
+Group related panels into collapsible rows:
+
+Overview row: High-level health (error rate, latency, traffic)
+Resources row: CPU, memory, network saturation
+Breakdown row: Per-endpoint, per-pod details
+2. Consistent Units​
+
+Always specify units in panel settings:
+
+Latency: seconds (s) or milliseconds (ms)
+Memory: bytes (bytes) with auto-scaling (Ki, Mi, Gi)
+Percentages: percent (percent)
+Rates: requests/sec (reqps)
+3. Meaningful Thresholds​
+
+Set thresholds based on SLOs:
+
+Green: Within SLO (e.g., under 500ms latency)
+Yellow: Approaching SLO breach (e.g., 500-800ms)
+Red: SLO violated (e.g., over 800ms)
+4. Include Time Context​
+
+Add annotations for deployments and incidents:
+
+# Annotation query for deployments
+changes(kube_deployment_status_observed_generation{namespace="$namespace", deployment="$service"}[1m]) > 0
+
+
+This marks when deployments occurred, correlating code changes with metric changes.
+
+5. Link Related Dashboards​
+
+Add dashboard links so operators can drill down:
+
+Service overview → Pod details
+Cluster metrics → Node metrics
+Application metrics → Trace viewer (Jaeger)
+Deploying Dashboards as Code​
+
+For production, deploy dashboards via Kubernetes ConfigMaps:
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-api-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  task-api-golden-signals.json: |
+    {
+      "dashboard": {
+        "uid": "task-api-golden-signals",
+        "title": "Task API - Golden Signals",
+        ... (full JSON)
+      }
+    }
+
+
+The kube-prometheus-stack's Grafana sidecar watches for ConfigMaps with the grafana_dashboard: "1" label and auto-imports them.
+
+Output:
+
+kubectl apply -f task-api-dashboard-configmap.yaml
+
+configmap/task-api-dashboard created
+
+
+Within seconds, the dashboard appears in Grafana without manual import.
+
+Try With AI​
+
+Now collaborate with AI to extend your dashboard capabilities.
+
+Setup: You have the Task API Golden Signals dashboard from this lesson. You want to add per-endpoint breakdowns and a summary table.
+
+Prompt 1: Per-Endpoint Latency Breakdown
+
+My Task API dashboard shows overall P95 latency.
+I need a panel showing P95 latency broken down by endpoint.
+
+The metric is task_api_request_duration_seconds_bucket with
+labels: namespace, service, method, endpoint, le
+
+Write the PromQL query and panel JSON for a time series
+showing P95 latency per endpoint.
+
+
+What you're learning: Using by (endpoint) in PromQL aggregations to create multi-line charts where each line represents a different endpoint.
+
+Prompt 2: Summary Table Panel
+
+I want a table panel showing current status for all endpoints:
+- Endpoint name
+- Request rate (last 5m)
+- Error rate %
+- P95 latency
+
+This should update in real-time like a leaderboard.
+What panel type and queries should I use?
+
+
+What you're learning: Grafana's Table panel type with instant queries (not range queries) and value mappings for status colors.
+
+Prompt 3: Dashboard for Multiple Services
+
+I'm deploying more services: task-api, user-api, auth-api.
+How should I structure dashboards?
+
+Option A: One dashboard per service
+Option B: One dashboard with service variable
+Option C: Overview dashboard + per-service detail dashboards
+
+What's the best practice for 5-10 services?
+
+
+What you're learning: Dashboard architecture patterns. The answer typically involves a hierarchy: fleet overview (all services on one page) linking to service-specific dashboards with full detail.
+
+Safety note: When importing or creating dashboards, avoid exposing them publicly without authentication. Grafana dashboards can reveal infrastructure details. Always deploy behind authentication and consider read-only viewer roles for shared access.
+
+Reflect on Your Skill​
+
+You built an observability-cost-engineer skill in Lesson 0. Test and improve it based on what you learned about Grafana.
+
+Test Your Skill​
+Using my observability-cost-engineer skill, generate a Grafana
+dashboard JSON for a Python FastAPI service with standard
+HTTP metrics (request count, latency histogram, error rate).
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill produce valid Grafana JSON with proper schema version?
+Did it include all 4 golden signals with appropriate panel types?
+Did it configure dashboard variables for namespace/service filtering?
+Did it set meaningful thresholds based on SRE best practices?
+Improve Your Skill​
+
+If you found gaps:
+
+My observability-cost-engineer skill is missing [Grafana JSON structure /
+golden signals panels / variable configuration / threshold best practices].
+
+Update it to include:
+- Grafana dashboard JSON schema with templating section
+- Time series panels for latency and traffic
+- Gauge panels for error rate and saturation with thresholds
+- Standard variables (namespace, service) with query patterns
+- Dashboard design best practices (rows, units, links)
+
+
+By the end of this lesson, your skill should generate production-ready Grafana dashboards that surface the 4 golden signals with proper filtering and thresholds.

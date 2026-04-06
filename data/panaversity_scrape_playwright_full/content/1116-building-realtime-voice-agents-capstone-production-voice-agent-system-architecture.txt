@@ -1,0 +1,587 @@
+System Architecture & Specification Design
+
+You have spent six chapters learning the components of voice AI: architectures and latency budgets in Chapter 109, LiveKit's distributed agent system in Chapter 110, Pipecat's flexible pipelines in Chapter 111, OpenAI's native speech-to-speech in Chapter 112, Gemini's multimodal voice+vision in Chapter 113, and phone/browser integration in Chapter 114.
+
+Now you compose them all.
+
+This capstone builds a production voice-enabled Task Manager. Not a demo. Not a prototype. A system that handles real users calling from phones, speaking through browsers, and sharing their screens. A system with documented specifications, justified provider choices, and measurable success criteria.
+
+The difference between a demo and production is the specification. Anyone can string together APIs until something works. Production engineers write down what "works" means before writing code. This lesson is specification-first.
+
+What You Are Building​
+
+Your voice-enabled Task Manager answers on multiple channels:
+
+Browser (WebRTC via LiveKit)
+
+User clicks microphone button in web app
+Voice commands: "What tasks do I have today?"
+Natural conversation with interruption support
+Screen sharing: "Add what I'm looking at to my tasks"
+
+Phone (SIP via Twilio)
+
+User calls dedicated phone number
+Same conversation capabilities as browser
+Phone-specific greeting and confirmation flows
+Works from any phone, anywhere
+
+Unified Agent Logic
+
+Single conversation engine handles both channels
+Task Manager API integration via MCP
+Consistent personality across channels
+Conversation history persists within session
+
+This is not three separate agents. This is one agent accessible through multiple doors.
+
+Write Your Production Specification​
+
+The specification is the primary artifact of Layer 4. You write it. AI does not write specifications for you. AI validates, suggests, and stress-tests your spec. But the decisions are yours.
+
+The Specification Structure​
+
+Production specifications answer five questions:
+
+Intent: What problem does this solve?
+Scope: What channels and capabilities are included?
+Requirements: What must the system do (functional) and how well (non-functional)?
+Success Metrics: How do you know it works?
+Non-Goals: What are you explicitly NOT building?
+Write Your Intent Statement​
+
+Begin with the business problem. Not the technology. Not the features. The problem.
+
+Your intent statement should fit in two sentences:
+
+## Intent
+
+This voice agent enables users to manage tasks through natural conversation,
+accessible from any device with a microphone or phone. It reduces friction
+between "I need to do something" and "it's in my task list."
+
+
+Bad intent statements describe technology:
+
+"This agent uses LiveKit for WebRTC..."
+"The system implements STT/LLM/TTS pipeline..."
+
+Good intent statements describe value:
+
+"Users capture tasks without switching apps..."
+"Hands-free task management while driving, cooking, working..."
+
+Write your intent statement now. It anchors every decision that follows.
+
+Define Your Channels​
+
+Specify which channels you support and what makes each unique:
+
+## Channels
+
+### Browser (Primary)
+- Transport: WebRTC via LiveKit Agents
+- Audio capture: Browser MediaDevices API with Silero VAD
+- Features: Voice commands, screen sharing, visual feedback
+- User journey: Click microphone -> grant permission -> speak
+
+### Phone (Secondary)
+- Transport: SIP via Twilio -> LiveKit SIP Bridge
+- Audio capture: Carrier network, PSTN quality
+- Features: Voice commands only, DTMF support for confirmations
+- User journey: Dial number -> hear greeting -> speak
+
+### Screen Share (Browser Extension)
+- Transport: WebRTC video track via LiveKit
+- Processing: Gemini Live API for vision+voice
+- Features: Visual context extraction for task creation
+- User journey: Share screen -> describe what to capture -> confirm task
+
+
+Each channel has constraints. Phone audio is lower quality than browser. Screen sharing requires browser support. Document these constraints now so you design for them.
+
+Write Your User Stories​
+
+User stories capture what users actually do. Not features. Actions.
+
+## User Stories
+
+### Core Task Management
+- "As a user, I can say 'What tasks do I have today?' and hear my task list"
+- "As a user, I can say 'Add a task to review the proposal by Friday' and get confirmation"
+- "As a user, I can say 'Mark the proposal task as done' and hear confirmation"
+- "As a user, I can interrupt the agent mid-sentence to correct or clarify"
+
+### Multi-Channel Access
+- "As a user, I can call the dedicated phone number from any phone and manage tasks"
+- "As a user, I can click the microphone in my browser and manage tasks without typing"
+- "As a user, I get consistent responses regardless of which channel I use"
+
+### Screen-Aware Tasks
+- "As a user, I can share my screen, say 'Add this to my tasks', and the agent extracts context"
+- "As a user, I can point at a deadline on screen and say 'remind me about this'"
+
+
+User stories reveal gaps. Notice that you have not defined what happens when network drops. Or when the agent mishears a task name. Add stories for error cases:
+
+### Error Recovery
+- "As a user, if my connection drops mid-sentence, I can retry and the agent asks 'Did you want to..?'"
+- "As a user, if the agent misunderstands, I can say 'No, I meant...' and correct it"
+- "As a user, before any destructive action (delete task), the agent confirms"
+
+Specify Functional Requirements​
+
+Functional requirements define what the system does. Be specific. Be measurable.
+
+## Functional Requirements
+
+### FR-1: Voice Conversation
+- System SHALL process continuous speech input with real-time transcription
+- System SHALL generate spoken responses synthesized from LLM output
+- System SHALL detect end-of-turn using semantic understanding, not just silence
+- System SHALL support barge-in (user interrupting agent response)
+
+### FR-2: Task Operations
+- System SHALL support CRUD operations on tasks via voice commands
+- System SHALL confirm task creation with title and due date read back
+- System SHALL confirm destructive operations (delete, complete) before executing
+- System SHALL list tasks with natural grouping (today, this week, overdue)
+
+### FR-3: Multi-Channel Routing
+- System SHALL accept inbound phone calls via Twilio SIP trunk
+- System SHALL accept browser WebRTC connections via LiveKit
+- System SHALL route both channels to identical agent logic
+- System SHALL adapt greeting based on channel (phone vs browser)
+
+### FR-4: Screen Context
+- System SHALL accept screen share video track when offered
+- System SHALL extract visual context using multimodal AI (Gemini Live)
+- System SHALL incorporate visual context into task creation
+- System SHALL confirm extracted context before creating task
+
+
+Each requirement uses SHALL (mandatory) or SHOULD (recommended). This is not pedantic. It defines what must work versus what would be nice.
+
+Specify Non-Functional Requirements​
+
+Non-functional requirements define how well the system performs:
+
+## Non-Functional Requirements
+
+### NFR-1: Latency
+- End-to-end response time SHALL be < 800ms at P95
+- Time-to-first-audio SHALL be < 500ms
+- STT processing SHALL complete within 100ms of speech end
+
+### NFR-2: Cost
+- Per-minute cost SHALL be $0.03-0.07 (economy stack)
+- Premium tier (Native S2S) MAY cost up to $0.12/min
+- Cost SHALL be tracked per-call and aggregated daily
+
+### NFR-3: Availability
+- System SHALL maintain 99.5% uptime for production deployment
+- System SHALL support graceful degradation (text fallback if voice fails)
+- System SHALL implement provider failover for STT/TTS
+
+### NFR-4: Compliance
+- System SHALL obtain consent before recording (if enabled)
+- System SHALL support GDPR data deletion requests
+- System SHALL log no audio content, only transcripts (with consent)
+
+Define Success Metrics​
+
+How will you know this works? Define measurable outcomes:
+
+## Success Metrics
+
+
+|
+ Metric 
+|
+ Target 
+|
+ Measurement Method 
+|
+
+
+|
+--------
+|
+--------
+|
+-------------------
+|
+
+
+|
+ P95 Latency 
+|
+ < 800ms 
+|
+ Prometheus histogram 
+|
+
+
+|
+ Task Creation Success 
+|
+ > 95% 
+|
+ Correct task created / attempts 
+|
+
+
+|
+ User Satisfaction 
+|
+ > 4.0/5.0 
+|
+ Post-call survey or implicit (call duration) 
+|
+
+
+|
+ Cost Per Minute 
+|
+ $0.03-0.07 
+|
+ Provider billing aggregation 
+|
+
+
+|
+ Uptime 
+|
+ 99.5% 
+|
+ Synthetic monitoring 
+|
+
+
+|
+ Barge-in Success 
+|
+ > 90% 
+|
+ User interrupt detected / interrupt attempts 
+|
+
+
+
+These metrics become your Grafana dashboard. They become your alerting thresholds. They become how you know whether the system works.
+
+Define Non-Goals​
+
+What are you NOT building? This prevents scope creep:
+
+## Non-Goals
+
+- NOT supporting video calls (voice only, except screen share)
+- NOT building mobile native app (browser and phone only)
+- NOT implementing multi-user rooms (1:1 agent conversations)
+- NOT supporting languages other than English (future consideration)
+- NOT providing call recording playback (compliance complexity)
+- NOT building custom wake word ("Hey TaskManager")
+
+
+Non-goals are decisions. Write them down so you do not accidentally build them.
+
+Architecture Decision: Native S2S vs Cascaded​
+
+Chapter 109 introduced the fundamental choice: Native Speech-to-Speech (like OpenAI Realtime) versus Cascaded Pipeline (STT -> LLM -> TTS). Your specification must document this decision.
+
+The Decision Framework​
+Factor	Native S2S	Cascaded Pipeline
+Latency	200-300ms	400-800ms
+Cost	~$0.11/min	~$0.03-0.04/min
+Provider Lock-in	High (OpenAI only)	Low (swap any component)
+Emotional Nuance	Preserved	Lost in transcription
+Customization	Limited	Full control per component
+Document Your Decision​
+
+For this capstone, document your architectural decision:
+
+## Architecture Decision Record: Cascaded Pipeline
+
+### Status
+Accepted
+
+### Context
+We need to choose between Native Speech-to-Speech (OpenAI Realtime API)
+and Cascaded Pipeline (STT -> LLM -> TTS) for our voice agent.
+
+### Decision
+Use Cascaded Pipeline with economy stack (Deepgram + GPT-4o-mini + Cartesia).
+
+### Rationale
+1. **Cost target**: Our NFR specifies $0.03-0.07/min. Native S2S at ~$0.11/min
+   exceeds budget by 50%+.
+2. **Latency acceptable**: Our target is <800ms P95. Cascaded can achieve
+   500-800ms with optimized providers. This meets requirements.
+3. **Provider flexibility**: Future optimization opportunities (e.g., switch
+   to faster TTS, use local STT for specific use cases).
+4. **Multi-channel support**: Cascaded pipeline integrates more naturally
+   with phone/SIP integration than Native S2S.
+
+### Consequences
+- Higher latency than Native S2S (500-800ms vs 200-300ms)
+- Some emotional nuance lost in transcription
+- Mitigation: Semantic turn detection, optimized provider selection
+
+### Alternatives Considered
+1. **Native S2S (OpenAI Realtime)**: Rejected due to cost, accepted for
+   premium tier if budget allows future expansion.
+2. **Hybrid**: Cascaded for standard, S2S for premium users. Adds complexity
+   not justified for initial release.
+
+
+This is not bureaucracy. This is engineering. You will read this decision six months from now when wondering why you chose this architecture.
+
+Provider Selection​
+
+Your cascaded pipeline needs three providers: STT (speech-to-text), LLM (reasoning), and TTS (text-to-speech). Select based on your requirements.
+
+Economy Stack (Target: $0.033/min)​
+Component	Provider	Model	Cost	Latency	Notes
+STT	Deepgram	Nova-3	$0.0077/min	~90ms	Best price/quality ratio
+LLM	OpenAI	GPT-4o-mini	$0.0015/min	200-400ms	Fast, cost-effective
+TTS	Cartesia	Sonic-3	$0.024/min	40-90ms	Natural voice, fast
+VAD	Silero	v5	Free	<1ms	Client-side
+
+Total: ~$0.033/min (within $0.03-0.07 target)
+
+Alternative Configurations​
+
+Document alternatives you considered:
+
+## Provider Alternatives
+
+### Budget-Minimal (~$0.024/min)
+- STT: Deepgram Nova-3 ($0.0077)
+- LLM: GPT-4o-mini ($0.0015)
+- TTS: Deepgram Aura ($0.015)
+Trade-off: Lower TTS quality, acceptable for internal tools
+
+### Quality-Optimized (~$0.08/min)
+- STT: Deepgram Nova-3 ($0.0077)
+- LLM: GPT-4o ($0.01)
+- TTS: ElevenLabs ($0.06)
+Trade-off: Better reasoning and voice, exceeds budget
+
+### Maximum Performance (~$0.11/min)
+- OpenAI Realtime API (native S2S)
+Trade-off: Best latency and quality, exceeds budget by 3x
+
+### Local Development ($0/min)
+- STT: Whisper (local)
+- LLM: Ollama/Llama3 (local)
+- TTS: Piper (local)
+Trade-off: Higher latency, no API costs, good for development
+
+Latency Budget Breakdown​
+
+With your economy stack, trace the latency path:
+
+User finishes speaking
+    |
+    +-- Silero VAD detects end-of-speech: <1ms
+    |
+    +-- Audio to Deepgram: ~20ms network
+    |
+    +-- Deepgram transcription: ~90ms
+    |
+    +-- Text to GPT-4o-mini: ~20ms network
+    |
+    +-- LLM inference: ~200-400ms
+    |
+    +-- Response to Cartesia: ~20ms network
+    |
+    +-- Cartesia synthesis: ~50-80ms
+    |
+    +-- Audio streaming starts: ~20ms network
+    |
+    v
+Total: ~420-630ms (within 800ms target)
+
+
+This budget shows margin. You can absorb network variability, longer LLM responses, or provider slowdowns without exceeding your P95 target.
+
+Multi-Channel Architecture Diagram​
+
+Visualize how components connect:
+
+                    Voice Task Manager Architecture
+    ============================================================
+
+    CHANNELS                          AGENT CORE
+    --------                          ----------
+
+    +-----------------+
+    |  Browser Client |
+    | (LiveKit WebRTC)|----+
+    +-----------------+    |
+                           |      +----------------------+
+    +-----------------+    |      |   Voice Agent Core   |
+    |  Phone Client   |    +----->|   (LiveKit Agents)   |
+    |  (Twilio SIP)   |--------->>|                      |
+    +-----------------+    |      | - Session Management |
+                           |      | - Turn Detection     |
+    +-----------------+    |      | - Conversation Flow  |
+    |  Screen Share   |----+      +----------+-----------+
+    | (Gemini Live)   |                      |
+    +-----------------+                      |
+                                             v
+    VOICE PIPELINE                    +-------------+
+    --------------                    |  LLM Router |
+                                      | (GPT-4o-mini)|
+    +-------------+                   +------+------+
+    |     STT     |                          |
+    |  Deepgram   |<-- Audio -----           |
+    |   Nova-3    |               \          v
+    +------+------+                \  +-------------+
+           |                        \ |    MCP      |
+           | Text                    \| Connection  |
+           v                          +------+------+
+    +-------------+                          |
+    |     LLM     |                          v
+    | GPT-4o-mini |              +-------------------+
+    +------+------+              | Task Manager API  |
+           |                     | (from Part 6/7)   |
+           | Text                | - list_tasks      |
+           v                     | - create_task     |
+    +-------------+              | - complete_task   |
+    |     TTS     |              | - delete_task     |
+    |  Cartesia   |              +-------------------+
+    |   Sonic-3   |
+    +------+------+
+           |
+           | Audio
+           v
+    [Speaker Output]
+
+Component Responsibilities​
+Component	Responsibility	Failure Mode
+LiveKit Agents	Session management, WebRTC, job scheduling	Failover to another worker
+Twilio SIP Bridge	Phone -> WebRTC translation	Graceful disconnect, retry
+STT (Deepgram)	Audio -> Text transcription	Fallback to Whisper
+LLM (GPT-4o-mini)	Reasoning, response generation	Queue and retry
+TTS (Cartesia)	Text -> Audio synthesis	Fallback to Deepgram TTS
+Task Manager API	CRUD operations	Cache last-known state
+Integration Points​
+
+Your specification should document how components connect:
+
+## Integration Interfaces
+
+### Channel -> Agent Core
+- Browser: LiveKit Room participant joins, audio track published
+- Phone: Twilio SIP INVITE -> LiveKit SIP Bridge -> Room participant
+- Both channels: Agent treats as standard participant, no special handling
+
+### Agent Core -> Voice Pipeline
+- STT: Streaming audio chunks via LiveKit plugin interface
+- LLM: OpenAI-compatible chat completions API with tool support
+- TTS: Text chunks streamed for synthesis, audio published to room
+
+### Agent Core -> Task Manager
+- Protocol: MCP (Model Context Protocol) server
+- Tools: list_tasks, create_task, complete_task, delete_task
+- Context: User identity from participant metadata
+
+Your Specification Checklist​
+
+Before proceeding to implementation, verify your specification is complete:
+
+Intent and Scope
+
+ Intent statement explains business value (not technology)
+ Channels defined with transport and unique constraints
+ User stories cover happy path and error cases
+
+Requirements
+
+ Functional requirements use SHALL/SHOULD language
+ Non-functional requirements have measurable targets
+ Latency budget traced through all components
+ Cost target achievable with selected providers
+
+Architecture
+
+ Architecture decision documented with rationale
+ Provider selection includes alternatives considered
+ Integration interfaces specified
+ Failure modes identified with mitigation
+
+Validation
+
+ Success metrics defined and measurable
+ Non-goals explicitly stated
+ Specification reviewed for completeness
+
+Your specification is your contract with yourself. Implementation should validate that specification, not invent new requirements.
+
+Try With AI​
+Prompt 1: Review Your Specification​
+I wrote a production specification for my voice-enabled Task Manager:
+
+[paste your spec.md]
+
+Review this specification against these criteria:
+1. Are all capstone requirements covered? (browser, phone, screen share)
+2. Are the success metrics measurable?
+3. Is the cost analysis realistic with my provider choices?
+4. What am I missing that would cause production issues?
+
+Be critical. I want to find gaps NOW, not during implementation.
+
+
+What you are learning: Specification validation. AI excels at finding gaps in requirements documents. Your job is to write the specification; AI's job is to stress-test it. This is spec-driven development in practice.
+
+Prompt 2: Validate Architecture Decision​
+I chose a cascaded pipeline over Native S2S for cost reasons:
+
+- Economy stack: $0.033/min (Deepgram + GPT-4o-mini + Cartesia)
+- Native S2S: $0.11/min (OpenAI Realtime)
+
+My latency target is sub-800ms P95. Challenge my decision:
+1. Can cascaded pipeline actually achieve 800ms consistently?
+2. What scenarios would force me to reconsider Native S2S?
+3. What's my fallback if economy stack quality is insufficient?
+4. How does this decision affect user experience for phone vs browser?
+
+Help me stress-test this decision before I commit.
+
+
+What you are learning: Decision validation. Architectural decisions are expensive to reverse. By explicitly challenging your assumptions with AI, you catch problems before they become expensive rework. This is how senior engineers avoid regret.
+
+Prompt 3: Design Integration Contracts​
+My voice agent needs to integrate with:
+- LiveKit for browser WebRTC
+- Twilio for phone SIP
+- Gemini Live for screen sharing
+- Task Manager API (from Part 6/7)
+
+Help me design the integration interfaces:
+1. How do different channels converge to the same agent logic?
+2. How does the agent know which channel a request came from?
+3. How do I handle channel-specific features (screen share only on browser)?
+4. What data flows between components at each boundary?
+
+I want clean boundaries that let me change any component independently.
+
+
+What you are learning: Integration architecture. Clean interfaces between components enable independent evolution. This is how production systems stay maintainable. The boundaries you design now determine how painful changes are later.
+
+Safety Note​
+
+Specification-driven development requires discipline:
+
+Do not implement before specification is reviewed. Every hour spent implementing an incomplete spec is an hour potentially wasted.
+
+Document non-goals explicitly. Scope creep kills projects. What you decide NOT to build is as important as what you build.
+
+Cost estimates are estimates. Your $0.033/min could become $0.05/min with longer conversations. Build monitoring before you need it.
+
+Latency budgets assume optimal conditions. Network variability, provider slowdowns, and edge cases will exceed your estimates. Design margin into your targets.
+
+Your specification is not perfect. No specification is. But a good specification is explicit about its assumptions so you can validate them during implementation.

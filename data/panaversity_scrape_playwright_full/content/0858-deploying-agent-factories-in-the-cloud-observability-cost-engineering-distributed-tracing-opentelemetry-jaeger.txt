@@ -1,0 +1,568 @@
+Distributed Tracing with OpenTelemetry & Jaeger
+
+Your Task API is running in Kubernetes. A user reports: "Creating a task takes 3 seconds, but it used to take 200ms." You check the Prometheus metrics from Lesson 2—latency is definitely high. But where? The request flows through your FastAPI service, then to Dapr sidecar, then to the database. Which hop is slow?
+
+Metrics tell you THAT something is slow. Traces tell you WHERE.
+
+A distributed trace follows a single request across every service it touches, recording timing for each operation. Instead of guessing which service is the bottleneck, you see exactly which function call or database query is causing the 3-second delay.
+
+This lesson teaches you to instrument your applications with OpenTelemetry, visualize traces in Jaeger, and configure sampling strategies so you capture the traces you need without overwhelming your storage.
+
+Understanding Distributed Tracing Concepts​
+What is a Trace?​
+
+A trace represents the complete journey of a single request through your system. Think of it as a detailed receipt that records every service that handled your request and how long each service took.
+
+User Request: POST /tasks
+    │
+    ├── [1] API Gateway (5ms)
+    │       │
+    │       └── [2] Task API (150ms)
+    │               │
+    │               ├── [3] Validate input (10ms)
+    │               │
+    │               ├── [4] Save to database (130ms)  ← BOTTLENECK!
+    │               │
+    │               └── [5] Publish event (8ms)
+    │
+    └── Total: 155ms (plus network overhead)
+
+
+Each numbered item is a span—a single timed operation within the trace.
+
+What is a Span?​
+
+A span represents one unit of work. Every span has:
+
+Field	Purpose	Example
+Name	What operation this represents	POST /tasks
+Start time	When the operation began	2025-01-15T10:30:00.123Z
+Duration	How long it took	150ms
+Trace ID	Unique identifier for the entire request	abc123...
+Span ID	Unique identifier for this operation	xyz789...
+Parent Span ID	Which span called this one	def456...
+Attributes	Key-value metadata	http.method=POST, task.id=42
+Status	Success or error	OK or ERROR
+Context Propagation​
+
+When Service A calls Service B, how does Service B know it's part of the same trace?
+
+Context propagation is the mechanism that passes trace context (trace ID, parent span ID) between services. OpenTelemetry handles this automatically by injecting headers into outgoing HTTP requests:
+
+Service A                              Service B
+┌─────────────────┐                    ┌─────────────────┐
+│ Create span     │    HTTP Request    │ Extract context │
+│ Inject context  │ ───────────────►   │ Create child    │
+│ into headers    │   traceparent:     │ span            │
+│                 │   00-abc123-xyz789 │                 │
+└─────────────────┘                    └─────────────────┘
+
+
+The traceparent header (part of the W3C Trace Context standard) carries:
+
+Trace ID: abc123...
+Parent span ID: xyz789...
+
+Service B extracts this context, creating a child span that's automatically linked to Service A's span.
+
+Installing OpenTelemetry for FastAPI​
+Required Packages​
+
+Add these dependencies to your requirements.txt:
+
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-exporter-otlp
+opentelemetry-instrumentation-httpx
+opentelemetry-instrumentation-sqlalchemy
+
+
+Output: (No output—these are dependency declarations)
+
+Install with pip:
+
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-fastapi opentelemetry-exporter-otlp
+
+
+Output:
+
+Successfully installed opentelemetry-api-1.24.0 opentelemetry-sdk-1.24.0 ...
+
+Auto-Instrumentation (Quick Start)​
+
+The fastest way to add tracing is auto-instrumentation. OpenTelemetry automatically instruments supported libraries (FastAPI, httpx, SQLAlchemy) without code changes.
+
+Install the distro and bootstrap:
+
+pip install opentelemetry-distro opentelemetry-exporter-otlp
+opentelemetry-bootstrap -a install
+
+
+Output:
+
+Installing instrumentation packages...
+Installed opentelemetry-instrumentation-fastapi
+Installed opentelemetry-instrumentation-httpx
+...
+
+
+Run your app with auto-instrumentation:
+
+OTEL_SERVICE_NAME=task-api \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317 \
+opentelemetry-instrument uvicorn main:app --host 0.0.0.0 --port 8000
+
+
+Output:
+
+INFO:     Started server process [12345]
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+
+Every HTTP request to your FastAPI app now generates traces automatically.
+
+Important limitation: Auto-instrumentation does NOT work with uvicorn --reload or --workers. For development with reload, use programmatic instrumentation.
+
+Programmatic Instrumentation​
+
+For more control, configure OpenTelemetry in your code. This approach works with --reload and lets you create custom spans.
+
+Basic Setup​
+
+Create a tracing.py module:
+
+# tracing.py
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+
+
+def setup_tracing(service_name: str, otlp_endpoint: str) -> None:
+    """Configure OpenTelemetry tracing with OTLP exporter."""
+    # Create resource with service metadata
+    resource = Resource.create({SERVICE_NAME: service_name})
+
+    # Create tracer provider
+    provider = TracerProvider(resource=resource)
+    trace.set_tracer_provider(provider)
+
+    # Configure OTLP exporter (gRPC to Jaeger)
+    otlp_exporter = OTLPSpanExporter(
+        endpoint=otlp_endpoint,
+        insecure=True  # Set False in production with TLS
+    )
+
+    # Add batch processor for efficient export
+    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+
+
+Output: (No output—this is module code)
+
+Instrument FastAPI​
+
+In your main.py:
+
+# main.py
+from fastapi import FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+import os
+
+from tracing import setup_tracing
+
+# Configure tracing before creating app
+setup_tracing(
+    service_name=os.getenv("OTEL_SERVICE_NAME", "task-api"),
+    otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
+)
+
+# Create FastAPI app
+app = FastAPI(title="Task API")
+
+# Instrument the app
+FastAPIInstrumentor.instrument_app(app)
+
+
+@app.get("/tasks")
+async def list_tasks():
+    return {"tasks": []}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+Output: (No output—this is application code)
+
+Now every request to /tasks creates a span with:
+
+HTTP method, URL, status code
+Request/response timing
+Auto-linked parent spans from incoming headers
+Creating Custom Spans​
+
+Auto-instrumentation captures HTTP boundaries, but what about internal operations? You need custom spans to see time spent in validation, database queries, or business logic.
+
+Creating Spans for Business Operations​
+# main.py (continued)
+from opentelemetry import trace
+from pydantic import BaseModel
+
+tracer = trace.get_tracer(__name__)
+
+
+class TaskCreate(BaseModel):
+    title: str
+    description: str = ""
+
+
+@app.post("/tasks")
+async def create_task(task: TaskCreate):
+    # Create a span for the entire operation
+    with tracer.start_as_current_span("create_task") as span:
+        # Add attributes to the span
+        span.set_attribute("task.title", task.title)
+
+        # Child span for validation
+        with tracer.start_as_current_span("validate_task"):
+            if len(task.title) < 3:
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
+                raise ValueError("Title too short")
+
+        # Child span for database save
+        with tracer.start_as_current_span("save_to_database") as db_span:
+            # Simulate database latency
+            import time
+            time.sleep(0.1)
+            new_task_id = 42
+            db_span.set_attribute("db.task_id", new_task_id)
+
+        # Child span for event publishing
+        with tracer.start_as_current_span("publish_event") as event_span:
+            event_span.set_attribute("event.type", "task.created")
+            # Publish to message broker
+
+        span.set_attribute("task.id", new_task_id)
+        return {"id": new_task_id, "title": task.title}
+
+
+Output: (No output—this is application code that produces traces)
+
+When you POST to /tasks, the trace shows:
+
+POST /tasks (auto-instrumented)
+├── create_task (custom)
+│   ├── validate_task (custom)
+│   ├── save_to_database (custom) ← 100ms, shows db.task_id=42
+│   └── publish_event (custom)
+
+Adding Attributes and Events​
+
+Attributes are key-value pairs attached to spans. Events are timestamped log entries within a span.
+
+with tracer.start_as_current_span("process_task") as span:
+    # Attributes: structured metadata
+    span.set_attribute("task.priority", "high")
+    span.set_attribute("task.assignee", "user@example.com")
+
+    # Events: timestamped milestones
+    span.add_event("validation_started")
+    # ... validation logic ...
+    span.add_event("validation_completed", {"rules_checked": 5})
+
+    # Record exceptions
+    try:
+        risky_operation()
+    except Exception as e:
+        span.record_exception(e)
+        span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+        raise
+
+
+Output: (No output—spans with attributes/events visible in Jaeger)
+
+Deploying Jaeger for Trace Visualization​
+
+Jaeger is an open-source distributed tracing system that stores and visualizes traces. You've been configuring exporters to send traces to Jaeger—now deploy it.
+
+Deploy Jaeger with Helm​
+helm repo add jaegertracing https://jaegertracing.github.io/helm-charts
+helm repo update
+
+
+Output:
+
+"jaegertracing" has been added to your repositories
+Update Complete. Happy Helming!
+
+
+Install Jaeger:
+
+helm install jaeger jaegertracing/jaeger \
+  --namespace monitoring --create-namespace \
+  --set collector.service.otlp.grpc.enabled=true \
+  --set collector.service.otlp.http.enabled=true
+
+
+Output:
+
+NAME: jaeger
+NAMESPACE: monitoring
+STATUS: deployed
+...
+
+Verify Jaeger is Running​
+kubectl get pods -n monitoring -l app.kubernetes.io/name=jaeger
+
+
+Output:
+
+NAME                              READY   STATUS    RESTARTS   AGE
+jaeger-collector-xxx-yyy          1/1     Running   0          2m
+jaeger-query-xxx-zzz              1/1     Running   0          2m
+jaeger-agent-xxx-aaa              1/1     Running   0          2m
+
+Access the Jaeger UI​
+
+Port-forward to access locally:
+
+kubectl port-forward svc/jaeger-query -n monitoring 16686:16686
+
+
+Output:
+
+Forwarding from 127.0.0.1:16686 -> 16686
+
+
+Open http://localhost:16686 in your browser.
+
+Analyzing Traces in Jaeger​
+Finding Traces​
+Select your service (task-api) from the dropdown
+Click "Find Traces"
+Click on a trace to see the waterfall view
+Reading the Waterfall​
+Trace: abc123def456
+Duration: 156ms
+Spans: 5
+
+┌──────────────────────────────────────────────────────────────┐
+│ POST /tasks                                           156ms  │
+│   ├── create_task                                     150ms  │
+│   │     ├── validate_task                              2ms   │
+│   │     ├── save_to_database                         130ms   │ ← SLOW!
+│   │     └── publish_event                              8ms   │
+└──────────────────────────────────────────────────────────────┘
+
+
+The horizontal bar lengths are proportional to duration. In this trace, save_to_database is clearly the bottleneck—130ms of a 156ms request.
+
+Examining Span Details​
+
+Click on a span to see:
+
+Tags: Attributes like db.task_id=42
+Logs: Events with timestamps
+Process: Service info, hostname
+References: Parent span relationship
+Finding Slow Traces​
+
+Use Jaeger's search to find problematic traces:
+
+Min Duration: 1s (find traces over 1 second)
+Tags: error=true (find failed requests)
+Operation: POST /tasks (filter by endpoint)
+Sampling Strategies​
+
+In production, tracing every request creates massive data volumes. If your service handles 10,000 requests/second, that's 864 million traces/day. Storage costs explode.
+
+Sampling reduces volume by tracing only a percentage of requests.
+
+Environment-Based Configuration​
+# development: trace everything
+OTEL_TRACES_SAMPLER=always_on
+
+# production: trace 1%
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.01
+
+
+Output: (No output—environment variable configuration)
+
+Sampler Options​
+Sampler	Behavior	Use Case
+always_on	Trace 100%	Development, testing
+always_off	Trace 0%	Disabled
+traceidratio	Trace X%	Production (0.01 = 1%)
+parentbased_*	Respect parent decision	Distributed systems
+
+parentbased_traceidratio is recommended for production:
+
+If an incoming request already has a trace (from upstream service), continue tracing it
+If no parent trace, apply the ratio (sample 1% of new requests)
+Configure Sampling in Code​
+from opentelemetry.sdk.trace.sampling import TraceIdRatioBased, ParentBasedTraceIdRatio
+from opentelemetry.sdk.trace import TracerProvider
+
+# For production: 10% sampling with parent-based propagation
+sampler = ParentBasedTraceIdRatio(0.1)
+
+provider = TracerProvider(
+    resource=resource,
+    sampler=sampler
+)
+
+
+Output: (No output—configuration code)
+
+Sampling Trade-offs​
+Sampling Rate	Traces/Day (10K rps)	Storage Cost	Debugging Visibility
+100%	864M	Very high	Complete
+10%	86.4M	High	Good
+1%	8.64M	Moderate	Limited
+0.1%	864K	Low	Minimal
+
+Rule of thumb: Start with 100% in development, 1-10% in production. Increase temporarily when debugging issues.
+
+Kubernetes Deployment with Tracing​
+
+Configure your Task API deployment to send traces to Jaeger:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+    spec:
+      containers:
+      - name: task-api
+        image: task-api:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "task-api"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://jaeger-collector.monitoring.svc:4317"
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "0.1"
+        - name: OTEL_PYTHON_FASTAPI_EXCLUDED_URLS
+          value: "health,metrics,readiness"
+
+
+Output: (Deployment manifest—apply with kubectl apply -f)
+
+Key environment variables:
+
+OTEL_SERVICE_NAME: Identifies your service in Jaeger
+OTEL_EXPORTER_OTLP_ENDPOINT: Jaeger collector address (gRPC port 4317)
+OTEL_TRACES_SAMPLER: Sampling strategy
+OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: Don't trace health checks (noise)
+Dapr Observability Integration​
+
+If your Task API uses Dapr (from Chapter 83), Dapr automatically propagates trace context through its sidecar. Configure Dapr to send traces to the same Jaeger:
+
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: dapr-observability
+  namespace: default
+spec:
+  tracing:
+    samplingRate: "0.1"
+    otel:
+      endpointAddress: jaeger-collector.monitoring.svc:4317
+      isSecure: false
+      protocol: grpc
+
+
+Output: (Dapr configuration—apply with kubectl apply -f)
+
+Apply and restart your Dapr-enabled pods. Now traces flow through:
+
+Client → Task API (OpenTelemetry) → Dapr Sidecar (auto-traced) → State Store
+
+
+All spans share the same trace ID, visible in Jaeger as a complete request flow.
+
+Try With AI​
+
+Work through these scenarios with your AI assistant.
+
+Prompt 1: Design Custom Spans​
+I'm instrumenting a payment processing function in my FastAPI app.
+The function: validate_card → check_fraud → charge_card → send_receipt.
+Help me design custom spans for this flow. What attributes should each span have?
+What would make debugging payment failures easier?
+
+
+What you're learning: Thoughtful span design—creating spans that capture the information you'll actually need when debugging production issues.
+
+Prompt 2: Troubleshoot Missing Traces​
+I instrumented my FastAPI app with OpenTelemetry and deployed Jaeger, but no traces appear.
+My environment variables are:
+OTEL_SERVICE_NAME=my-api
+OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+
+What could be wrong? Walk me through a debugging checklist.
+
+
+What you're learning: Systematic troubleshooting—common issues include wrong endpoint format (missing http://), network policies blocking traffic, or missing instrumentation calls.
+
+Prompt 3: Choose a Sampling Strategy​
+My service handles 5,000 requests per second in production.
+I need to balance trace visibility for debugging with storage costs.
+My current Jaeger retention is 7 days.
+
+Help me calculate storage needs at different sampling rates and recommend a strategy.
+
+
+What you're learning: Production trade-offs—understanding that observability has costs and choosing appropriate settings for your scale.
+
+Safety note: Traces can contain sensitive data (user IDs, request parameters). Never send traces to endpoints outside your control. In production, ensure your Jaeger deployment is secured and data is encrypted in transit.
+
+Reflect on Your Skill​
+
+You built an observability-cost-engineer skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my observability skill, instrument a FastAPI application with OpenTelemetry.
+Does my skill include:
+- TracerProvider configuration with OTLP exporter?
+- FastAPIInstrumentor setup?
+- Custom span creation with attributes?
+- Sampling configuration for production?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain the trace → span → attribute hierarchy?
+Did it cover context propagation and why it matters?
+Did it include Jaeger deployment and UI navigation?
+Did it address sampling trade-offs for production?
+Improve Your Skill​
+
+If you found gaps:
+
+My observability skill is missing distributed tracing patterns.
+Update it to include:
+- OpenTelemetry instrumentation (auto and programmatic)
+- Custom span creation with tracer.start_as_current_span
+- Jaeger Helm deployment
+- Sampling strategies with environment variables
+- Kubernetes deployment configuration for OTLP export

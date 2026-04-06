@@ -1,0 +1,524 @@
+Component vs End-to-End Evals
+
+Your agent's end-to-end eval score dropped from 85% to 72%. Something is wrong. But what?
+
+You've been running comprehensive evals that test the full workflow—user input to final output. These evals told you quality decreased, but they didn't tell you WHERE the problem lives. Is it the routing logic? The tool selection? The output formatting? The context retrieval?
+
+When your agent has six components and your E2E score drops, you're facing a debugging nightmare. Any of those components could be the culprit. Worse, the components interact—a subtle routing error might cause downstream formatting failures, making the symptom appear far from the cause.
+
+This is the noise problem in end-to-end evaluation. E2E evals are excellent for answering "Should we ship this version?" but terrible for answering "What should we fix?"
+
+You need both E2E evals and component-level evals—but you need to know when to use each.
+
+The Noise Problem in End-to-End Evals​
+
+End-to-end evals test your complete agent workflow: user input goes in, final output comes out, you grade the result. This seems ideal—it mirrors real usage.
+
+But every component in your pipeline introduces variance:
+
+User Input → Routing → Tool Selection → Execution → Formatting → Output
+     ↓          ↓            ↓             ↓            ↓          ↓
+  Variance   Variance     Variance      Variance    Variance    Variance
+
+
+When you run an E2E eval and it fails, the failure could originate from ANY of these components. The variance compounds. A routing mistake causes wrong tool selection, which causes execution errors, which causes formatting problems. You see the final symptom but not the root cause.
+
+Concrete example: Your research agent produces a report that misses key information.
+
+Was the initial search query wrong? (Routing problem)
+Were the right sources found but poorly ranked? (Tool selection problem)
+Were good sources selected but content poorly extracted? (Execution problem)
+Was the content extracted but poorly synthesized? (Formatting problem)
+
+An E2E eval tells you "the report was incomplete." It doesn't tell you which component to fix.
+
+The variance math:
+
+Imagine each component has 90% reliability. With 4 components:
+
+E2E reliability: 0.9 * 0.9 * 0.9 * 0.9 = 65.6%
+
+That 35% failure rate comes from ALL components combined. When a case fails, which 10% error caused it?
+
+Benefits of Component Evals​
+
+Component-level evals test a single step in isolation. You provide known-good inputs and check for expected outputs—no upstream variance, no downstream complications.
+
+Aspect	End-to-End Eval	Component Eval
+Signal clarity	Noisy (multiple sources of variance)	Clear (isolated single component)
+Speed	Slow (full workflow execution)	Fast (single step execution)
+Cost	High (all API calls, full computation)	Low (targeted API calls only)
+Best for	Ship decisions, monitoring	Debugging, targeted tuning
+Diagnosis	"Something is wrong"	"THIS component is wrong"
+
+Component eval example: Testing search query generation
+
+Instead of testing the full research workflow, isolate just the query generation step:
+
+def eval_search_query_generation():
+    """
+    Component eval: Test ONLY the search query generation step.
+
+    Gold standard: Human-crafted queries known to retrieve good results.
+    """
+    test_cases = [
+        {
+            "user_request": "What's the latest on AI regulation in the EU?",
+            "gold_queries": [
+                "EU AI Act 2024 regulations",
+                "European Union artificial intelligence law requirements",
+                "EU AI governance framework"
+            ]
+        },
+        {
+            "user_request": "How do successful startups handle remote work?",
+            "gold_queries": [
+                "remote work best practices successful startups",
+                "distributed team management strategies",
+                "remote-first company culture examples"
+            ]
+        }
+    ]
+
+    results = []
+    for case in test_cases:
+        # Test ONLY query generation - no downstream steps
+        generated_queries = agent.generate_search_queries(case["user_request"])
+
+        # Grade against gold standard
+        score = calculate_query_overlap(generated_queries, case["gold_queries"])
+        results.append({
+            "input": case["user_request"],
+            "generated": generated_queries,
+            "gold_standard": case["gold_queries"],
+            "score": score
+        })
+
+    return results
+
+
+Output:
+
+[
+  {
+    "input": "What's the latest on AI regulation in the EU?",
+    "generated": ["EU AI legislation news", "AI law Europe", "artificial intelligence regulation"],
+    "gold_standard": ["EU AI Act 2024 regulations", "European Union artificial intelligence law requirements", "EU AI governance framework"],
+    "score": 0.65
+  }
+]
+
+
+Now you have a clear signal: Query generation scores 65%. You can focus your improvement efforts here without worrying about downstream components.
+
+When to Use Each Eval Type​
+
+The decision isn't E2E OR component—it's knowing which to use WHEN.
+
+Use End-to-End Evals when:
+
+Making ship/no-ship decisions
+Monitoring production quality over time
+Validating that components work TOGETHER correctly
+Testing user-facing experience holistically
+Running regression tests after ANY change
+
+Use Component Evals when:
+
+Debugging a specific failure pattern
+Tuning a single component's behavior
+Developing new components before integration
+Error analysis reveals a suspected problem area
+You need fast iteration cycles (E2E is too slow)
+
+The key insight: E2E evals find problems. Component evals FIX problems.
+
+If your E2E eval score is fine, you don't need component evals—the system works. But when E2E shows problems, component evals tell you exactly where to focus.
+
+The 5-Step Decision Flow​
+
+Andrew Ng describes a systematic approach for improving agent quality. This decision flow moves between E2E and component evals strategically:
+
+Step 1: Run E2E eval to find overall quality
+          ↓
+Step 2: Error analysis identifies problem component
+          ↓
+Step 3: Build component-level eval for that component
+          ↓
+Step 4: Tune component using component eval (fast iteration)
+          ↓
+Step 5: Verify improvement with E2E eval
+
+
+Step 1: Start with E2E to find overall quality
+
+Run your comprehensive eval suite. Get a baseline score. If it's acceptable, stop—you don't need to dig deeper.
+
+e2e_score = run_end_to_end_eval(agent, test_dataset)
+print(f"E2E Score: {e2e_score}%")  # 72% - below target of 85%
+
+
+Step 2: Use error analysis to identify problem component
+
+When E2E scores are low, don't guess—analyze. Look at failed cases systematically and categorize WHERE failures occur.
+
+error_analysis = analyze_failures(failed_cases)
+# Output:
+# - Routing errors: 15%
+# - Search query quality: 45%  <-- Biggest problem
+# - Source ranking: 20%
+# - Output formatting: 20%
+
+
+45% of failures trace to search query quality. That's your target.
+
+Step 3: Build component-level eval for that component
+
+Create a focused eval that tests ONLY search query generation, with known-good (gold standard) inputs and expected outputs.
+
+def build_search_query_eval():
+    """
+    Component eval for search query generation.
+    Gold standards from human experts who know what queries work.
+    """
+    return [
+        {
+            "user_request": "...",
+            "gold_queries": [...],  # Expert-curated
+            "minimum_overlap": 0.7   # Success threshold
+        }
+        # ... more cases
+    ]
+
+
+Step 4: Tune component using component eval (fast iteration)
+
+Now iterate FAST. Component evals run in seconds, not minutes. Try improvements, measure impact, repeat.
+
+# Fast iteration loop
+for iteration in range(10):
+    # Try a prompt improvement
+    agent.update_query_prompt(new_prompt)
+
+    # Quick component eval
+    score = run_component_eval(agent.generate_search_queries, query_eval_cases)
+    print(f"Iteration {iteration}: {score}%")
+
+    if score >= 85:
+        break
+
+
+Step 5: Verify improvement with E2E eval
+
+After component tuning succeeds, verify the overall system improved. Component improvements don't always translate to E2E improvements (interactions matter).
+
+# After component tuning
+component_score = run_component_eval(...)  # 88% - target met!
+
+# But verify E2E
+e2e_score = run_end_to_end_eval(agent, test_dataset)  # 81% - improved from 72%!
+
+
+The E2E score improved because you fixed the right component. If E2E hadn't improved despite good component scores, you'd know the problem was in component INTERACTIONS, not individual components.
+
+Example: Web Search Component Eval​
+
+Let's build a complete component eval for web search quality. This component takes a user question and returns relevant search results.
+
+The gold standard approach: For component evals to work, you need known-good resources. These are URLs or sources that you KNOW contain the information needed to answer specific questions.
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class SearchEvalCase:
+    """A single test case for search quality evaluation."""
+    query: str
+    gold_resources: list[str]  # URLs known to contain good answers
+    minimum_gold_matches: int  # How many gold resources must appear
+
+
+def create_search_eval_dataset() -> list[SearchEvalCase]:
+    """
+    Gold standard dataset for search component evaluation.
+
+    These resources are manually verified to contain high-quality
+    answers for each query.
+    """
+    return [
+        SearchEvalCase(
+            query="What are the key provisions of the EU AI Act?",
+            gold_resources=[
+                "https://artificialintelligenceact.eu/the-act/",
+                "https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai",
+                "https://eur-lex.europa.eu/eli/reg/2024/1689"
+            ],
+            minimum_gold_matches=2
+        ),
+        SearchEvalCase(
+            query="How does Python asyncio work internally?",
+            gold_resources=[
+                "https://docs.python.org/3/library/asyncio.html",
+                "https://realpython.com/async-io-python/",
+                "https://peps.python.org/pep-3156/"
+            ],
+            minimum_gold_matches=1
+        ),
+        SearchEvalCase(
+            query="Best practices for Kubernetes horizontal pod autoscaling",
+            gold_resources=[
+                "https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/",
+                "https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/horizontal-pod-autoscaler-v2/"
+            ],
+            minimum_gold_matches=1
+        )
+    ]
+
+
+def eval_search_component(search_function: Any, dataset: list[SearchEvalCase]) -> dict:
+    """
+    Evaluate search component quality against gold standard resources.
+
+    Args:
+        search_function: Function that takes query, returns list of URLs
+        dataset: Gold standard test cases
+
+    Returns:
+        Dict with overall score and per-case results
+    """
+    results = []
+
+    for case in dataset:
+        # Run the search component in isolation
+        returned_urls = search_function(case.query)
+
+        # Count gold resource matches
+        gold_matches = sum(
+            1 for gold_url in case.gold_resources
+            if any(gold_url in url for url in returned_urls)
+        )
+
+        # Score this case
+        passed = gold_matches >= case.minimum_gold_matches
+
+        results.append({
+            "query": case.query,
+            "gold_resources": case.gold_resources,
+            "returned_urls": returned_urls,
+            "gold_matches": gold_matches,
+            "minimum_required": case.minimum_gold_matches,
+            "passed": passed
+        })
+
+    # Calculate overall score
+    pass_rate = sum(1 for r in results if r["passed"]) / len(results)
+
+    return {
+        "overall_score": pass_rate,
+        "total_cases": len(results),
+        "passed_cases": sum(1 for r in results if r["passed"]),
+        "results": results
+    }
+
+
+Output:
+
+# Example output from running the eval
+evaluation = eval_search_component(agent.search, create_search_eval_dataset())
+print(f"Search Component Score: {evaluation['overall_score']:.1%}")
+print(f"Passed: {evaluation['passed_cases']}/{evaluation['total_cases']}")
+
+for result in evaluation["results"]:
+    status = "PASS" if result["passed"] else "FAIL"
+    print(f"  [{status}] {result['query'][:50]}...")
+    print(f"         Gold matches: {result['gold_matches']}/{result['minimum_required']}")
+
+Search Component Score: 66.7%
+Passed: 2/3
+  [PASS] What are the key provisions of the EU AI Act?...
+         Gold matches: 2/2
+  [PASS] How does Python asyncio work internally?...
+         Gold matches: 2/1
+  [FAIL] Best practices for Kubernetes horizontal pod a...
+         Gold matches: 0/1
+
+
+Now you know: Kubernetes HPA queries need improvement. The eval tells you exactly where to focus.
+
+Exercise: Create Component Eval for Task API Routing​
+
+Your Task API agent routes user requests to different handlers:
+
+Task creation handler
+Task query handler
+Task update handler
+Reminder handler
+
+Users complain that sometimes "remind me to..." creates a task instead of a reminder, and "what tasks do I have" creates a new task instead of querying.
+
+Step 1: Create gold standard routing cases
+
+routing_eval_cases = [
+    {
+        "user_input": "remind me to call mom tomorrow",
+        "expected_handler": "reminder_handler",
+        "reasoning": "Explicit 'remind me' phrase should route to reminders"
+    },
+    {
+        "user_input": "what tasks do I have for today",
+        "expected_handler": "task_query_handler",
+        "reasoning": "Question about existing tasks is a query"
+    },
+    {
+        "user_input": "add buy groceries to my list",
+        "expected_handler": "task_creation_handler",
+        "reasoning": "Explicit 'add to list' is task creation"
+    },
+    {
+        "user_input": "mark the dentist appointment as done",
+        "expected_handler": "task_update_handler",
+        "reasoning": "Changing task status is an update"
+    },
+    # Add edge cases
+    {
+        "user_input": "don't forget to water the plants",
+        "expected_handler": "reminder_handler",
+        "reasoning": "'Don't forget' implies reminder, not task creation"
+    }
+]
+
+
+Step 2: Implement the component eval
+
+def eval_routing_component(router_function, cases: list[dict]) -> dict:
+    """
+    Evaluate routing accuracy in isolation.
+    """
+    results = []
+
+    for case in cases:
+        # Test ONLY the routing decision
+        actual_handler = router_function(case["user_input"])
+
+        passed = actual_handler == case["expected_handler"]
+
+        results.append({
+            "input": case["user_input"],
+            "expected": case["expected_handler"],
+            "actual": actual_handler,
+            "passed": passed,
+            "reasoning": case["reasoning"]
+        })
+
+    pass_rate = sum(1 for r in results if r["passed"]) / len(results)
+
+    # Identify patterns in failures
+    failures = [r for r in results if not r["passed"]]
+
+    return {
+        "score": pass_rate,
+        "results": results,
+        "failure_patterns": analyze_routing_failures(failures)
+    }
+
+
+Step 3: Run and analyze
+
+The component eval will show you EXACTLY which routing patterns fail. Maybe "remind me to" works but "don't forget" doesn't. Now you can tune the routing prompt specifically for that pattern, run the component eval again in seconds, and iterate until it passes.
+
+Only then do you run E2E to verify the full system improved.
+
+Reflect on Your Skill​
+
+After understanding the E2E vs component distinction, add these patterns to your agent-evals skill:
+
+Pattern: E2E for decisions, Component for debugging
+
+When you need to make a ship decision:
+  → Run E2E eval (comprehensive, production-like)
+
+When you need to fix a problem:
+  → Run error analysis on E2E failures
+  → Build component eval for problem area
+  → Iterate on component eval (fast)
+  → Verify with E2E eval
+
+
+Pattern: The 5-Step Flow
+
+1. E2E eval → baseline score
+2. Error analysis → identify problem component
+3. Component eval → create targeted test
+4. Component tuning → fast iteration
+5. E2E verification → confirm system improvement
+
+
+Pattern: Gold standard resources
+
+Component evals require known-good inputs and expected outputs.
+For each component, curate:
+- Input cases that represent real usage
+- Expected outputs verified by experts
+- Minimum thresholds for success
+
+
+Key insight to encode: E2E evals tell you IF there's a problem. Component evals tell you WHERE the problem is. Use E2E for ship decisions and monitoring. Use component evals for debugging and tuning. The 5-step flow connects them systematically.
+
+Try With AI​
+Prompt 1: Design Your Component Eval Strategy​
+My agent has these components:
+1. [Component 1 - what it does]
+2. [Component 2 - what it does]
+3. [Component 3 - what it does]
+
+My E2E eval currently scores [X%]. Error analysis shows [describe pattern].
+
+Help me:
+1. Identify which component to create an eval for first
+2. Design 5 gold standard test cases for that component
+3. Define what "success" looks like for each case
+4. Suggest what inputs I should vary in test cases
+
+
+What you're learning: Translating error patterns into targeted component evals. The AI helps you identify what to test based on where you're seeing failures.
+
+Prompt 2: Create a Gold Standard Dataset​
+I need to create a gold standard dataset for my agent's [component name]
+component. This component takes [input type] and produces [output type].
+
+The component should handle these scenarios:
+- [Scenario 1]
+- [Scenario 2]
+- [Scenario 3]
+
+Help me create 10 test cases with:
+- Realistic inputs
+- Expected outputs (that a human expert would verify as correct)
+- Edge cases that might trip up the component
+- Clear success/failure criteria
+
+
+What you're learning: Building evaluation datasets that capture real-world complexity. Gold standards require thinking through what "correct" means for your specific domain.
+
+Prompt 3: Apply the 5-Step Flow​
+I ran E2E eval on my agent and got 68% (target: 85%).
+
+Here's my error analysis:
+[Paste your categorized failure patterns]
+
+Walk me through the 5-step decision flow:
+1. What does my E2E baseline tell me?
+2. Based on error analysis, which component should I target?
+3. What would a component eval for that component look like?
+4. What improvements should I try during component tuning?
+5. What E2E changes should I expect after fixing the component?
+
+Challenge my thinking if my error analysis seems incomplete.
+
+
+What you're learning: Applying systematic improvement methodology to real problems. The AI helps you think through each step and catch gaps in your reasoning.
+
+Safety Note​
+
+Component evals test parts in isolation, but agents are systems. A component that passes in isolation might fail when integrated—context from upstream components might be different, timing might matter, or components might interact unexpectedly. Always verify component improvements with E2E evals before trusting them. The goal is faster iteration, not skipping integration testing.

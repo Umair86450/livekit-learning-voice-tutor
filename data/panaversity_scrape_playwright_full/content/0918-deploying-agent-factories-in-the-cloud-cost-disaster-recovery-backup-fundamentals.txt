@@ -1,0 +1,430 @@
+Backup Fundamentals
+
+It's Tuesday afternoon. Your Task API has been running smoothly for months. Users create tasks, the database stores them, life is good. Then the incident happens.
+
+A junior developer runs a migration script against production. The script has a bug. Instead of updating records, it deletes them. 47,000 tasks vanish in 3 seconds. Your Slack explodes. Support tickets flood in. Users are furious. Revenue is at risk.
+
+You reach for your backups. When was the last one? How much data did you lose? How long will recovery take? If you don't know the answers instantly, you're already in trouble. The time to answer these questions is before the disaster, not during.
+
+This is the reality of production systems. Data loss isn't a theoretical risk. It's a statistical certainty. Hardware fails. Software bugs. Humans make mistakes. Ransomware encrypts. The only question is whether you're prepared.
+
+This lesson teaches the conceptual foundation of disaster recovery: RTO (how long you can be down), RPO (how much data you can lose), the 3-2-1 backup rule (how to protect your data), and backup strategies (full, incremental, differential). These concepts drive every backup decision you'll make.
+
+Why Backups Matter for Digital FTEs​
+
+Digital FTEs are products you sell. Your customers trust you with their data. When that data disappears, trust disappears with it. Unlike a crashed website that you restart, lost data may never return.
+
+The business impact: Your Task API stores customer tasks. Each task represents work, context, and history. If a customer loses 6 months of tasks, they don't just lose data. They lose their workflow, their history, their trust in your product. Some will leave. Some will demand refunds. Some will tell everyone they know.
+
+The recovery reality: Backups aren't valuable. Restores are valuable. A backup that can't be restored is useless. A backup that takes 8 hours to restore when your business needs 1-hour recovery is also useless. The value of a backup is measured by recovery success, not backup success.
+
+The cost equation: Backup costs are predictable (storage, compute for backup jobs, management overhead). Data loss costs are unpredictable (customer churn, legal liability, reputation damage, business interruption). The cost of backups is always less than the cost of losing data you needed.
+
+Recovery Time Objective (RTO)​
+
+Definition: RTO is the maximum acceptable time your system can be unavailable after a disaster before the business impact becomes unacceptable.
+
+Think of RTO as answering: "How long can we be down before we're in serious trouble?"
+
+Understanding RTO​
+
+What RTO includes:
+
+Detection time: How long until you know there's a problem?
+Decision time: How long to decide to initiate recovery?
+Recovery time: How long to actually restore the system?
+Validation time: How long to verify the system works correctly?
+
+RTO is a business requirement, not a technical specification. You don't calculate RTO from your infrastructure. You determine RTO from your business needs, then design infrastructure to meet it.
+
+RTO Examples​
+System	Typical RTO	Why
+E-commerce checkout	15 minutes	Every minute of downtime loses sales
+Internal reporting	24 hours	Employees can work around it for a day
+Task API (B2B SaaS)	4 hours	Customers expect same-day recovery
+Archive storage	72 hours	Rarely accessed, low urgency
+Financial trading	< 1 minute	Seconds of downtime cost millions
+What RTO Drives​
+
+Shorter RTO requires:
+
+Hot standby systems (running parallel copies)
+Automated failover (no human decision time)
+Faster storage (SSDs, not tape)
+More replicas (redundancy)
+Higher cost
+
+Longer RTO allows:
+
+Cold backups (offline storage)
+Manual recovery procedures
+Cheaper storage (object storage, tape)
+Fewer replicas
+Lower cost
+
+The tradeoff is always cost vs recovery speed.
+
+Recovery Point Objective (RPO)​
+
+Definition: RPO is the maximum acceptable amount of data loss, measured in time. It answers: "How much data can we afford to lose?"
+
+If your RPO is 1 hour, you can lose up to 1 hour of data. If the disaster happens at 3:00 PM and your last backup was at 2:00 PM, you lose 1 hour of data. That's acceptable. If your last backup was at 10:00 AM, you lose 5 hours. That violates your RPO.
+
+Understanding RPO​
+
+RPO determines backup frequency. If your RPO is 1 hour, you must back up at least every hour. If your RPO is 15 minutes, you must back up at least every 15 minutes.
+
+RPO is measured in time, not data volume. Whether you lose 1 MB or 1 TB of data doesn't matter. What matters is how much time's worth of changes you lose.
+
+Zero RPO means zero data loss. This requires synchronous replication. Every write must be confirmed on multiple copies before succeeding. This is expensive and adds latency.
+
+RPO Examples​
+System	Typical RPO	Backup Frequency Required
+Financial transactions	0 (zero)	Synchronous replication
+E-commerce orders	5 minutes	Continuous / near-real-time
+Task API (B2B SaaS)	1 hour	Hourly backups
+Internal wiki	24 hours	Daily backups
+Cold archives	1 week	Weekly backups
+What RPO Drives​
+
+Shorter RPO requires:
+
+More frequent backups (every minute vs every hour)
+Continuous data protection (CDP) or replication
+More storage for backup history
+More compute for frequent backup jobs
+Higher cost
+
+Longer RPO allows:
+
+Less frequent backups
+Simpler backup infrastructure
+Less storage needed
+Lower cost
+RTO vs RPO: The Critical Distinction​
+Aspect	RTO	RPO
+Question it answers	How long can we be down?	How much data can we lose?
+Measured in	Time until recovery complete	Time worth of data lost
+Affects	Recovery procedures, standby systems	Backup frequency, replication
+Example: 1 hour	System must be running within 1 hour	Lose at most 1 hour of changes
+Zero means	Instant failover (no downtime)	Zero data loss (synchronous replication)
+Cost relationship	Shorter RTO = higher cost	Shorter RPO = higher cost
+
+They're independent. You can have:
+
+Short RTO, long RPO: "Get us running fast, losing some data is okay"
+Long RTO, short RPO: "Take your time recovering, but don't lose data"
+Short RTO, short RPO: "Recover fast with minimal data loss" (expensive)
+Long RTO, long RPO: "We're not critical" (cheap)
+Business Scenario: Determining Task API Requirements​
+
+Your Task API serves small businesses managing daily operations. Let's determine appropriate RTO and RPO.
+
+RTO Analysis:
+
+Customers use Task API during business hours (8 AM - 6 PM)
+Downtime during business hours stops their workflow
+Most customers could survive a few hours by using paper or memory
+Overnight downtime wouldn't be noticed until morning
+Decision: RTO = 4 hours (recover before half a workday is lost)
+
+RPO Analysis:
+
+Customers create 10-50 tasks per day
+Losing a day's tasks would frustrate them significantly
+Losing an hour's tasks (1-5 tasks) is annoying but recoverable
+Tasks aren't financial records. No regulatory retention requirements
+Decision: RPO = 1 hour (lose at most 1 hour of task creation)
+
+Implementation implications:
+
+RTO of 4 hours: Documented recovery runbook, tested quarterly
+RPO of 1 hour: Hourly database backups minimum
+The 3-2-1 Backup Rule​
+
+The 3-2-1 rule is a battle-tested framework for data protection. It predates cloud computing but remains relevant because it addresses fundamental failure modes.
+
+The Three Components​
+
+3: Keep 3 copies of your data
+
+One copy is not a backup. It's a single point of failure. Two copies protect against single failures but not correlated failures (like ransomware that encrypts both). Three copies provide defense in depth.
+
+Copy 1: Production data (the live system)
+Copy 2: Backup on different storage
+Copy 3: Additional backup for redundancy
+
+2: Store copies on 2 different storage types
+
+If both copies are on the same storage type, they share failure modes. Two SSDs from the same batch might fail together. Two volumes on the same cloud provider might be unavailable together.
+
+Type 1: Production database (e.g., cloud provider's managed database)
+Type 2: Object storage backup (e.g., S3-compatible storage)
+
+Different storage types means different failure domains.
+
+1: Keep 1 copy offsite (in a different location)
+
+Local disasters affect local storage. Fire, flood, earthquake, or regional cloud outage can destroy everything in one location. Offsite storage survives when your primary location doesn't.
+
+Primary: Your main cloud region
+Offsite: Different geographic region or different cloud provider
+3-2-1 Applied to Task API​
+Requirement	Implementation	Where
+Copy 1	Production PostgreSQL	Primary cluster
+Copy 2	Velero backup to S3	Same region object storage
+Copy 3	S3 replication	Different region
+2 storage types	PostgreSQL SSD + S3 object storage	Different storage systems
+1 offsite	Cross-region S3 replication	us-east-1 and us-west-2
+Why 3-2-1 Works​
+
+Protects against:
+
+Hardware failure: Copy 2 survives if Copy 1's hardware dies
+Software bugs: Copy 3 preserves older state if bug corrupts Copies 1-2
+Human error: Deletion affects Copy 1 but copies lag behind
+Ransomware: Offline/immutable copies aren't encrypted
+Regional disasters: Offsite copy survives local catastrophe
+
+Doesn't protect against:
+
+Delayed discovery: If you don't know data is corrupted, all copies get corrupted
+Insufficient retention: If you only keep 24 hours and discover corruption after 48 hours
+Untested restores: Backups that can't be restored are worthless
+3-2-1 Verification Checklist​
+
+For any backup strategy, verify:
+
+ Do I have 3 separate copies? (production + 2 backups)
+ Are copies on 2 different storage types? (not just two directories on same disk)
+ Is 1 copy in a different geographic location? (survives regional failure)
+ Can I restore from each copy? (tested, not assumed)
+ Do copies have appropriate retention? (can recover from delayed discovery)
+Backup Strategy Comparison​
+
+Three fundamental strategies exist for creating backups. Each has tradeoffs.
+
+Full Backup​
+
+What it is: Complete copy of all data every time.
+
+How it works:
+
+Monday: Copy everything (100 GB)
+Tuesday: Copy everything (101 GB)
+Wednesday: Copy everything (102 GB)
+
+Characteristics:
+
+Aspect	Full Backup
+Storage required	Highest (N copies x data size)
+Backup time	Slowest (copies all data every time)
+Restore time	Fastest (single copy has everything)
+Complexity	Simplest (just copy everything)
+Recovery reliability	Highest (each backup is complete)
+
+Best for:
+
+Small datasets (< 100 GB)
+When storage is cheap
+When restore speed is critical
+Weekly backups (combined with incrementals for daily)
+Incremental Backup​
+
+What it is: Copy only data changed since the last backup (any type).
+
+How it works:
+
+Sunday: Full backup (100 GB)
+Monday: Changes since Sunday (2 GB)
+Tuesday: Changes since Monday (1.5 GB)
+Wednesday: Changes since Tuesday (2.2 GB)
+
+Characteristics:
+
+Aspect	Incremental Backup
+Storage required	Lowest (only changes stored)
+Backup time	Fastest (smallest data volume)
+Restore time	Slowest (must apply all incrementals in order)
+Complexity	Moderate (chain management)
+Recovery reliability	Depends on chain (if one link breaks, later restores fail)
+
+Best for:
+
+Large datasets with low change rates
+Frequent backups (hourly, every 15 minutes)
+When storage costs are significant
+When backup window is limited
+
+Risk: The chain dependency. To restore Wednesday, you need Sunday's full + Monday's incremental + Tuesday's incremental + Wednesday's incremental. If Tuesday's backup is corrupted, you can't restore Wednesday.
+
+Differential Backup​
+
+What it is: Copy all data changed since the last full backup.
+
+How it works:
+
+Sunday: Full backup (100 GB)
+Monday: Changes since Sunday (2 GB)
+Tuesday: Changes since Sunday (3.5 GB)
+Wednesday: Changes since Sunday (5.7 GB)
+
+Characteristics:
+
+Aspect	Differential Backup
+Storage required	Moderate (grows until next full)
+Backup time	Moderate (grows until next full)
+Restore time	Faster than incremental (only 2 files: full + latest diff)
+Complexity	Low (no chain management)
+Recovery reliability	High (only depends on last full + latest diff)
+
+Best for:
+
+Medium datasets with moderate change rates
+Daily backups between weekly fulls
+When restore simplicity matters
+When you can tolerate growing backup sizes
+Comparison Table​
+Strategy	Storage	Backup Speed	Restore Speed	Complexity	Chain Risk
+Full	Highest	Slowest	Fastest	Lowest	None
+Incremental	Lowest	Fastest	Slowest	Moderate	High
+Differential	Moderate	Moderate	Moderate	Low	Low
+Common Pattern: Weekly Full + Daily Incremental​
+
+Most production systems use a combination:
+
+Sunday:    Full backup (100 GB)
+Monday:    Incremental (2 GB)
+Tuesday:   Incremental (1.5 GB)
+Wednesday: Incremental (2 GB)
+Thursday:  Incremental (1.8 GB)
+Friday:    Incremental (2.5 GB)
+Saturday:  Incremental (1 GB)
+[Next Sunday: New full backup, start fresh chain]
+
+
+Why this works:
+
+Full weekly limits chain length (max 7 incrementals)
+Incrementals keep daily backup fast
+Worst-case restore: 1 full + 6 incrementals
+Storage: 100 GB + ~11 GB = 111 GB per week
+Building Your Mental Model​
+
+Before implementing backups in later lessons, internalize this framework:
+
+RTO and RPO drive your strategy:
+
+RTO (recovery time): How fast must you recover? Drives standby architecture
+RPO (data loss tolerance): How much can you lose? Drives backup frequency
+
+The 3-2-1 rule ensures resilience:
+
+3 copies: Defense in depth
+2 storage types: Avoid correlated failures
+1 offsite: Survive regional disasters
+
+Backup strategies balance tradeoffs:
+
+Full: Simple, fast restore, storage-heavy
+Incremental: Efficient, complex restore, chain risk
+Differential: Middle ground, growing size, simple restore
+
+The business connection: Your Digital FTE's reputation depends on data protection. Customers trust you with their data. That trust is destroyed in one incident and rebuilt over years. The cost of proper backups is always less than the cost of a data loss incident.
+
+Try With AI​
+
+These prompts help you apply backup concepts to your own projects.
+
+Prompt 1: RTO/RPO Requirements Analysis
+
+I'm building a Task API that serves small businesses.
+Users create 20-50 tasks per day during business hours.
+The service is used for daily operations, not critical transactions.
+Customers pay $50/month per seat.
+
+Help me determine appropriate RTO and RPO values:
+- What questions should I ask about my users' tolerance for downtime?
+- What questions should I ask about acceptable data loss?
+- What RTO and RPO would you recommend and why?
+- What backup infrastructure would these requirements need?
+
+
+What you're learning: How to translate business context into technical requirements. RTO and RPO aren't arbitrary numbers. They emerge from understanding your users' needs.
+
+Prompt 2: 3-2-1 Compliance Check
+
+My current backup setup for Task API:
+- PostgreSQL running on a Kubernetes PVC (primary data)
+- pg_dump to a PVC in the same cluster every 6 hours
+- No other backups
+
+Evaluate this against the 3-2-1 rule:
+- Which requirements does this meet?
+- Which requirements does this violate?
+- What's the worst disaster this setup can survive?
+- What's the simplest disaster that would cause data loss?
+- How would you improve this to meet 3-2-1?
+
+
+What you're learning: How to audit existing backup configurations and identify gaps before they become disasters.
+
+Prompt 3: Backup Strategy Selection
+
+I have three different Kubernetes workloads:
+
+1. Task API PostgreSQL database
+   - 50 GB data
+   - 1% daily change rate
+   - RPO: 1 hour
+
+2. ML model artifacts in object storage
+   - 500 GB data
+   - Models updated weekly
+   - RPO: 24 hours
+
+3. User session cache in Redis
+   - 2 GB data
+   - 100% change rate daily
+   - RPO: Not applicable (ephemeral)
+
+For each workload:
+- Which backup strategy (full/incremental/differential) makes sense?
+- What backup frequency would meet the RPO?
+- What retention period would you recommend?
+
+
+What you're learning: How to match backup strategies to workload characteristics. Different data has different protection needs.
+
+Safety note: Backup systems have access to all your data. Ensure backup storage is encrypted, access is restricted, and credentials are managed securely. A backup system with weak security is a liability, not an asset.
+
+Reflect on Your Skill​
+
+You built an operational-excellence skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my operational-excellence skill, explain RTO and RPO.
+Does my skill correctly distinguish between recovery time and data loss tolerance?
+Does it explain how these objectives drive backup frequency and recovery procedures?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the 3-2-1 backup rule (3 copies, 2 storage types, 1 offsite)?
+Did it explain the three backup strategies (full, incremental, differential)?
+Did it connect RTO/RPO to business requirements, not just technical configurations?
+Improve Your Skill​
+
+If you found gaps:
+
+My operational-excellence skill is missing the 3-2-1 backup rule framework.
+Update it to include:
+1. The three components: 3 copies, 2 storage types, 1 offsite location
+2. What each component protects against
+3. How to verify a backup strategy meets 3-2-1
+
+Also add backup strategy comparison:
+- Full: Complete copy every time (simple, storage-heavy)
+- Incremental: Changes since last backup (efficient, chain risk)
+- Differential: Changes since last full (middle ground)

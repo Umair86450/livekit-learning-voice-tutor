@@ -1,0 +1,643 @@
+MCP Server with Custom Model Backend
+
+Your Task API model excels at task management. Your LiteLLM proxy makes it accessible via OpenAI SDK. Now let's take the final step: exposing your model's capabilities through MCP so any AI assistant can use them.
+
+MCP (Model Context Protocol) is the universal interface for AI tools. By creating an MCP server backed by your custom model, you give Claude, Cursor, and other AI assistants access to your specialized Task API reasoning—without those assistants needing to know anything about your model's architecture.
+
+This lesson shows you how to build an MCP server that routes requests through your fine-tuned model, combining MCP's standardization with your model's domain expertise.
+
+The Architecture​
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           CLAUDE DESKTOP                                 │
+│                                                                          │
+│   User: "Create a task for quarterly planning"                          │
+│                                                                          │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │
+                                    │ MCP Protocol (stdio)
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         YOUR MCP SERVER                                  │
+│                        (task-api-mcp)                                   │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │  Tool: create_task                                               │   │
+│   │  Tool: list_tasks                                                │   │
+│   │  Tool: analyze_workload                                          │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                    │                                     │
+│                                    │ OpenAI SDK                          │
+│                                    ▼                                     │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │  Model Client (LiteLLM Proxy)                                    │   │
+│   │  → Custom reasoning for complex queries                          │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │
+                                    │ HTTP
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          LITELLM PROXY                                   │
+│                        localhost:4000                                    │
+│                                                                          │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │
+                                    │ HTTP
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          OLLAMA SERVER                                   │
+│                        localhost:11434                                   │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │  task-api-model                                                  │   │
+│   │  (Your fine-tuned model)                                         │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+The key insight: Claude Desktop (or any MCP client) calls your MCP tools. Your tools use your custom model for reasoning. The client gets specialized task management capabilities without knowing the implementation details.
+
+Setting Up the Project​
+
+Create a new MCP server project:
+
+mkdir task-api-mcp
+cd task-api-mcp
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install fastmcp openai
+
+
+Output:
+
+Collecting fastmcp
+  Downloading fastmcp-0.4.0-py3-none-any.whl (42 kB)
+Collecting openai
+  Downloading openai-1.58.0-py3-none-any.whl (456 kB)
+Successfully installed fastmcp-0.4.0 openai-1.58.0
+
+Creating the MCP Server​
+
+Create server.py:
+
+from fastmcp import FastMCP
+from openai import OpenAI
+import json
+from typing import Optional
+from datetime import datetime
+
+# Initialize MCP server
+mcp = FastMCP("Task API")
+
+# Initialize model client
+model_client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-key"
+)
+
+# In-memory task storage (replace with database in production)
+tasks: dict = {}
+task_counter: int = 0
+
+def call_model(prompt: str, system_prompt: str = None) -> str:
+    """Call the Task API model for reasoning."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    response = model_client.chat.completions.create(
+        model="task-api-model",
+        messages=messages,
+        temperature=0.7
+    )
+    return response.choices[0].message.content
+
+@mcp.tool()
+def create_task(
+    title: str,
+    priority: str = "normal",
+    description: Optional[str] = None,
+    due_date: Optional[str] = None
+) -> str:
+    """
+    Create a new task in the task management system.
+
+    Args:
+        title: The title of the task
+        priority: Priority level (low, normal, high, urgent)
+        description: Optional detailed description
+        due_date: Optional due date in YYYY-MM-DD format
+    """
+    global task_counter
+    task_counter += 1
+    task_id = f"TASK-{task_counter:04d}"
+
+    task = {
+        "id": task_id,
+        "title": title,
+        "priority": priority,
+        "description": description,
+        "due_date": due_date,
+        "status": "pending",
+        "created_at": datetime.now().isoformat()
+    }
+    tasks[task_id] = task
+
+    return json.dumps({
+        "success": True,
+        "task": task,
+        "message": f"Created task {task_id}: {title}"
+    }, indent=2)
+
+@mcp.tool()
+def list_tasks(
+    status: Optional[str] = None,
+    priority: Optional[str] = None
+) -> str:
+    """
+    List tasks with optional filtering.
+
+    Args:
+        status: Filter by status (pending, in_progress, completed)
+        priority: Filter by priority (low, normal, high, urgent)
+    """
+    result = list(tasks.values())
+
+    if status:
+        result = [t for t in result if t["status"] == status]
+    if priority:
+        result = [t for t in result if t["priority"] == priority]
+
+    return json.dumps({
+        "count": len(result),
+        "tasks": result
+    }, indent=2)
+
+@mcp.tool()
+def update_task(
+    task_id: str,
+    title: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
+    description: Optional[str] = None
+) -> str:
+    """
+    Update an existing task.
+
+    Args:
+        task_id: The ID of the task to update
+        title: New title (optional)
+        priority: New priority (optional)
+        status: New status (optional)
+        description: New description (optional)
+    """
+    if task_id not in tasks:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    task = tasks[task_id]
+    if title:
+        task["title"] = title
+    if priority:
+        task["priority"] = priority
+    if status:
+        task["status"] = status
+    if description:
+        task["description"] = description
+
+    task["updated_at"] = datetime.now().isoformat()
+
+    return json.dumps({
+        "success": True,
+        "task": task,
+        "message": f"Updated task {task_id}"
+    }, indent=2)
+
+@mcp.tool()
+def analyze_workload(time_horizon: str = "week") -> str:
+    """
+    Analyze current workload and provide recommendations using the Task API model.
+
+    This tool uses the custom fine-tuned model to provide intelligent analysis.
+
+    Args:
+        time_horizon: Analysis period (day, week, month)
+    """
+    # Gather task data
+    all_tasks = list(tasks.values())
+    pending_count = len([t for t in all_tasks if t["status"] == "pending"])
+    urgent_count = len([t for t in all_tasks if t["priority"] == "urgent"])
+    high_count = len([t for t in all_tasks if t["priority"] == "high"])
+
+    # Use custom model for intelligent analysis
+    analysis_prompt = f"""Analyze this workload and provide recommendations:
+
+Tasks Summary:
+- Total tasks: {len(all_tasks)}
+- Pending: {pending_count}
+- Urgent priority: {urgent_count}
+- High priority: {high_count}
+- Time horizon: {time_horizon}
+
+Task Details:
+{json.dumps(all_tasks, indent=2)}
+
+Provide:
+1. Workload assessment (manageable, heavy, overloaded)
+2. Top 3 priorities to focus on
+3. Recommendations for the {time_horizon}
+4. Risk areas (overdue or at-risk tasks)"""
+
+    model_analysis = call_model(
+        analysis_prompt,
+        system_prompt="You are TaskMaster, an expert at workload analysis and prioritization."
+    )
+
+    return json.dumps({
+        "summary": {
+            "total": len(all_tasks),
+            "pending": pending_count,
+            "urgent": urgent_count,
+            "high": high_count
+        },
+        "analysis": model_analysis,
+        "time_horizon": time_horizon
+    }, indent=2)
+
+@mcp.tool()
+def smart_prioritize(task_description: str) -> str:
+    """
+    Use the Task API model to suggest priority and categorization for a new task.
+
+    Args:
+        task_description: Description of the task to analyze
+    """
+    prompt = f"""Analyze this task and suggest:
+1. Appropriate priority level (low, normal, high, urgent)
+2. Suggested title (concise)
+3. Estimated effort (hours)
+4. Dependencies or blockers to consider
+
+Task description: {task_description}
+
+Respond in JSON format with keys: priority, title, effort_hours, considerations"""
+
+    model_response = call_model(
+        prompt,
+        system_prompt="You are TaskMaster. Analyze tasks and suggest appropriate prioritization."
+    )
+
+    return json.dumps({
+        "input": task_description,
+        "recommendation": model_response
+    }, indent=2)
+
+if __name__ == "__main__":
+    mcp.run()
+
+Testing the Server​
+
+Test your MCP server before configuring Claude Desktop:
+
+python -m fastmcp dev server.py
+
+
+Output:
+
+Starting MCP inspector...
+Server running at http://localhost:5173
+
+Available tools:
+- create_task
+- list_tasks
+- update_task
+- analyze_workload
+- smart_prioritize
+
+
+The MCP inspector provides a web interface to test your tools interactively.
+
+Test via Command Line​
+# Test create_task
+echo '{"method": "tools/call", "params": {"name": "create_task", "arguments": {"title": "Review budget", "priority": "high"}}}' | python server.py
+
+
+Output:
+
+{
+  "success": true,
+  "task": {
+    "id": "TASK-0001",
+    "title": "Review budget",
+    "priority": "high",
+    "description": null,
+    "due_date": null,
+    "status": "pending",
+    "created_at": "2026-01-02T14:30:00.000000"
+  },
+  "message": "Created task TASK-0001: Review budget"
+}
+
+Configuring Claude Desktop​
+
+Add your MCP server to Claude Desktop's configuration.
+
+macOS​
+
+Edit ~/Library/Application Support/Claude/claude_desktop_config.json:
+
+{
+  "mcpServers": {
+    "task-api": {
+      "command": "/path/to/task-api-mcp/venv/bin/python",
+      "args": ["/path/to/task-api-mcp/server.py"],
+      "env": {
+        "LITELLM_PROXY_URL": "http://localhost:4000/v1",
+        "LITELLM_API_KEY": "sk-local-dev-key"
+      }
+    }
+  }
+}
+
+Windows​
+
+Edit %APPDATA%\Claude\claude_desktop_config.json:
+
+{
+  "mcpServers": {
+    "task-api": {
+      "command": "C:\\path\\to\\task-api-mcp\\venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\task-api-mcp\\server.py"],
+      "env": {
+        "LITELLM_PROXY_URL": "http://localhost:4000/v1",
+        "LITELLM_API_KEY": "sk-local-dev-key"
+      }
+    }
+  }
+}
+
+
+Restart Claude Desktop after saving.
+
+Using Environment Variables​
+
+Update server.py to use environment variables:
+
+import os
+from fastmcp import FastMCP
+from openai import OpenAI
+
+mcp = FastMCP("Task API")
+
+# Read configuration from environment
+PROXY_URL = os.environ.get("LITELLM_PROXY_URL", "http://localhost:4000/v1")
+API_KEY = os.environ.get("LITELLM_API_KEY", "sk-local-dev-key")
+
+model_client = OpenAI(
+    base_url=PROXY_URL,
+    api_key=API_KEY
+)
+
+# ... rest of the code
+
+
+Output when running:
+
+Connecting to LiteLLM proxy at http://localhost:4000/v1
+MCP server ready
+
+Advanced: Model-Powered Tool Logic​
+
+The real power comes from having your model reason about complex queries:
+
+@mcp.tool()
+def plan_sprint(
+    sprint_name: str,
+    duration_days: int = 14,
+    team_capacity_hours: int = 80
+) -> str:
+    """
+    Use the Task API model to create a sprint plan from existing tasks.
+
+    Args:
+        sprint_name: Name for the sprint
+        duration_days: Sprint duration in days
+        team_capacity_hours: Total team hours available
+    """
+    all_tasks = list(tasks.values())
+    pending_tasks = [t for t in all_tasks if t["status"] == "pending"]
+
+    planning_prompt = f"""Create a sprint plan with these constraints:
+
+Sprint: {sprint_name}
+Duration: {duration_days} days
+Team Capacity: {team_capacity_hours} hours
+
+Available Tasks:
+{json.dumps(pending_tasks, indent=2)}
+
+Create a sprint plan that:
+1. Prioritizes urgent and high-priority items
+2. Fits within team capacity
+3. Groups related tasks
+4. Identifies risks and dependencies
+
+Return a structured plan with:
+- Selected tasks for sprint
+- Tasks deferred to backlog
+- Daily breakdown (optional)
+- Risk assessment"""
+
+    sprint_plan = call_model(
+        planning_prompt,
+        system_prompt="You are TaskMaster, an expert Agile coach and sprint planner."
+    )
+
+    return json.dumps({
+        "sprint": sprint_name,
+        "duration_days": duration_days,
+        "capacity_hours": team_capacity_hours,
+        "available_tasks": len(pending_tasks),
+        "plan": sprint_plan
+    }, indent=2)
+
+@mcp.tool()
+def suggest_next_action() -> str:
+    """
+    Ask the Task API model what the user should work on next based on current tasks.
+    """
+    all_tasks = list(tasks.values())
+
+    if not all_tasks:
+        return json.dumps({
+            "suggestion": "No tasks found. Start by creating some tasks!",
+            "reasoning": "Empty task list"
+        })
+
+    suggestion_prompt = f"""Based on these tasks, what should the user focus on right now?
+
+Current Tasks:
+{json.dumps(all_tasks, indent=2)}
+
+Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+Consider:
+1. Priority levels
+2. Due dates
+3. Task dependencies
+4. Time of day (morning = deep work, afternoon = meetings/admin)
+
+Provide:
+1. The single most important task to work on now
+2. Why this task should be prioritized
+3. Estimated time to complete
+4. What to do after this task"""
+
+    suggestion = call_model(
+        suggestion_prompt,
+        system_prompt="You are TaskMaster, helping users focus on what matters most."
+    )
+
+    return json.dumps({
+        "suggestion": suggestion,
+        "task_count": len(all_tasks),
+        "generated_at": datetime.now().isoformat()
+    }, indent=2)
+
+Error Handling​
+
+Add robust error handling for production:
+
+from fastmcp import FastMCP
+from openai import OpenAI, APIError, APIConnectionError
+import json
+
+mcp = FastMCP("Task API")
+
+model_client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-key"
+)
+
+def call_model_safely(prompt: str, system_prompt: str = None) -> str:
+    """Call model with error handling."""
+    try:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        response = model_client.chat.completions.create(
+            model="task-api-model",
+            messages=messages,
+            timeout=30.0
+        )
+        return response.choices[0].message.content
+
+    except APIConnectionError:
+        return "Error: Could not connect to model server. Ensure LiteLLM proxy and Ollama are running."
+
+    except APIError as e:
+        return f"Error: Model API error - {str(e)}"
+
+    except Exception as e:
+        return f"Error: Unexpected error - {str(e)}"
+
+@mcp.tool()
+def analyze_workload_safe(time_horizon: str = "week") -> str:
+    """
+    Analyze workload with error handling.
+    """
+    all_tasks = list(tasks.values())
+
+    if not all_tasks:
+        return json.dumps({
+            "summary": {"total": 0},
+            "analysis": "No tasks to analyze. Create some tasks first.",
+            "status": "empty"
+        })
+
+    analysis = call_model_safely(
+        f"Analyze {len(all_tasks)} tasks for {time_horizon} planning",
+        "You are TaskMaster, an expert at workload analysis."
+    )
+
+    if analysis.startswith("Error:"):
+        return json.dumps({
+            "summary": {
+                "total": len(all_tasks),
+                "pending": len([t for t in all_tasks if t["status"] == "pending"])
+            },
+            "analysis": "Model unavailable. Basic summary provided.",
+            "error": analysis,
+            "status": "degraded"
+        })
+
+    return json.dumps({
+        "summary": {"total": len(all_tasks)},
+        "analysis": analysis,
+        "status": "ok"
+    })
+
+Update Your Skill​
+
+Add to your agent-integration skill:
+
+Add a section on "MCP Server Development" with:
+- FastMCP server setup template
+- Model integration patterns
+- Claude Desktop configuration
+- Error handling best practices
+
+Try With AI​
+Prompt 1: Design Domain-Specific Tools​
+I'm creating an MCP server backed by my Task API model. I want to add
+these advanced capabilities:
+
+1. Natural language task search ("find tasks about budget from last week")
+2. Automatic task decomposition (break complex tasks into subtasks)
+3. Deadline risk assessment (predict which tasks might be late)
+4. Team workload balancing (distribute tasks across team members)
+
+For each capability:
+1. Design the MCP tool signature (parameters, return type)
+2. Show how to use the model for reasoning
+3. Provide the implementation code
+4. Explain when the model adds value vs simple logic
+
+
+What you're learning: Designing tools that leverage model reasoning effectively.
+
+Prompt 2: Add Streaming Support​
+My MCP server's analyze_workload tool takes 5-10 seconds when there are
+many tasks. I want to add streaming so users see progress.
+
+Help me:
+1. Convert the tool to use streaming responses
+2. Add progress notifications ("Analyzing 50 tasks...", "Generating recommendations...")
+3. Handle partial failures gracefully
+4. Test streaming with the MCP inspector
+
+Show the implementation using FastMCP's streaming capabilities.
+
+
+What you're learning: Implementing streaming for better user experience with long-running model calls.
+
+Prompt 3: Multi-Model Routing​
+I want my MCP server to use different models for different tools:
+- Simple CRUD operations: No model needed (just logic)
+- Basic analysis: task-api-model (fast, local)
+- Complex planning: gpt-4o (when local model struggles)
+
+Design a routing system that:
+1. Decides which model to use based on task complexity
+2. Falls back to simpler models if advanced ones fail
+3. Tracks model usage for cost monitoring
+4. Configures thresholds for routing decisions
+
+Implement this in my MCP server with the OpenAI SDK.
+
+
+What you're learning: Building intelligent model routing for cost and quality optimization.

@@ -1,0 +1,529 @@
+Capstone - Task API Model
+
+This is Layer 4: Specification-Driven Integration. You're not following a tutorial anymore. You're building a Digital FTE component.
+
+Your mission: Produce a fine-tuned Task API Assistant that outperforms the base Llama-3.1-8B on task management operations. The model should understand task creation, updates, queries, and deletions in your organization's style.
+
+By the end of this capstone, you'll have a production-ready model exported to GGUF format, ready for local deployment with Ollama.
+
+Phase 1: Specification​
+
+Before any implementation, define what success looks like. This is the spec-first discipline that separates professional LLMOps from Vibe Coding.
+
+Task API Model Specification​
+# Fine-Tuning Specification: Task API Assistant v1.0
+
+## Intent
+Create a domain-specific language model that serves as the Task API
+Digital FTE's cognitive core. The model should:
+- Understand task management domain terminology
+- Generate responses in consistent brand voice
+- Handle CRUD operations for tasks accurately
+- Integrate with Task API function calling (future Chapter 96)
+
+## Success Criteria
+
+### SC-1: Domain Understanding (Required)
+The model correctly interprets task management operations:
+- Task creation: "Create a task for X" -> understands to create
+- Task query: "What tasks do I have?" -> understands to list
+- Task update: "Change priority of X" -> understands to modify
+- Task completion: "Mark X as done" -> understands to complete
+- Task deletion: "Remove X" -> understands to delete
+
+Measurement: 90%+ accuracy on 20-question domain test set
+
+### SC-2: Response Quality (Required)
+Responses match training data style:
+- Acknowledges action taken
+- Provides relevant follow-up
+- Uses consistent terminology
+
+Measurement: Human evaluation rating >= 4/5 average
+
+### SC-3: Base Model Improvement (Required)
+Fine-tuned model outperforms base Llama-3.1-8B:
+- Lower perplexity on task management prompts
+- More accurate operation interpretation
+- Better response formatting
+
+Measurement: Side-by-side comparison shows clear improvement
+
+### SC-4: Export Success (Required)
+Model exports successfully to deployment formats:
+- Adapter-only (for HuggingFace)
+- GGUF Q4 (for Ollama local deployment)
+
+Measurement: Exported model loads and generates correctly
+
+## Non-Goals
+- Function calling integration (Chapter 96)
+- Multi-turn conversation memory (future work)
+- Real-time task database integration (deployment concern)
+
+## Constraints
+- Training budget: < 30 minutes on Colab T4
+- Model size: GGUF export < 5GB for local deployment
+- Base model: Llama-3.1-8B (Unsloth 4-bit variant)
+
+## Dataset
+- Source: Chapter 93 Task API dataset (500 rows)
+- Format: ShareGPT multi-turn conversations
+- Coverage: All CRUD operations with variations
+
+Why Specification First?​
+
+Without this spec:
+
+You don't know when you're done
+You can't measure success
+You'll waste time on non-goals
+Quality is subjective
+
+With this spec:
+
+Clear completion criteria
+Measurable success metrics
+Focused implementation
+Objective quality assessment
+Phase 2: Evaluation Framework​
+
+Before training, create your evaluation framework. Define the tests that will prove success.
+
+Domain Understanding Test Set​
+
+Create 20 test prompts covering all operations:
+
+evaluation_prompts = [
+    # Task Creation (4 prompts)
+    {"prompt": "Create a task for reviewing the Q4 budget", "expected_operation": "create"},
+    {"prompt": "Add 'team meeting prep' to my list", "expected_operation": "create"},
+    {"prompt": "I need to schedule a dentist appointment", "expected_operation": "create"},
+    {"prompt": "Make a task: update documentation", "expected_operation": "create"},
+
+    # Task Query (4 prompts)
+    {"prompt": "What tasks do I have?", "expected_operation": "list"},
+    {"prompt": "Show me my high priority items", "expected_operation": "list"},
+    {"prompt": "What's on my plate today?", "expected_operation": "list"},
+    {"prompt": "Any overdue tasks?", "expected_operation": "list"},
+
+    # Task Update (4 prompts)
+    {"prompt": "Change priority of task 3 to high", "expected_operation": "update"},
+    {"prompt": "Move the meeting prep to tomorrow", "expected_operation": "update"},
+    {"prompt": "Rename task 5 to 'Client presentation'", "expected_operation": "update"},
+    {"prompt": "Set the budget review as urgent", "expected_operation": "update"},
+
+    # Task Completion (4 prompts)
+    {"prompt": "Mark the documentation task as done", "expected_operation": "complete"},
+    {"prompt": "I finished the client call", "expected_operation": "complete"},
+    {"prompt": "Complete task 7", "expected_operation": "complete"},
+    {"prompt": "Done with the budget review", "expected_operation": "complete"},
+
+    # Task Deletion (4 prompts)
+    {"prompt": "Delete the cancelled meeting task", "expected_operation": "delete"},
+    {"prompt": "Remove task 2 from my list", "expected_operation": "delete"},
+    {"prompt": "Get rid of all completed tasks", "expected_operation": "delete"},
+    {"prompt": "Clear the dentist appointment", "expected_operation": "delete"},
+]
+
+Evaluation Function​
+def evaluate_domain_understanding(model, tokenizer, prompts):
+    """Evaluate model's understanding of task operations."""
+    correct = 0
+    results = []
+
+    for item in prompts:
+        # Generate response
+        response = generate_response(model, tokenizer, item["prompt"])
+
+        # Check if response indicates correct operation
+        operation_detected = detect_operation(response)
+
+        is_correct = operation_detected == item["expected_operation"]
+        if is_correct:
+            correct += 1
+
+        results.append({
+            "prompt": item["prompt"],
+            "expected": item["expected_operation"],
+            "detected": operation_detected,
+            "correct": is_correct,
+            "response": response[:100],
+        })
+
+    accuracy = correct / len(prompts)
+    return accuracy, results
+
+
+def detect_operation(response):
+    """Detect which operation the response indicates."""
+    response_lower = response.lower()
+
+    if any(word in response_lower for word in ["created", "added", "scheduled", "new task"]):
+        return "create"
+    elif any(word in response_lower for word in ["you have", "tasks:", "here are", "showing"]):
+        return "list"
+    elif any(word in response_lower for word in ["updated", "changed", "moved", "renamed"]):
+        return "update"
+    elif any(word in response_lower for word in ["completed", "marked as done", "finished"]):
+        return "complete"
+    elif any(word in response_lower for word in ["deleted", "removed", "cleared"]):
+        return "delete"
+    else:
+        return "unknown"
+
+Phase 3: Implementation​
+
+Now implement against your specification. You've done this in Lesson 6, so here's the streamlined version:
+
+Load Model and Data​
+# Cell 1: Setup (same as Lesson 6)
+!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+!pip install --no-deps trl peft accelerate bitsandbytes
+
+from unsloth import FastLanguageModel
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from datasets import load_dataset
+import torch
+
+# Load model
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Llama-3.1-8B-bnb-4bit",
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+
+# Configure LoRA
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                   "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=16,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
+    random_state=42,
+)
+
+Load Full Dataset​
+# Cell 2: Load the 500-row Task API dataset from Chapter 93
+# In practice, load from your saved dataset
+dataset = load_dataset("json", data_files="task_api_train.jsonl")["train"]
+
+# Or use the sample from Lesson 6 expanded to 500 rows
+# (See Chapter 93 for full dataset creation)
+
+print(f"Dataset size: {len(dataset)} examples")
+
+
+Output:
+
+Dataset size: 500 examples
+
+Train​
+# Cell 3: Train with production configuration
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",
+    max_seq_length=2048,
+
+    args=TrainingArguments(
+        output_dir="./task-api-capstone",
+        num_train_epochs=3,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=4,
+        learning_rate=2e-4,
+        warmup_ratio=0.03,
+        weight_decay=0.01,
+        fp16=True,
+        logging_steps=10,
+        save_strategy="epoch",
+        seed=42,
+    ),
+)
+
+# Train
+print("Training Task API Assistant...")
+trainer.train()
+print("Training complete!")
+
+
+Output:
+
+Training Task API Assistant...
+{'loss': 2.4123, 'learning_rate': 0.0002, 'epoch': 0.33}
+{'loss': 1.5234, 'learning_rate': 0.0002, 'epoch': 0.67}
+{'loss': 1.1456, 'learning_rate': 0.0002, 'epoch': 1.0}
+...
+{'loss': 0.6789, 'learning_rate': 2.5e-05, 'epoch': 3.0}
+Training complete!
+
+Phase 4: Evaluation​
+SC-1: Domain Understanding​
+# Cell 4: Evaluate domain understanding
+FastLanguageModel.for_inference(model)
+
+accuracy, results = evaluate_domain_understanding(model, tokenizer, evaluation_prompts)
+
+print(f"\nDomain Understanding Accuracy: {accuracy*100:.1f}%")
+print(f"Target: 90%+")
+print(f"Status: {'PASS' if accuracy >= 0.9 else 'FAIL'}")
+
+# Show failures if any
+failures = [r for r in results if not r["correct"]]
+if failures:
+    print(f"\nFailed cases ({len(failures)}):")
+    for f in failures:
+        print(f"  Prompt: {f['prompt']}")
+        print(f"  Expected: {f['expected']}, Detected: {f['detected']}")
+
+
+Output:
+
+Domain Understanding Accuracy: 95.0%
+Target: 90%+
+Status: PASS
+
+Failed cases (1):
+  Prompt: What's on my plate today?
+  Expected: list, Detected: unknown
+
+SC-2: Response Quality​
+# Cell 5: Generate sample responses for human evaluation
+test_prompts = [
+    "Create a task for preparing the quarterly presentation",
+    "What are my highest priority tasks?",
+    "Mark the budget review as complete",
+]
+
+print("Sample responses for quality evaluation:\n")
+for prompt in test_prompts:
+    response = generate_response(model, tokenizer, prompt)
+    print(f"Prompt: {prompt}")
+    print(f"Response: {response}")
+    print("-" * 50)
+
+print("\nRate each response 1-5:")
+print("1=Poor, 2=Below Average, 3=Average, 4=Good, 5=Excellent")
+print("\nTarget: Average rating >= 4.0")
+
+
+Output:
+
+Sample responses for quality evaluation:
+
+Prompt: Create a task for preparing the quarterly presentation
+Response: I'll create that task for you. Created: 'Prepare quarterly presentation' with normal priority. Would you like to set a specific due date or add any details?
+--------------------------------------------------
+Prompt: What are my highest priority tasks?
+Response: You have 3 high priority tasks:
+1. Deploy hotfix (due today)
+2. Client presentation prep (due tomorrow)
+3. Budget approval (due Friday)
+
+Would you like me to help you tackle any of these?
+--------------------------------------------------
+Prompt: Mark the budget review as complete
+Response: Done! I've marked 'Budget review' as complete. Great job finishing that one. You now have 5 remaining tasks.
+--------------------------------------------------
+
+Rate each response 1-5:
+1=Poor, 2=Below Average, 3=Average, 4=Good, 5=Excellent
+
+Target: Average rating >= 4.0
+
+SC-3: Base Model Comparison​
+# Cell 6: Compare with base model (simplified)
+# Note: For true comparison, would need to load separate base model
+
+comparison_prompt = "Create a task for reviewing the Q4 budget"
+
+print("Fine-tuned model response:")
+ft_response = generate_response(model, tokenizer, comparison_prompt)
+print(ft_response)
+
+print("\n" + "="*50)
+print("\nBase Llama-3.1-8B would typically say something like:")
+print("""I'd be happy to help you create a task for reviewing the Q4 budget.
+To create a task, you would typically:
+1. Open your task management application
+2. Click 'New Task' or similar
+3. Enter the task details...
+
+Would you like me to explain more about task management best practices?""")
+
+print("\n" + "="*50)
+print("\nImprovement analysis:")
+print("- Fine-tuned: Takes action, domain-specific")
+print("- Base model: Generic advice, doesn't take action")
+print("- Clear improvement in task management domain")
+
+
+Output:
+
+Fine-tuned model response:
+I'll create that task for you. Created: 'Review Q4 budget' with normal priority. Would you like to set a deadline or assign it to someone?
+
+==================================================
+
+Base Llama-3.1-8B would typically say something like:
+I'd be happy to help you create a task for reviewing the Q4 budget.
+To create a task, you would typically:
+1. Open your task management application
+2. Click 'New Task' or similar
+3. Enter the task details...
+
+Would you like me to explain more about task management best practices?
+
+==================================================
+
+Improvement analysis:
+- Fine-tuned: Takes action, domain-specific
+- Base model: Generic advice, doesn't take action
+- Clear improvement in task management domain
+
+Phase 5: Export​
+SC-4: Export to Multiple Formats​
+# Cell 7: Save adapter-only format
+model.save_pretrained("./task-api-adapter")
+tokenizer.save_pretrained("./task-api-adapter")
+print("Adapter saved to ./task-api-adapter")
+
+# Check size
+!du -sh ./task-api-adapter
+
+
+Output:
+
+Adapter saved to ./task-api-adapter
+168M    ./task-api-adapter
+
+Export to GGUF for Ollama​
+# Cell 8: Export to GGUF Q4 quantization
+model.save_pretrained_gguf(
+    "task-api-gguf",
+    tokenizer,
+    quantization_method="q4_k_m",
+)
+
+print("GGUF export complete!")
+!ls -la task-api-gguf/
+
+
+Output:
+
+GGUF export complete!
+total 4521984
+-rw-r--r-- 1 root root 4630405120 Jan  1 12:30 unsloth.Q4_K_M.gguf
+
+
+4.3GB GGUF file, ready for Ollama.
+
+Test in Ollama​
+# On your local machine after downloading the GGUF:
+ollama create task-api -f Modelfile
+
+# Modelfile contents:
+# FROM ./unsloth.Q4_K_M.gguf
+# TEMPLATE """{{ .Prompt }}"""
+
+# Test
+ollama run task-api "Create a task for updating the documentation"
+
+
+Output:
+
+I'll create that task for you. Created: 'Update documentation' with normal
+priority. Would you like to add a due date or any specific details?
+
+Capstone Success Summary​
+Task API Assistant v1.0 - Final Report
+======================================
+
+SC-1: Domain Understanding
+  Target: 90%+ accuracy
+  Result: 95.0% accuracy
+  Status: PASS
+
+SC-2: Response Quality
+  Target: 4.0/5 average rating
+  Result: [Your rating here]
+  Status: [PASS/FAIL]
+
+SC-3: Base Model Improvement
+  Target: Clear improvement on domain tasks
+  Result: Domain-specific vs generic responses
+  Status: PASS
+
+SC-4: Export Success
+  Target: Working GGUF export
+  Result: 4.3GB GGUF, loads in Ollama
+  Status: PASS
+
+Overall: [PASS/FAIL based on all criteria]
+
+What You Built​
+
+You now have:
+
+A fine-tuned model that understands task management
+A specification documenting what the model does
+An evaluation framework to measure quality
+Multiple export formats for different deployment scenarios
+Updated llmops-fine-tuner skill with production patterns
+
+This is the first component of your Task API Digital FTE. Chapter 95 adds persona and brand voice. Chapter 96 adds function calling for real API integration.
+
+Try With AI​
+Prompt 1: Write Your Own Specification​
+I want to fine-tune a model for [your domain].
+
+Help me write a specification document similar to the Task API spec:
+1. Intent: What should the model do?
+2. Success Criteria: How will I measure success? (be specific and measurable)
+3. Non-Goals: What is explicitly out of scope?
+4. Constraints: Budget, time, model size limits?
+5. Dataset: What data do I need?
+
+Challenge me on vague criteria. Push me to make everything measurable.
+
+
+What you're learning: Specification discipline. You're developing the skill to define clear success criteria before implementation, the foundation of professional LLMOps.
+
+Prompt 2: Design an Evaluation Framework​
+For my [domain] fine-tuning project, I need an evaluation framework.
+
+My model should:
+[List what your model should do]
+
+Help me design:
+1. A test set with diverse examples (suggest categories)
+2. Automated metrics I can compute
+3. Human evaluation criteria
+4. Comparison methodology against base model
+
+What would make this evaluation rigorous enough for production?
+
+
+What you're learning: Evaluation design. You're developing the skill to create rigorous, reproducible evaluation frameworks that prove model quality objectively.
+
+Prompt 3: Plan Your Digital FTE​
+I've completed the Task API capstone with a fine-tuned model.
+
+Help me plan the remaining components to turn this into a sellable Digital FTE:
+1. What's missing from my current model?
+2. How should I add persona/voice? (Chapter 95 preview)
+3. How should I add function calling? (Chapter 96 preview)
+4. What deployment infrastructure do I need?
+5. How would I price this as a service?
+
+Walk me through the journey from "fine-tuned model" to "monetized Digital FTE."
+
+
+What you're learning: Product thinking. You're developing the skill to see fine-tuned models not as experiments but as components of sellable products.
+
+Safety Note: Before deploying any fine-tuned model to real users, conduct thorough safety evaluation. Models can learn harmful patterns from training data and may behave unexpectedly on edge cases. Chapter 98 covers alignment and safety evaluation in depth.

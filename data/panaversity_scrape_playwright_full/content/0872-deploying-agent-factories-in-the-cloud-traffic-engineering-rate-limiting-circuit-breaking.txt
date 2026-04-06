@@ -1,0 +1,871 @@
+Rate Limiting & Circuit Breaking
+
+Your API is open to the world. Without rate limiting, one bad actor can crash everyone. A single user hammering your endpoints exhausts database connections, starves other users, and eventually brings down the service. For AI agents, the stakes are higher: LLM calls cost money. A runaway loop hitting your GPT-4 endpoint can generate a $10,000 surprise bill in hours.
+
+BackendTrafficPolicy is Envoy Gateway's extension for protecting services. It controls how traffic flows to your backends—limiting request rates, breaking circuits when services fail, and retrying transient errors. This lesson teaches you to configure these protections so your Task API survives abuse, controls costs, and recovers gracefully from failures.
+
+By the end, you will protect your services with rate limits, configure per-user quotas using headers, implement circuit breakers that exclude failing backends, and understand when to use local versus global rate limiting.
+
+Understanding BackendTrafficPolicy​
+
+BackendTrafficPolicy is an Envoy Gateway extension CRD that configures traffic behavior between Envoy proxies and your backend services. While HTTPRoute controls where traffic goes, BackendTrafficPolicy controls how that traffic behaves.
+
+What BackendTrafficPolicy Controls​
+Feature	Purpose
+Rate Limiting	Limit requests per time unit
+Circuit Breaker	Stop sending to failing backends
+Retry Policy	Automatically retry failed requests
+Timeouts	Fail requests that take too long
+Load Balancing	Control backend selection strategy
+How Policy Targeting Works​
+
+BackendTrafficPolicy uses targetRefs to specify which resources it applies to:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: my-policy
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+
+
+Target options:
+
+Target Kind	Effect
+HTTPRoute	Policy applies to that specific route
+Gateway	Policy applies to all routes through that Gateway
+GRPCRoute	Policy applies to gRPC traffic
+
+Important constraint: A BackendTrafficPolicy can only target resources in the same namespace as the policy itself.
+
+Local Rate Limiting​
+
+Local rate limiting applies limits per Envoy proxy instance. If you have 3 proxy replicas and set a limit of 100 requests/minute, each replica allows 100 requests/minute independently—total cluster capacity is 300 requests/minute.
+
+Basic Local Rate Limit​
+
+Apply a simple rate limit to all requests:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-ratelimit
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: 100
+            unit: Minute
+
+
+Apply and test:
+
+kubectl apply -f task-api-ratelimit.yaml
+
+
+Output:
+
+backendtrafficpolicy.gateway.envoyproxy.io/task-api-ratelimit created
+
+
+Generate load to test the limit:
+
+for i in {1..120}; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/tasks
+done | sort | uniq -c
+
+
+Output:
+
+    100 200
+     20 429
+
+
+The first 100 requests succeed (200). Requests 101-120 are rate limited (429 Too Many Requests).
+
+Understanding Rate Limit Units​
+
+The unit field accepts these values:
+
+Unit	Meaning
+Second	Requests per second
+Minute	Requests per minute
+Hour	Requests per hour
+
+Choose based on your use case:
+
+API endpoints: Minute (smooth traffic over time)
+Health checks: Second (low volume, quick reset)
+Expensive operations: Hour (strict daily quotas)
+Per-User Rate Limits​
+
+Global rate limits protect your infrastructure, but they punish all users equally. When one user hits the limit, everyone gets blocked. Per-user rate limits give each user their own quota.
+
+Using Header-Based Descriptors​
+
+Rate limit based on the x-user-id header:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-per-user
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    local:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: x-user-id
+                  value: "*"
+          limit:
+            requests: 50
+            unit: Minute
+
+
+Note: The value: "*" matches any value of the header. Each unique header value gets its own rate limit bucket.
+
+Test with different users:
+
+# User "alice" makes 60 requests
+for i in {1..60}; do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H "x-user-id: alice" http://localhost:8080/api/tasks
+done | tail -15
+
+# User "bob" makes 60 requests (independent quota)
+for i in {1..60}; do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H "x-user-id: bob" http://localhost:8080/api/tasks
+done | tail -15
+
+
+Output for alice:
+
+200
+200
+200
+429
+429
+...
+
+
+Output for bob:
+
+200
+200
+200
+200
+200
+...
+
+
+Alice hits her 50-request limit. Bob's quota is independent—he can still make requests.
+
+Matching Specific Header Values​
+
+Rate limit a specific user more aggressively:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: heavy-user-limit
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    local:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: x-user-id
+                  value: "heavy-user-123"
+          limit:
+            requests: 10
+            unit: Minute
+
+
+This limits user heavy-user-123 to 10 requests/minute while other users get the default limit.
+
+Anonymous vs Authenticated Users​
+
+Anonymous users (no x-user-id header) should get lower limits than authenticated users. Use the invert field to match requests without a header.
+
+Different Limits by Authentication Status​
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-tiered
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    local:
+      rules:
+        # Authenticated users: 100 requests/minute
+        - clientSelectors:
+            - headers:
+                - name: x-user-id
+                  value: "*"
+          limit:
+            requests: 100
+            unit: Minute
+
+        # Anonymous users (no x-user-id header): 10 requests/minute
+        - clientSelectors:
+            - headers:
+                - name: x-user-id
+                  value: "*"
+                  invert: true
+          limit:
+            requests: 10
+            unit: Minute
+
+
+Test anonymous access:
+
+# No x-user-id header
+for i in {1..15}; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/tasks
+done
+
+
+Output:
+
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+429
+429
+429
+429
+429
+
+
+Anonymous users hit the limit at 10 requests. Authenticated users get 100.
+
+Global Rate Limiting​
+
+Local rate limiting has a limitation: limits are per proxy instance. With 5 replicas at 100 requests/minute each, your actual cluster limit is 500 requests/minute. If you need strict organization-wide quotas, use global rate limiting.
+
+How Global Rate Limiting Works​
+                    ┌─────────────────────┐
+                    │   Rate Limit        │
+                    │   Service (Redis)   │
+                    │   Shared counters   │
+                    └──────────┬──────────┘
+                               │
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+           ▼                   ▼                   ▼
+    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+    │ Envoy Proxy  │    │ Envoy Proxy  │    │ Envoy Proxy  │
+    │  Replica 1   │    │  Replica 2   │    │  Replica 3   │
+    └──────────────┘    └──────────────┘    └──────────────┘
+
+
+All proxies query the same Redis instance. When one proxy increments the counter, all proxies see the updated value.
+
+Configuring Global Rate Limiting​
+
+First, configure Envoy Gateway to use Redis:
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-gateway-config
+  namespace: envoy-gateway-system
+data:
+  envoy-gateway.yaml: |
+    apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyGateway
+    rateLimit:
+      backend:
+        type: Redis
+        redis:
+          url: redis.redis-system.svc.cluster.local:6379
+
+
+Then create a BackendTrafficPolicy with global rate limiting:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-global
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    global:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: x-user-id
+                  value: "*"
+          limit:
+            requests: 100
+            unit: Minute
+
+
+Key difference: rateLimit.global instead of rateLimit.local.
+
+When to Use Global vs Local​
+Scenario	Recommendation
+Development/testing	Local (simpler, no Redis needed)
+Strict API quotas	Global (exact limits across cluster)
+High availability priority	Local (no Redis dependency)
+Billing-based limits	Global (accurate usage tracking)
+Cost protection for LLM APIs	Global (prevent runaway spending)
+Circuit Breaker Pattern​
+
+Rate limiting protects against too many requests. Circuit breakers protect against failing backends. When a backend becomes unhealthy, the circuit breaker stops sending traffic—preventing cascade failures and giving the backend time to recover.
+
+How Circuit Breakers Work​
+Normal State (Circuit Closed)
+─────────────────────────────
+Requests → Backend (healthy, responding)
+
+Failure Detected (Circuit Opens)
+────────────────────────────────
+Requests → 503 immediately (backend excluded)
+
+Recovery (Circuit Closes)
+─────────────────────────
+Requests → Backend (health check passed)
+
+Configuring Circuit Breaker​
+
+Limit concurrent connections and pending requests:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-circuitbreaker
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  circuitBreaker:
+    maxConnections: 100
+    maxParallelRequests: 50
+    maxPendingRequests: 10
+
+
+Field meanings:
+
+Field	Description	When Exceeded
+maxConnections	Maximum TCP connections to backend	New connections rejected
+maxParallelRequests	Maximum concurrent HTTP requests	Requests wait or fail
+maxPendingRequests	Maximum queued requests	Returns 503 immediately
+Testing Circuit Breaker Behavior​
+
+Use hey to generate concurrent load:
+
+# Install hey load testing tool
+go install github.com/rakyll/hey@latest
+
+# Generate 100 concurrent requests with 10 second delay
+hey -n 100 -c 100 -host "www.example.com" \
+  http://localhost:8080/api/tasks?delay=10s
+
+
+Output (with circuit breaker at maxParallelRequests=10):
+
+Summary:
+  Total:        10.5 secs
+  Slowest:      10.2 secs
+  Fastest:      0.001 secs
+  Average:      1.0 secs
+
+Status code distribution:
+  [200] 10 responses
+  [503] 90 responses
+
+
+Only 10 requests reached the backend (matching maxParallelRequests). The other 90 failed fast with 503—protecting your backend from overload.
+
+Circuit Breaker Sizing​
+
+Envoy's default thresholds (1024 connections, 1024 pending) may be too high or too low for your workload. Size based on your backend's capacity:
+
+Backend Type	Recommended maxConnections	Recommended maxParallelRequests
+Single container	50-100	25-50
+Replicated deployment (3 pods)	150-300	75-150
+Database-backed API	20-50	10-25
+LLM inference endpoint	5-20	5-10
+Retry Policy​
+
+Transient failures happen—network blips, brief pod restarts, temporary overload. Retry policies automatically retry failed requests so clients do not see every hiccup.
+
+Configuring Automatic Retries​
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-retry
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  retry:
+    numRetries: 3
+    perRetry:
+      backOff:
+        baseInterval: 100ms
+        maxInterval: 1s
+      timeout: 500ms
+    retryOn:
+      httpStatusCodes:
+        - 500
+        - 502
+        - 503
+        - 504
+      triggers:
+        - connect-failure
+        - retriable-status-codes
+
+
+Field meanings:
+
+Field	Description
+numRetries	Maximum retry attempts
+perRetry.backOff.baseInterval	Initial delay between retries
+perRetry.backOff.maxInterval	Maximum delay (exponential backoff caps here)
+perRetry.timeout	Timeout for each individual retry attempt
+retryOn.httpStatusCodes	Which status codes trigger retry
+retryOn.triggers	Which failure types trigger retry
+Retry Triggers​
+Trigger	Meaning
+connect-failure	TCP connection failed
+retriable-status-codes	Status code matched httpStatusCodes list
+reset	Connection reset by backend
+refused-stream	HTTP/2 stream refused
+Retry Safety​
+
+Only retry idempotent operations. Retrying a POST that creates a record may create duplicates. Configure retry policies on read-heavy routes, not write routes.
+
+Safe to retry:
+
+GET requests
+HEAD requests
+Idempotent PUT (full resource replacement)
+
+Unsafe to retry without application support:
+
+POST (may create duplicates)
+DELETE (may fail on second attempt)
+Non-idempotent PATCH
+Combining Policies​
+
+You can combine rate limiting, circuit breaking, and retries in a single BackendTrafficPolicy:
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: task-api-comprehensive
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+
+  # Rate limiting
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: 100
+            unit: Minute
+
+  # Circuit breaker
+  circuitBreaker:
+    maxConnections: 100
+    maxParallelRequests: 50
+    maxPendingRequests: 10
+
+  # Retry policy
+  retry:
+    numRetries: 2
+    perRetry:
+      backOff:
+        baseInterval: 50ms
+        maxInterval: 500ms
+      timeout: 250ms
+    retryOn:
+      httpStatusCodes:
+        - 503
+      triggers:
+        - connect-failure
+
+
+Order of evaluation:
+
+Rate limit check (429 if exceeded)
+Circuit breaker check (503 if circuit open)
+Forward to backend
+Retry on failure (if policy matches)
+Policy Merging​
+
+When policies target different levels (Gateway vs HTTPRoute), they merge with specific precedence.
+
+Merging Behavior​
+Policy Level	Precedence	Use Case
+HTTPRoute	Higher (overrides)	Route-specific settings
+Gateway	Lower (defaults)	Cluster-wide defaults
+
+Example: Default plus override
+
+Gateway-level default (applies to all routes):
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: gateway-defaults
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: task-api-gateway
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: 100
+            unit: Minute
+
+
+HTTPRoute-level override (applies only to expensive operations):
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: llm-route-override
+  namespace: task-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: llm-inference-route
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: 10
+            unit: Minute
+
+
+The LLM inference route gets 10 requests/minute (override). All other routes get 100 requests/minute (default).
+
+Observing Rate Limiting​
+
+Monitor rate limiting effectiveness with Prometheus metrics.
+
+Key Metrics​
+Metric	Meaning
+envoy_http_ratelimit_over_limit	Requests that exceeded rate limit
+envoy_cluster_circuit_breakers_cx_open	Circuit breaker open (connections)
+envoy_cluster_circuit_breakers_rq_pending_open	Circuit breaker open (pending requests)
+Prometheus Query Examples​
+
+Rate limited requests per route:
+
+sum(rate(envoy_http_ratelimit_over_limit[5m])) by (route_name)
+
+
+Circuit breaker activations:
+
+sum(rate(envoy_cluster_circuit_breakers_cx_open[5m])) by (envoy_cluster_name)
+
+Grafana Dashboard Panel​
+
+Create a panel showing rate limit vs successful requests:
+
+# Successful requests
+sum(rate(envoy_http_downstream_rq_completed{response_code="200"}[5m]))
+
+# Rate limited requests
+sum(rate(envoy_http_ratelimit_over_limit[5m]))
+
+Exercises​
+Exercise 1: Apply Basic Rate Limit​
+
+Apply a rate limit and observe 429 responses:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: exercise-ratelimit
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: 5
+            unit: Minute
+EOF
+
+
+Test:
+
+for i in {1..10}; do
+  curl -s -o /dev/null -w "%{http_code} " http://localhost:8080/api/tasks
+done
+echo
+
+
+Expected Output:
+
+200 200 200 200 200 429 429 429 429 429
+
+Exercise 2: Per-User Rate Limits​
+
+Add per-user limits using x-user-id header:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: exercise-peruser
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  rateLimit:
+    local:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: x-user-id
+                  value: "*"
+          limit:
+            requests: 3
+            unit: Minute
+EOF
+
+
+Test with different users:
+
+# User alice
+for i in {1..5}; do
+  curl -s -o /dev/null -w "%{http_code} " \
+    -H "x-user-id: alice" http://localhost:8080/api/tasks
+done
+echo "alice"
+
+# User bob (independent quota)
+for i in {1..5}; do
+  curl -s -o /dev/null -w "%{http_code} " \
+    -H "x-user-id: bob" http://localhost:8080/api/tasks
+done
+echo "bob"
+
+
+Expected Output:
+
+200 200 200 429 429 alice
+200 200 200 429 429 bob
+
+Exercise 3: Circuit Breaker Under Load​
+
+Configure circuit breaker and observe 503 responses under load:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: exercise-circuit
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: task-api-route
+  circuitBreaker:
+    maxParallelRequests: 5
+    maxPendingRequests: 0
+EOF
+
+
+Generate concurrent load:
+
+# Run 20 concurrent requests
+for i in {1..20}; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/tasks?delay=1s &
+done
+wait
+
+
+Expected: Some 200 responses (up to maxParallelRequests), rest 503.
+
+Exercise 4: View Rate Limit Metrics​
+
+Query Prometheus for rate limiting data:
+
+# Port-forward to Prometheus
+kubectl port-forward -n monitoring svc/prometheus 9090:9090 &
+
+# Query rate limited requests
+curl -s "http://localhost:9090/api/v1/query?query=envoy_http_ratelimit_over_limit" | jq
+
+
+Expected Output:
+
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {"route_name": "task-api-route"},
+        "value": [1735580000, "15"]
+      }
+    ]
+  }
+}
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about rate limiting and circuit breaking:
+
+Add Rate Limiting Decision Logic​
+
+Your skill should ask:
+
+Question	If Yes	If No
+Need strict cluster-wide quota?	Use global (Redis)	Use local
+Different user tiers?	Add per-user limits with headers	Use uniform limit
+Protecting expensive LLM endpoint?	Aggressive limits (10/min)	Standard limits (100/min)
+Add Policy Templates​
+
+Local rate limiting template:
+
+# Template: local-ratelimit
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ service }}-ratelimit
+  namespace: {{ namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ route }}
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: {{ requests }}
+            unit: {{ unit }}
+
+
+Circuit breaker template:
+
+# Template: circuit-breaker
+circuitBreaker:
+  maxConnections: {{ max_connections }}
+  maxParallelRequests: {{ max_parallel }}
+  maxPendingRequests: {{ max_pending }}
+
+Update Troubleshooting Guidance​
+Symptom	Check	Likely Cause
+429 on all requests	Rate limit too low	Increase limit
+503 under normal load	Circuit breaker too aggressive	Increase maxParallelRequests
+No rate limiting	Policy not attached	Check targetRefs
+Try With AI​
+Generate Rate Limiting Configuration​
+
+Ask your traffic-engineer skill to generate configuration:
+
+Using my traffic-engineer skill, generate BackendTrafficPolicy for my Task API:
+
+- 100 requests/minute per user (based on x-user-id header)
+- 10 requests/minute for anonymous users (no header)
+- Apply to the task-api-route HTTPRoute in task-api namespace
+
+
+What you're learning: AI generates multi-rule rate limiting. Review the output—did AI use invert: true correctly for anonymous users? Are both rules in the same policy?
+
+Evaluate the Configuration​
+
+Check AI's output:
+
+Does it use clientSelectors with headers?
+Is the invert: true field on the anonymous user rule?
+Are the limits in the correct order (authenticated first, anonymous second)?
+
+If something is missing, provide feedback:
+
+The anonymous user rule needs invert: true on the x-user-id header
+to match requests WITHOUT that header. Please fix.
+
+Add Circuit Breaker Protection​
+
+Extend the configuration:
+
+Add circuit breaker protection to this policy:
+- Maximum 50 concurrent connections
+- Maximum 25 parallel requests
+- Maximum 5 pending requests (fail fast after that)
+
+
+What you're learning: AI adapts existing configurations. Verify the circuit breaker fields are correct and added to the same BackendTrafficPolicy resource.
+
+Validate Before Applying​
+
+Before applying AI's configuration:
+
+# Validate YAML syntax
+kubectl apply --dry-run=client -f policy.yaml
+
+# Check for common errors
+kubectl apply --dry-run=server -f policy.yaml
+
+
+This iteration—specifying requirements, evaluating output, refining with constraints—builds production configurations safely.
+
+Safety Note​
+
+Rate limiting and circuit breakers affect all traffic to your service. Test in development before production. Start with higher limits and lower circuit breaker thresholds—you can always tighten them based on observed behavior. Monitor envoy_http_ratelimit_over_limit metrics to ensure you are not blocking legitimate traffic.

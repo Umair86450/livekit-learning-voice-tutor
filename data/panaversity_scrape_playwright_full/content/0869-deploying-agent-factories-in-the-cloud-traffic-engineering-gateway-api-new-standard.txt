@@ -1,0 +1,855 @@
+Gateway API - The New Standard
+
+The previous lesson showed Traefik's simpler approach—IngressRoute CRDs that replace Ingress annotations with structured YAML. You could route traffic in minutes.
+
+But Traefik's CRDs are Traefik-only. Switch to Envoy Gateway, and you rewrite everything. Switch to Istio, rewrite again. The Kubernetes community recognized this problem in 2020 and began designing a solution: Gateway API.
+
+Gateway API is not another proprietary alternative. It's the official Kubernetes standard for traffic routing, designed to replace Ingress entirely. In October 2023, Gateway API reached General Availability (GA). Major implementations—Envoy Gateway, Istio, Traefik, Kong—all support it. Your Gateway API configurations work across any of them.
+
+This lesson teaches the specification first. You'll understand the conceptual model before writing YAML. When you see the resources, you'll know why they exist.
+
+The Problem Gateway API Solves​
+
+Ingress created two problems that couldn't be fixed with patches:
+
+Problem 1: Annotation chaos. Every feature beyond basic routing required vendor-specific annotations. Rate limiting in NGINX Ingress used different syntax than Traefik Ingress, which differed from Kong Ingress. Switching vendors meant rewriting every configuration.
+
+Problem 2: No role separation. In production, different teams own different responsibilities. The platform team manages infrastructure. The security team manages TLS policies. Application developers define routes. Ingress forced everyone to edit the same resource. A developer adding a route could accidentally modify TLS configuration.
+
+Gateway API solves both problems with a new architecture: three tiers of resources, each owned by different personas.
+
+The Three-Tier Resource Model​
+
+Gateway API organizes traffic configuration into three resource types, each at a different scope and owned by different personas.
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TIER 1: INFRASTRUCTURE                                │
+│                    Owner: Cluster Administrator                          │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ GatewayClass                                                       │  │
+│  │   - Cluster-scoped (applies to entire cluster)                     │  │
+│  │   - Defines WHICH CONTROLLER implements Gateways                   │  │
+│  │   - Similar to StorageClass, IngressClass                          │  │
+│  │   - Example: "eg" for Envoy Gateway, "traefik" for Traefik         │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TIER 2: PLATFORM                                      │
+│                    Owner: Platform Team                                  │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ Gateway                                                            │  │
+│  │   - Namespace-scoped                                               │  │
+│  │   - Defines ENTRY POINTS for traffic (listeners)                   │  │
+│  │   - Configures ports, protocols, TLS settings                      │  │
+│  │   - Controls which namespaces can attach routes                    │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TIER 3: APPLICATION                                   │
+│                    Owner: Application Developer                          │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ HTTPRoute / GRPCRoute / TCPRoute / TLSRoute / UDPRoute             │  │
+│  │   - Namespace-scoped                                               │  │
+│  │   - Defines ROUTING RULES (paths, headers, backends)               │  │
+│  │   - Attaches to a Gateway via parentRefs                           │  │
+│  │   - Points to backend Services                                     │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+This separation enables RBAC at the resource level. Cluster administrators create GatewayClasses. Platform teams create Gateways. Application developers create Routes. Each team has permissions for their tier only.
+
+GatewayClass: Infrastructure Definition​
+
+GatewayClass is the top of the hierarchy. It defines which controller handles Gateways that reference it.
+
+Think of GatewayClass like StorageClass for persistent volumes:
+
+StorageClass defines which storage provisioner creates PersistentVolumes
+GatewayClass defines which traffic controller implements Gateways
+
+GatewayClass is cluster-scoped—it applies to the entire cluster, not a single namespace.
+
+GatewayClass Resource​
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+
+Output:
+
+gatewayclass.gateway.networking.k8s.io/eg created
+
+
+The key field is controllerName. This string tells Kubernetes which controller should reconcile Gateways using this class. Envoy Gateway uses gateway.envoyproxy.io/gatewayclass-controller. Traefik uses traefik.io/gateway-controller. Istio uses istio.io/gateway-controller.
+
+Who Creates GatewayClass?​
+
+Usually, you don't create GatewayClasses. The controller's Helm chart creates them automatically when you install it.
+
+Check existing GatewayClasses in your cluster:
+
+kubectl get gatewayclasses
+
+
+Output:
+
+NAME      CONTROLLER                                      ACCEPTED   AGE
+eg        gateway.envoyproxy.io/gatewayclass-controller   True       2d
+traefik   traefik.io/gateway-controller                   True       5d
+
+
+If you installed Envoy Gateway, the eg class exists. If you installed Traefik with Gateway API support, the traefik class exists. You choose which class to use when creating Gateways.
+
+Multiple GatewayClasses​
+
+A cluster can have multiple GatewayClasses. This enables scenarios like:
+
+GatewayClass	Use Case
+eg (Envoy Gateway)	Production traffic with advanced features
+traefik	Development/staging with simpler config
+istio	Service mesh with mutual TLS
+
+Application teams choose the appropriate class for their workload by referencing it in their Gateway.
+
+Gateway: Traffic Entry Point​
+
+Gateway defines where traffic enters the cluster. It's the specification for an actual load balancer or proxy.
+
+Gateway is namespace-scoped—it lives in a specific namespace and can be managed by the team owning that namespace.
+
+Gateway Resource​
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: task-api-gateway
+  namespace: task-api
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+
+
+Output:
+
+gateway.gateway.networking.k8s.io/task-api-gateway created
+
+Understanding Listeners​
+
+Listeners define what the Gateway accepts:
+
+Field	Purpose
+name	Identifier for this listener (referenced by Routes)
+protocol	HTTP, HTTPS, TLS, TCP, or UDP
+port	Network port to listen on
+hostname	Optional: limit to specific hostname
+
+A single Gateway can have multiple listeners:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: main-gateway
+  namespace: gateway-system
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: tls-secret
+
+
+Output:
+
+gateway.gateway.networking.k8s.io/main-gateway created
+
+
+This Gateway accepts HTTP on port 80 and HTTPS on port 443, terminating TLS with the certificate from tls-secret.
+
+Checking Gateway Status​
+
+Unlike Ingress, Gateway API provides rich status reporting:
+
+kubectl get gateway task-api-gateway -n task-api -o yaml
+
+
+Output:
+
+status:
+  addresses:
+    - type: IPAddress
+      value: 10.96.123.45
+  conditions:
+    - type: Accepted
+      status: "True"
+      reason: Accepted
+      message: Gateway accepted by controller
+    - type: Programmed
+      status: "True"
+      reason: Programmed
+      message: Gateway programmed successfully
+  listeners:
+    - name: http
+      attachedRoutes: 1
+      conditions:
+        - type: Accepted
+          status: "True"
+
+
+The status tells you:
+
+addresses: Where traffic is received (external IP or hostname)
+conditions: Whether the Gateway is accepted and programmed
+listeners: How many routes are attached to each listener
+
+Compare this to Ingress, where status was often empty or inconsistent across controllers.
+
+HTTPRoute: Application Routing​
+
+HTTPRoute defines how HTTP requests are routed to backend Services. This is the resource application developers create.
+
+HTTPRoute is namespace-scoped—developers create routes in their application's namespace.
+
+HTTPRoute Resource​
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-route
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/tasks
+      backendRefs:
+        - name: task-api
+          port: 8000
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-route created
+
+Understanding the Structure​
+Section	Purpose
+parentRefs	Which Gateway(s) this route attaches to
+rules	Routing rules (matches + backends)
+matches	Conditions that must be true (path, headers, etc.)
+backendRefs	Where to send matched requests
+Path Matching​
+
+Gateway API supports multiple path match types:
+
+matches:
+  - path:
+      type: Exact
+      value: /api/v1/tasks
+
+
+Output:
+
+(Manifest only—matches exactly /api/v1/tasks)
+
+matches:
+  - path:
+      type: PathPrefix
+      value: /api/v1
+
+
+Output:
+
+(Matches /api/v1, /api/v1/tasks, /api/v1/tasks/123)
+
+matches:
+  - path:
+      type: RegularExpression
+      value: "/api/v[0-9]+/tasks"
+
+
+Output:
+
+(Matches /api/v1/tasks, /api/v2/tasks, etc.)
+
+Header Matching​
+
+Route based on HTTP headers—something Ingress couldn't do without annotations:
+
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /api
+        headers:
+          - name: X-API-Version
+            value: "2"
+    backendRefs:
+      - name: task-api-v2
+        port: 8000
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /api
+    backendRefs:
+      - name: task-api-v1
+        port: 8000
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-route configured
+
+
+Requests with X-API-Version: 2 header go to the v2 backend. All other requests go to v1. No annotations. No vendor lock-in.
+
+Query Parameter Matching​
+
+Route based on URL query parameters:
+
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /api
+        queryParams:
+          - name: version
+            value: "beta"
+    backendRefs:
+      - name: task-api-beta
+        port: 8000
+
+
+Output:
+
+(Matches /api/tasks?version=beta)
+
+Requests with ?version=beta go to the beta backend.
+
+Checking HTTPRoute Status​
+kubectl get httproute task-api-route -n task-api -o yaml
+
+
+Output:
+
+status:
+  parents:
+    - parentRef:
+        name: task-api-gateway
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+      conditions:
+        - type: Accepted
+          status: "True"
+          reason: Accepted
+        - type: ResolvedRefs
+          status: "True"
+          reason: ResolvedRefs
+
+
+The status shows whether the route was accepted and whether its backend references were resolved.
+
+Role Separation Model​
+
+The three-tier model enables clear ownership boundaries:
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                         Role Separation                                 │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   CLUSTER ADMIN                                                         │
+│   ┌──────────────────────────────────────────────────────────────────┐ │
+│   │ Creates: GatewayClass                                             │ │
+│   │ RBAC: cluster-admin or custom role with gatewayclass permissions  │ │
+│   │ Responsibility: Which controllers are available                   │ │
+│   └──────────────────────────────────────────────────────────────────┘ │
+│                              │                                          │
+│                              ▼                                          │
+│   PLATFORM TEAM                                                         │
+│   ┌──────────────────────────────────────────────────────────────────┐ │
+│   │ Creates: Gateway                                                  │ │
+│   │ RBAC: namespace role with gateway permissions                     │ │
+│   │ Responsibility: Entry points, TLS, listener configuration        │ │
+│   └──────────────────────────────────────────────────────────────────┘ │
+│                              │                                          │
+│                              ▼                                          │
+│   APPLICATION DEVELOPER                                                 │
+│   ┌──────────────────────────────────────────────────────────────────┐ │
+│   │ Creates: HTTPRoute, GRPCRoute                                     │ │
+│   │ RBAC: namespace role with route permissions                       │ │
+│   │ Responsibility: Routing rules for their services                  │ │
+│   └──────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+└────────────────────────────────────────────────────────────────────────┘
+
+RBAC Example​
+
+Platform team RBAC allowing Gateway creation but not GatewayClass:
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-admin
+  namespace: gateway-system
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["create", "delete", "get", "list", "update", "watch"]
+
+
+Output:
+
+role.rbac.authorization.k8s.io/gateway-admin created
+
+
+Application developer RBAC allowing HTTPRoute but not Gateway:
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: route-admin
+  namespace: task-api
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create", "delete", "get", "list", "update", "watch"]
+
+
+Output:
+
+role.rbac.authorization.k8s.io/route-admin created
+
+
+Developers with route-admin can modify routing for their services but cannot touch the Gateway configuration.
+
+Comparison to Ingress​
+Aspect	Ingress	Gateway API
+Resource ownership	Single resource for all config	Three tiers with clear ownership
+RBAC granularity	All-or-nothing on Ingress	Separate permissions per tier
+TLS configuration	Mixed with routing rules	Separate in Gateway
+Who can break TLS?	Anyone with Ingress access	Only platform team with Gateway access
+Audit trail	Unclear who changed what	Clear ownership per resource
+Key Features Beyond Ingress​
+
+Gateway API includes features that Ingress could only achieve through vendor-specific annotations.
+
+Traffic Splitting​
+
+Send a percentage of traffic to different backends:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: canary-route
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+          weight: 90
+        - name: task-api-canary
+          port: 8000
+          weight: 10
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/canary-route created
+
+
+90% of traffic goes to stable, 10% to canary. No annotations. Native in the specification.
+
+Request Mirroring​
+
+Copy traffic to another backend for testing without affecting responses:
+
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /api
+    backendRefs:
+      - name: task-api
+        port: 8000
+    filters:
+      - type: RequestMirror
+        requestMirror:
+          backendRef:
+            name: task-api-shadow
+            port: 8000
+
+
+Output:
+
+(Manifest only—mirrors all requests to shadow environment)
+
+Production traffic goes to task-api. Copies go to task-api-shadow for testing. Shadow responses are discarded.
+
+URL Rewriting​
+
+Modify the URL before forwarding:
+
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /old-api
+    filters:
+      - type: URLRewrite
+        urlRewrite:
+          path:
+            type: ReplacePrefixMatch
+            replacePrefixMatch: /api/v1
+    backendRefs:
+      - name: task-api
+        port: 8000
+
+
+Output:
+
+(Requests to /old-api/tasks become /api/v1/tasks)
+
+Request Header Modification​
+
+Add or remove headers:
+
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /api
+    filters:
+      - type: RequestHeaderModifier
+        requestHeaderModifier:
+          add:
+            - name: X-Forwarded-By
+              value: gateway-api
+          remove:
+            - X-Internal-Header
+    backendRefs:
+      - name: task-api
+        port: 8000
+
+
+Output:
+
+(Adds X-Forwarded-By header, removes X-Internal-Header)
+
+Feature Comparison Table​
+Feature	Ingress	Gateway API
+Path-based routing	Yes	Yes
+Host-based routing	Yes	Yes
+Header-based routing	Annotation-dependent	Native
+Query parameter routing	Annotation-dependent	Native
+Traffic splitting	Annotation-dependent	Native
+Request mirroring	Annotation-dependent	Native
+URL rewriting	Annotation-dependent	Native
+Header modification	Annotation-dependent	Native
+gRPC support	No	GRPCRoute
+TCP/UDP support	No	TCPRoute, UDPRoute
+Status reporting	Minimal	Rich conditions
+Cross-Namespace Routing with ReferenceGrant​
+
+By default, HTTPRoute can only reference Services in the same namespace. To reference Services in other namespaces, you need a ReferenceGrant.
+
+Why This Matters​
+
+Imagine a shared database service in the databases namespace. Application teams in task-api namespace want to route to it. Without ReferenceGrant, this fails—the route cannot cross namespace boundaries.
+
+ReferenceGrant allows the databases namespace to grant access:
+
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-task-api-routes
+  namespace: databases
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: task-api
+  to:
+    - group: ""
+      kind: Service
+
+
+Output:
+
+referencegrant.gateway.networking.k8s.io/allow-task-api-routes created
+
+
+Now HTTPRoutes in task-api namespace can reference Services in databases namespace.
+
+Security Model​
+
+ReferenceGrant implements the "trust on the server side" pattern:
+
+The target namespace grants access (databases grants to task-api)
+The source namespace cannot unilaterally access other namespaces
+Owners of shared resources control who can reference them
+Reference Implementations​
+
+Gateway API is a specification. Multiple controllers implement it:
+
+Implementation	Maintainer	Notes
+Envoy Gateway	CNCF	Pure Gateway API focus, our choice for this chapter
+Istio	Google/CNCF	Service mesh with Gateway API support
+Traefik	Traefik Labs	Supports both Traefik CRDs and Gateway API
+Kong Gateway	Kong	API gateway with Gateway API support
+Contour	VMware	Envoy-based with Gateway API support
+NGINX Gateway Fabric	F5/NGINX	NGINX-based Gateway API
+Choosing Envoy Gateway​
+
+We use Envoy Gateway for this chapter because:
+
+Pure Gateway API focus—built specifically for Gateway API, not retrofitted
+CNCF project—vendor-neutral, community-driven
+Envoy-based—same proxy powering Istio, production-proven
+Policy CRDs—BackendTrafficPolicy, SecurityPolicy for advanced features
+Active development—rapid feature iteration
+
+The next lesson covers Envoy Gateway installation and architecture.
+
+Exercises​
+Exercise 1: Read the Gateway API Specification​
+
+Visit the official Gateway API documentation at gateway-api.sigs.k8s.io.
+
+Find answers to:
+
+What's the current stable version of Gateway API?
+Which route types are in the Standard channel (stable)?
+Which route types are in the Experimental channel?
+
+Expected findings:
+
+Standard: Gateway, GatewayClass, HTTPRoute, ReferenceGrant
+Experimental: GRPCRoute, TCPRoute, TLSRoute, UDPRoute
+Exercise 2: Write GatewayClass YAML​
+
+Create a GatewayClass for Envoy Gateway controller:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: my-envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+
+Questions:
+
+Is GatewayClass namespace-scoped or cluster-scoped?
+Would you apply this yourself, or let the Helm chart handle it?
+
+Answers:
+
+Cluster-scoped (no namespace in metadata)
+Typically let Helm chart create it during installation
+Exercise 3: Write Gateway YAML​
+
+Create a Gateway with HTTP listener on port 80:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: practice-gateway
+  namespace: default
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+
+
+Validate syntax (if you have a cluster):
+
+kubectl apply --dry-run=client -f gateway.yaml
+
+
+Output:
+
+gateway.gateway.networking.k8s.io/practice-gateway created (dry run)
+
+Exercise 4: Write HTTPRoute YAML​
+
+Create an HTTPRoute for Task API:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-route
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+      namespace: task-api
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: task-api
+          port: 8000
+
+
+Validate syntax:
+
+kubectl apply --dry-run=client -f httproute.yaml
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-route created (dry run)
+
+Exercise 5: Map Resources to Teams​
+
+For each resource, identify which team should own it:
+
+Resource	Team	Why?
+GatewayClass eg		
+Gateway main-gateway		
+HTTPRoute task-api-route		
+ReferenceGrant allow-cross-ns		
+
+Answers:
+
+GatewayClass: Cluster Admin (infrastructure-level)
+Gateway: Platform Team (entry point configuration)
+HTTPRoute: Application Developer (routing for their service)
+ReferenceGrant: Owner of target namespace (grants access to their resources)
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about Gateway API:
+
+Add Gateway API Pattern Generation​
+
+Your skill should now include templates for:
+
+GatewayClass (rarely needed—check if it exists first)
+Gateway with configurable listeners (HTTP, HTTPS)
+HTTPRoute with path, header, and query parameter matching
+ReferenceGrant for cross-namespace routing
+
+What's the minimum valid configuration your skill should generate?
+
+# Minimum: Gateway + HTTPRoute
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ service }}-gateway
+  namespace: {{ namespace }}
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ service }}-route
+  namespace: {{ namespace }}
+spec:
+  parentRefs:
+    - name: {{ service }}-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ service }}
+          port: {{ port }}
+
+Handle Role Separation​
+
+How should your skill handle the role separation model when generating resources?
+
+Decision logic to encode:
+
+Scenario	Generate
+Single developer, local cluster	Gateway + HTTPRoute (same namespace)
+Team environment, shared gateway	HTTPRoute only (attach to existing Gateway)
+Platform team setup	Gateway in gateway-system namespace
+Cross-namespace routing needed	Include ReferenceGrant template
+
+Your skill should ask about the deployment context before generating resources.
+
+Try With AI​
+
+This lesson marks the transition from manual learning to AI collaboration. Use your traffic-engineer skill to explore Gateway API concepts.
+
+Generate Gateway Resources​
+
+Ask your traffic-engineer skill to generate Gateway API configuration:
+
+Using my traffic-engineer skill, generate Gateway API configuration for my Task API:
+
+- Namespace: task-api
+- Service name: task-api
+- Port: 8000
+- Path prefix: /api/
+
+Include both Gateway and HTTPRoute resources.
+
+
+What you're learning: AI generates complete Gateway API configurations. Review the output—does it include the correct GatewayClass reference? Is the HTTPRoute properly attached to the Gateway via parentRefs?
+
+Evaluate and Refine​
+
+Check AI's output against what you learned:
+
+Is the GatewayClass eg (Envoy Gateway's default)?
+Does the HTTPRoute reference the Gateway by name?
+Is the backend port correct (8000)?
+
+If something is missing or incorrect, provide feedback:
+
+The HTTPRoute needs to specify the namespace for the backend service.
+Also, add hostnames to the Gateway listener for production use.
+
+Explore Role Separation​
+
+Ask about multi-team scenarios:
+
+I work on a platform team managing shared infrastructure. Generate a
+Gateway configuration that:
+
+- Gateway lives in gateway-system namespace
+- Application teams deploy HTTPRoutes in their own namespaces
+- Include the ReferenceGrant needed for cross-namespace routing
+
+Show me the resources for the platform team and for the task-api team separately.
+
+
+What you're learning: AI adapts configurations to different organizational models. Verify the ReferenceGrant correctly allows the task-api namespace to reference the Gateway in gateway-system.
+
+Safety Note​
+
+When generating Gateway API resources, verify the GatewayClass exists in your cluster before applying. Different Gateway controllers (Envoy Gateway, Istio, Traefik) use different GatewayClass names. Always run kubectl get gatewayclass first to see what's available.

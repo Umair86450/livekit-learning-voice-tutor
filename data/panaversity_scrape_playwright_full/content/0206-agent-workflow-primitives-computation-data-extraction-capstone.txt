@@ -1,0 +1,318 @@
+Capstone: Tax Season Prep
+
+Six tools, five lessons of verification habits, one question: can you orchestrate them into a workflow that runs every year?
+
+You have a library of Unix-styled Python commands in ~/tools, a verification habit that won't let you submit numbers you haven't proved, and 12 months of bank CSVs sitting in ~/finances/2025/. Now put them together.
+
+NO BANK CSV YET? START HERE.
+
+Ask Claude Code to generate realistic test data before doing anything else:
+
+Generate a bank statement CSV with 20 transactions.
+Include: CVS PHARMACY ($45.67), WALGREENS ($23.45), DR MARTINEZ MEDICAL ($150.00),
+DR PEPPER SNAPPLE ($4.99), UNITED WAY DONATION ($100.00), OFFICE DEPOT ($89.50),
+CVSMITH CONSULTING ($200.00), and 13 random transactions.
+Use columns: Date, Description, Amount (negative for debits).
+Save as ~/finances/test-2025.csv.
+
+
+Calculate expected totals by hand BEFORE running anything:
+
+Medical (CVS + WALGREENS + DR MARTINEZ): $219.12
+Charitable (UNITED WAY): $100.00
+Business (OFFICE DEPOT): $89.50
+POTENTIAL DEDUCTIONS: $408.62
+
+Those hand-calculated numbers are your verification baseline.
+
+Step 1: Take Inventory​
+
+You have a library of tools in ~/tools:
+
+Tool	What It Does	Built In
+sum.py	Sums decimal numbers from stdin	Lesson 1
+sum-expenses.py	Extracts and sums the Amount column from bank CSVs	Lesson 3
+extract-column.py	Pulls one column from any CSV	Lesson 4
+filter.py	Keeps numbers matching a condition	Lesson 4
+stats.py	Prints sum, count, average, min, max	Lesson 4
+tax-categorize.py	Categorizes transactions, prints subtotals by category	Lesson 5
+
+What's missing: a tax-prep command that adds a POTENTIAL DEDUCTIONS total and runs from any folder without typing python3 ~/tools/....
+
+Step 2: Build tax-prep​
+
+Open Claude Code:
+
+You: I have tax-categorize.py in ~/tools. It categorizes bank transactions and
+prints subtotals by Medical, Charitable, and Business categories.
+
+I want a tax-prep command I can run like this:
+    cat ~/finances/2025/*.csv | tax-prep
+
+It should do everything tax-categorize.py does, plus print a
+POTENTIAL DEDUCTIONS total at the end (the sum of all category subtotals).
+
+Claude Code: I'll update tax-categorize.py to include the final total,
+then install it as a permanent tax-prep command.
+
+[Updates: ~/tools/tax-categorize.py — adds POTENTIAL DEDUCTIONS sum]
+
+#!/usr/bin/env python3
+import sys, csv, re
+
+CATEGORIES = {
+    'medical': [r'\bCVS\b', r'\bWALGREENS\b', r'\bPHARMACY\b', r'\bMEDICAL\b'],
+    'charitable': [r'\bDONATION\b', r'\bRED CROSS\b', r'\bUNITED WAY\b'],
+    'business': [r'\bOFFICE DEPOT\b', r'\bSTAPLES\b', r'\bSUBSCRIPTION\b'],
+}
+FALSE_POSITIVES = [r'\bDR\.?\s*PEPPER\b', r'\bCVSMITH\b']
+
+def categorize(description):
+    desc_upper = description.upper()
+    for fp_pattern in FALSE_POSITIVES:
+        if re.search(fp_pattern, desc_upper, re.IGNORECASE):
+            return None
+    for category, patterns in CATEGORIES.items():
+        for pattern in patterns:
+            if re.search(pattern, desc_upper, re.IGNORECASE):
+                return category
+    return None
+
+reader = csv.DictReader(sys.stdin)
+totals = {}
+items = {}
+for row in reader:
+    amount = float(row['Amount'].replace('$', '').replace(',', ''))
+    if amount >= 0:  # Skip credits/refunds — only process debits
+        continue
+    cat = categorize(row['Description'])
+    if cat:
+        expense = abs(amount)
+        totals.setdefault(cat, 0.0)
+        items.setdefault(cat, [])
+        totals[cat] += expense
+        items[cat].append((row['Description'], expense))
+
+for cat, entries in items.items():
+    for desc, amount in entries:
+        print(f"{cat.upper()}: {desc}: ${amount:.2f}")
+
+print("\n--- TOTALS ---")
+potential_deductions = 0.0
+for cat, total in totals.items():
+    print(f"{cat.title()}: ${total:.2f}")
+    potential_deductions += total
+
+print(f"\nPOTENTIAL DEDUCTIONS: ${potential_deductions:.2f}")
+
+[Runs: chmod +x ~/tools/tax-categorize.py]
+[Checks: echo $SHELL → /bin/zsh]
+[Appends to ~/.zshrc:]
+alias tax-prep='python3 ~/tools/tax-categorize.py'
+[Runs: source ~/.zshrc]
+
+Done. Try it:
+cat ~/finances/test-2025.csv | tax-prep
+
+Step 3: Verify Before Touching Real Data​
+
+Run it on your test data (or the generated test file from the tip above):
+
+cat ~/finances/test-2025.csv | tax-prep
+
+
+Expected output:
+
+MEDICAL: CVS/PHARMACY #1234: $45.67
+MEDICAL: WALGREENS #5678: $23.45
+MEDICAL: DR MARTINEZ MEDICAL: $150.00
+CHARITABLE: UNITED WAY: $100.00
+BUSINESS: OFFICE DEPOT #901: $89.50
+
+--- TOTALS ---
+Medical: $219.12
+Charitable: $100.00
+Business: $89.50
+
+POTENTIAL DEDUCTIONS: $408.62
+
+
+DR PEPPER SNAPPLE and CVSMITH CONSULTING are absent. The totals match your hand calculations. Now you can trust it on real data.
+
+CHECKPOINT: PROVE TAX-PREP IS PERMANENT
+Close your terminal completely
+Open a brand new terminal
+Navigate to any folder: cd ~/Desktop
+Run: cat ~/finances/test-2025.csv | tax-prep
+
+If you see the report (your command is installed. If you see "command not found") check your ~/.zshrc alias.
+
+Step 4: Process a Full Year​
+
+Your bank exports one CSV per month. By year's end, you'll have twelve files. If you cat *.csv to combine them, every file's header row: Date,Description,Amount: ends up mixed into the data. Your script sees the header eleven times where it expects numbers.
+
+The fix uses two commands you already know from the File Processing chapter:
+
+# Header from first file only
+head -1 ~/finances/2025/january.csv > ~/finances/combined-2025.csv
+
+# Data rows from ALL files (skip each file's header)
+tail -n +2 -q ~/finances/2025/*.csv >> ~/finances/combined-2025.csv
+
+# Now process the clean combined file
+cat ~/finances/combined-2025.csv | tax-prep
+
+Command	What It Does
+head -1	First line only (the header row)
+tail -n +2	Everything from line 2 onward (skips header)
+-q	Quiet mode: no filename prefixes in output
+>>	Append (don't overwrite)
+
+Result: one file, one header row, all data rows.
+
+For multiple monthly statements, you can also skip the intermediate file entirely:
+
+# Combine 12 months into one file (single header, all data rows)
+head -1 ~/finances/2025/january.csv > ~/finances/combined-2025.csv
+tail -n +2 -q ~/finances/2025/*.csv >> ~/finances/combined-2025.csv
+
+# Run tax-prep on the full year
+cat ~/finances/combined-2025.csv | tax-prep
+
+
+Or skip the intermediate file entirely:
+
+# Direct pipeline — no temp file needed
+cat ~/finances/2025/*.csv | grep -v "^Date" | \
+  { echo "Date,Description,Amount"; cat; } | tax-prep
+
+
+The command from the README works exactly as promised.
+
+What Just Happened?​
+
+Remember the Seven Principles from the Seven Principles chapter? You just used all of them in one workflow, without a checklist, without thinking about it. That is the point. Principles are not rules you consult. They are habits you act on.
+
+Principle	Where It Appeared
+Bash is the Key	cat, head, tail, pipes orchestrated all data flow
+Code as Universal Interface	Python scripts executed computation: no hallucinated math
+Verification as Core Step	Test data with hand-calculated totals BEFORE real files
+Small, Reversible Decomposition	Composable single-purpose tools (L4), each testable independently
+Persisting State in Files	Scripts in ~/tools, report saved to a file
+Constraints and Safety	False positive guards prevented miscategorized deductions
+Observability	Every transaction printed before the totals section
+WHEN THINGS BREAK: QUICK DIAGNOSTIC CHAIN
+
+Six months from now, something will stop working. Maybe you updated your shell, maybe Python changed versions, maybe you moved to a new machine. Here's what to check:
+
+# 1. Does the alias exist?
+alias tax-prep
+# If "not found" → re-add to ~/.zshrc (or ~/.bashrc), then source
+
+# 2. Does the script exist where the alias points?
+ls -la ~/tools/tax-categorize.py
+# If "not found" → script was moved or deleted
+
+# 3. Can the script run?
+python3 ~/tools/tax-categorize.py <<< "Date,Description,Amount"
+# If error → Python version mismatch or missing shebang
+
+Symptom	Check	Fix
+"command not found"	alias tax-prep	Re-add alias to shell config, then source
+"No such file"	ls ~/tools/tax-categorize.py	Script was moved: update the alias path
+"Permission denied"	ls -la ~/tools/tax-categorize.py	Re-run chmod +x ~/tools/tax-categorize.py
+Script errors on run	python3 --version	Python version changed: check shebang line
+
+Setup is the agent's job. Diagnosis is yours: because when it breaks at 11pm before a deadline, you need to know the three places to look.
+
+The Victory​
+
+Before this chapter, Bash couldn't add decimals and you had no way to catch silent bugs in agent-generated code. Now you have a library of verified Unix-styled Python commands, a verification habit that applies to any domain, and the instinct to catch the agent's mistakes before they become yours. Tax prep was the exercise. The skill is the workflow.
+
+Challenge: Prove It Transfers (30 Minutes)​
+
+You've run the tax prep workflow on financial data. Lesson 5 proved it works on server logs. Now prove you can do it from scratch on a domain neither lesson covered: no walkthrough, just the goal.
+
+Save this as ~/grades/midterm-2025.csv:
+
+Student,Assignment,Score,Max_Points,Category
+Alice,Homework 1,85,100,homework
+Bob,Homework 1,92,100,homework
+Alice,Quiz 1,18,20,quiz
+Bob,Quiz 1,15,20,quiz
+Charlie,Homework 1,0,100,homework
+Alice,Midterm,78,100,exam
+Bob,Midterm,88,100,exam
+Charlie,Quiz 1,19,20,quiz
+DR CHARLES,Homework 1,95,100,homework
+Alice,EXTRA CREDIT,5,0,bonus
+Charlie,Midterm,72,100,exam
+DR CHARLES,Quiz 1,20,20,quiz
+
+
+Your task:
+
+Calculate each student's weighted average (homework 30%, quizzes 20%, exams 50%)
+Handle the edge cases: DR CHARLES is a student named Charles, not a "DR" prefix to filter. EXTRA CREDIT has Max_Points=0: division by zero trap. Charlie has a 0/100 homework
+Flag students with any single score below 60%
+Produce a grade report with per-student averages and an AT-RISK section
+
+Hand-calculate first:
+
+Student	Homework	Quiz	Exam	Weighted Avg
+Alice	85%	90%	78%	82.5%
+Bob	92%	75%	88%	86.6%
+Charlie	0%	95%	72%	55.0%
+DR CHARLES	95%	100%	:	(no exam)
+
+Edge cases to handle: Charlie has a 0/100 homework (that's your at-risk flag. EXTRA CREDIT has Max_Points=0) your script crashes or silently produces infinity unless you handle it. DR CHARLES is a student named Charles, not a "DR" prefix to filter.
+
+If your report handles all three edge cases, the pattern transferred. You didn't need bank statements or server logs. You needed the workflow.
+
+Reflection: What You Actually Learned​
+
+The agent wrote all the code. You made all the decisions that mattered.
+
+What It Looked Like	What You Actually Learned
+Building sum.py and decomposing into tools	Designing Unix-style architectures where each piece is independently testable
+Testing with known data, spotting Dr. Pepper	Trusting nothing until you've verified it, and finding bugs in output that looks correct
+CSV parsing, redirecting the agent from awk	Redirecting an agent when its first approach fails: your domain knowledge steers the fix
+Writing the prompts	Specifying outcomes and interfaces: the one contribution the agent cannot make for itself
+
+The specific tools (Python, regex, find/xargs) will change. The patterns: verify first, compose through pipes, guard against false positives: will not.
+
+Flashcards Study Aid​
+Try With AI​
+Prompt 1: Add a NEEDS REVIEW Section​
+My tax-prep command categorizes transactions correctly. But some
+transactions don't match any category — they're just silently ignored.
+
+Modify it to print a NEEDS REVIEW section at the end listing all
+uncategorized transactions with amounts, so I can review them manually.
+
+
+What you're learning: A director decision disguised as a feature request. You're telling the agent the tool must make its own uncertainty visible rather than silently ignore it. "Print what you couldn't categorize" is not an implementation detail; it's a design principle you imposed. The agent wired the NEEDS REVIEW output; you decided that discarding uncategorized data silently was unacceptable. That call was yours.
+
+Prompt 2: Add Date Filtering​
+My tax-prep processes all transactions in the CSV. For quarterly
+estimates, I need to filter by date range:
+
+    cat finances.csv | tax-prep --start 2025-01-01 --end 2025-03-31
+
+Add date filtering. Keep the stdin reading pattern so it still works
+with pipes and cat.
+
+
+What you're learning: Interface-first directing. Notice the prompt specifies exactly what the command should look like from the outside (tax-prep --start 2025-01-01 --end 2025-03-31) before mentioning implementation. You designed the interface; the agent wired argparse to match it. This is the same move as "reads from stdin and prints the total" in Lesson 1: you specify the contract, the agent writes the code that fulfills it.
+
+Prompt 3: Transfer to Your Domain​
+I work with [your domain] data in CSV format. The data has
+[describe columns]. I need to categorize it by [your categories]
+and flag items that don't cleanly fit.
+
+Apply the verification-first pattern: create test data with known
+answers first, verify totals match before processing real files,
+then build a permanent command I can reuse.
+
+
+What you're learning: Full pattern transfer. You're applying the verification-first orchestration to a domain you actually work in. Notice which parts of the pattern carry over unchanged (verify first, flag ambiguous items, make it permanent) and which require domain-specific knowledge (your categories, your false positives).

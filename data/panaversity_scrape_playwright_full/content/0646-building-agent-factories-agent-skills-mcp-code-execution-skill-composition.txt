@@ -1,0 +1,323 @@
+Skill Composition & Multi-Skill Workflows
+
+You've created individual skills in Lesson 1. Each skill has its SKILL.md with name and description, optional scripts, references, and assets. But real-world tasks rarely fit a single skill.
+
+Consider this scenario: A developer asks Claude to "review this PR and create a summary for the team meeting." Two distinct capabilities are needed:
+
+Code review (analyze changes, identify issues)
+Meeting summary (format findings for presentation)
+
+These could be one large skill, but that violates the single-responsibility principle. Better: two complementary skills that Claude invokes in sequence based on the task.
+
+This lesson explores how skills work together—not through formal dependency declarations, but through intelligent orchestration and thoughtful design.
+
+How Claude Orchestrates Multiple Skills​
+
+Skills don't formally depend on each other. Instead, Claude is the orchestrator. When you give Claude a complex task, it:
+
+Reads available skill descriptions (the description: in each SKILL.md frontmatter)
+Matches task requirements to skill capabilities
+Invokes skills in appropriate sequence
+Uses output from one skill as context for the next
+┌─────────────────────────────────────────┐
+│              Claude (Orchestrator)       │
+│                                          │
+│  Task: "Review PR and summarize"         │
+│                                          │
+│  1. Reads skill descriptions             │
+│  2. Matches: code-review + meeting-notes │
+│  3. Invokes code-review skill            │
+│  4. Uses review output as context        │
+│  5. Invokes meeting-notes skill          │
+│  6. Returns combined result              │
+└─────────────────────────────────────────┘
+         │                    │
+         ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐
+│  code-review/   │  │  meeting-notes/ │
+│  SKILL.md       │  │  SKILL.md       │
+│  references/    │  │  assets/        │
+└─────────────────┘  └─────────────────┘
+
+
+Key insight: Skills are independent units. Claude connects them based on task context. There's no formal dependencies: section—the orchestration happens at runtime based on what the task needs.
+
+The Skill Description Is Your Contract​
+
+Since Claude selects skills based on descriptions, your description is your API. Good descriptions make composition work; vague descriptions cause skill selection failures.
+
+Description Anti-Patterns​
+# BAD: Too vague
+name: helper-skill
+description: This skill helps with various tasks.
+
+# BAD: Too narrow
+name: python-formatter
+description: Formats Python code using black with 88-char lines.
+
+# BAD: Overlapping with other skills
+name: code-analyzer
+description: Reviews code for issues and problems.
+# (Overlaps with code-review skill)
+
+Description Patterns That Enable Composition​
+# GOOD: Clear capability, clear trigger
+name: code-review
+description: |
+  Analyzes code changes for issues, security vulnerabilities, and style violations.
+  Use this skill when reviewing pull requests, examining diffs, or auditing code quality.
+  Returns structured findings with severity levels and suggested fixes.
+
+# GOOD: Complementary to code-review
+name: meeting-notes
+description: |
+  Formats technical findings into concise meeting summaries.
+  Use this skill when preparing updates for standups, sprint reviews, or team syncs.
+  Takes detailed analysis and produces bullet-point summaries appropriate for non-technical audiences.
+
+
+With these descriptions, when a user says "review this PR and prepare notes for the team meeting," Claude knows:
+
+code-review handles the analysis phase
+meeting-notes handles the formatting phase
+The output of code-review feeds into meeting-notes
+Designing Complementary Skills​
+
+Complementary skills are designed to work together without formal dependencies. They complement each other through:
+
+Pattern 1: Output → Input Flow​
+
+One skill produces output that naturally feeds another skill's input.
+
+┌─────────────────────┐     ┌─────────────────────┐
+│   data-fetcher      │────▶│   data-analyzer     │
+│                     │     │                     │
+│ Output: Raw data    │     │ Input: Expects data │
+│ in JSON format      │     │ in JSON format      │
+└─────────────────────┘     └─────────────────────┘
+
+
+The skills don't reference each other. They're designed with compatible interfaces—data-fetcher outputs JSON, data-analyzer expects JSON. Claude connects them when the task requires both.
+
+Pattern 2: Shared Domain Knowledge​
+
+Multiple skills reference the same domain documentation.
+
+your-skills/
+├── company-api/
+│   ├── SKILL.md
+│   └── references/
+│       └── api-schema.md        ← Shared reference
+│
+├── api-tester/
+│   ├── SKILL.md
+│   └── references/
+│       └── api-schema.md        ← Same schema
+│
+└── api-docs-generator/
+    ├── SKILL.md
+    └── references/
+        └── api-schema.md        ← Same schema
+
+
+Each skill has its own copy of the schema. When the schema changes, you update all copies. This is intentional—skills remain self-contained and portable.
+
+Pattern 3: Progressive Refinement​
+
+Skills build on each other's work without formal chaining.
+
+# Skill 1: draft-generator
+name: draft-generator
+description: |
+  Creates initial drafts from requirements or specifications.
+  Output is a working first draft that may need refinement.
+
+# Skill 2: content-refiner
+name: content-refiner
+description: |
+  Improves existing content for clarity, accuracy, and style.
+  Takes rough drafts and produces polished versions.
+
+# Skill 3: technical-reviewer
+name: technical-reviewer
+description: |
+  Reviews content for technical accuracy and completeness.
+  Identifies errors, gaps, and improvements needed.
+
+
+A user could invoke these as: "Draft a blog post about our new feature, refine it, then review for technical accuracy." Claude orchestrates all three in sequence.
+
+Bundled Resources in Multi-Skill Contexts​
+
+Each skill can have bundled resources:
+
+skill-name/
+├── SKILL.md
+├── scripts/          # Executable code
+├── references/       # Documentation loaded on demand
+└── assets/           # Files used in output
+
+When to Share vs. Duplicate Resources​
+
+Duplicate when: The resource is small and the skill needs to be portable.
+
+# Each skill has its own copy
+code-review/
+└── references/
+    └── style-guide.md
+
+code-formatter/
+└── references/
+    └── style-guide.md
+
+
+Consider central reference when: Multiple skills need identical large resources and you control the deployment.
+
+# Central knowledge base that skills reference
+company-knowledge/
+├── schemas/
+├── policies/
+└── guidelines/
+
+# Skills point to central location in their instructions
+code-review/
+└── SKILL.md  # Instructions: "See company-knowledge/policies/ for guidelines"
+
+
+Trade-off: Central references reduce duplication but make skills less portable. Duplicated resources increase maintenance but skills remain self-contained.
+
+Real-World Composition Example​
+
+Let's trace through a realistic multi-skill workflow:
+
+User request: "Set up a new Python project with testing, then generate API documentation"
+
+Skills available:
+
+python-project-setup - Initializes Python projects with standard structure
+test-framework-config - Configures pytest with fixtures and coverage
+api-docs-generator - Creates OpenAPI documentation from code
+
+Claude's orchestration:
+
+Reads skill descriptions, identifies three relevant skills
+Invokes python-project-setup:
+Creates project structure
+Returns: Directory layout, pyproject.toml created
+Uses setup output as context, invokes test-framework-config:
+Reads existing pyproject.toml
+Adds pytest configuration
+Returns: Test structure, conftest.py created
+Uses project context, invokes api-docs-generator:
+Scans for API endpoints
+Generates OpenAPI spec
+Returns: docs/openapi.yaml created
+
+Each skill operates independently. Claude maintains context between invocations. No skill formally depends on another—they're connected by the orchestrator based on task requirements.
+
+Error Handling in Multi-Skill Workflows​
+
+When a skill fails mid-workflow, Claude decides how to proceed:
+
+Scenario: data-fetcher fails with network error
+
+Claude's options:
+
+Retry - Attempt the skill again
+Skip - Continue without that skill's output (if possible)
+Halt - Stop the workflow and report the failure
+Adapt - Use a different skill or approach
+
+The orchestrator (Claude) makes this decision based on:
+
+Task requirements (is the failed skill critical?)
+Skill descriptions (is there an alternative?)
+User context (what did they actually need?)
+
+This is different from traditional dependency systems where failures propagate automatically. Here, intelligence guides recovery.
+
+Hands-On Exercise: Design Complementary Skills​
+
+Design two complementary skills for a content workflow:
+
+Task: Help users write and publish blog posts
+
+Skill 1: blog-draft-writer
+
+What does it do?
+What output format does it produce?
+When should Claude invoke it?
+
+Skill 2: blog-publisher
+
+What does it do?
+What input does it expect?
+When should Claude invoke it?
+
+Write the SKILL.md frontmatter for each:
+
+---
+name: blog-draft-writer
+description: |
+  [Your description here - make it clear when this skill applies]
+---
+
+---
+name: blog-publisher
+description: |
+  [Your description here - make it complementary to the draft writer]
+---
+
+
+Test your design: Would Claude correctly invoke both skills if a user said "Write a blog post about our product launch and publish it to our website"?
+
+Try With AI: Collaborative Skill Ecosystem Design​
+Prompt 1: Analyze Skill Descriptions​
+I have these two skills:
+
+Skill 1 - code-analyzer:
+"Analyzes code for bugs and security issues"
+
+Skill 2 - code-fixer:
+"Fixes code issues and applies patches"
+
+A user says: "Review my code and fix any problems you find."
+
+How would you orchestrate these skills? What's missing from the
+descriptions that might cause problems?
+
+
+What you're learning: How description clarity affects skill selection and composition.
+
+Prompt 2: Design a Three-Skill Workflow​
+I need to build skills for this workflow:
+1. Research a topic (find relevant sources)
+2. Synthesize findings (combine into coherent analysis)
+3. Format for presentation (create slides or document)
+
+Design the SKILL.md frontmatter (name + description) for each skill.
+Make sure the descriptions clearly indicate when each should be invoked
+and what output format each produces.
+
+
+What you're learning: Designing skill descriptions that enable natural composition.
+
+Prompt 3: Troubleshoot Composition Failure​
+My skills aren't being invoked correctly. When I say "analyze this data
+and create a report," Claude only invokes the report-creator skill and
+skips the data-analyzer.
+
+Here are my skill descriptions:
+
+data-analyzer: "Analyzes data"
+report-creator: "Creates reports from data analysis"
+
+Why might Claude skip the data-analyzer? How should I fix these
+descriptions?
+
+
+What you're learning: Debugging skill selection by improving descriptions.
+
+Takeaway: Skill composition happens through intelligent orchestration, not formal dependencies. Claude reads descriptions, matches capabilities to tasks, and invokes skills in appropriate sequence. Your job is designing skills with clear descriptions and compatible interfaces so the orchestrator can connect them effectively.
+
+In Lesson 3, you'll explore existing skills like fetching-library-docs to see these patterns in action and understand what makes production skills robust.

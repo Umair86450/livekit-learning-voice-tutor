@@ -1,0 +1,391 @@
+Memory Architecture Patterns
+
+When we designed the first personal computers, we looked to the human brain for inspiration. Working memory, long-term storage, recall mechanisms—these cognitive science concepts shaped computer architecture. The same is happening now with AI agents.
+
+Effective agent memory isn't one thing—it's a system of specialized memory types, each serving a different purpose. Understanding these types helps you design agents that remember the right things in the right ways.
+
+This lesson introduces five memory types and shows how they work together. We'll also look at how systems like Letta (formerly MemGPT) implement a two-tier architecture that mirrors how the brain handles in-focus vs. background information.
+
+Five Types of Agent Memory​
+
+Cognitive science distinguishes several memory systems in the human brain. Agent systems have parallel concepts:
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│                            AGENT MEMORY SYSTEM                              │
+├────────────────┬─────────────────┬─────────────────────────────────────────┤
+│  Conversation  │    Working      │            Long-term                    │
+│    Memory      │    Memory       │             Memory                      │
+│                │                 │                                         │
+│  Recent        │  Current task   │  ┌─────────────────────────────────┐   │
+│  messages      │  context        │  │     Episodic Memory             │   │
+│                │                 │  │     (specific events)           │   │
+│  Sliding       │  Active goal    │  ├─────────────────────────────────┤   │
+│  window        │  + state        │  │     Semantic Memory             │   │
+│                │                 │  │     (facts & entities)          │   │
+│  Volatile      │  Task-scoped    │  └─────────────────────────────────┘   │
+│  (session)     │  (cleared)      │         Persistent                      │
+└────────────────┴─────────────────┴─────────────────────────────────────────┘
+
+1. Conversation Memory (Short-term)​
+
+What it is: The immediate context of the current conversation—recent messages between user and agent.
+
+Human analogy: Working memory in a conversation. You remember what was just said, but after a day you might forget the exact wording.
+
+Characteristics:
+
+Ephemeral: exists only during active session
+Typically a sliding window of recent turns
+Automatically included in LLM context
+Lost when session ends
+
+Example:
+
+Conversation Memory (last 5 turns):
+1. User: "Add 'Review PR #123' to my tasks"
+2. Agent: "Added 'Review PR #123' with normal priority"
+3. User: "Make it high priority"
+4. Agent: "Updated to high priority"
+5. User: "When is it due?"
+
+
+Best for: Maintaining coherence within a single conversation session.
+
+2. Working Memory​
+
+What it is: Active context about the current task being performed—goals, intermediate results, and state.
+
+Human analogy: The mental workspace when solving a problem. You hold relevant pieces in mind while working.
+
+Characteristics:
+
+Task-scoped: exists for duration of a task
+Cleared when task completes
+Holds current goal and progress
+More structured than conversation memory
+
+Example:
+
+Working Memory (current task):
+{
+  "goal": "Create weekly status report",
+  "status": "in_progress",
+  "steps_completed": [
+    "Gathered task completions from last week",
+    "Identified blockers"
+  ],
+  "current_step": "Drafting summary",
+  "context": {
+    "report_format": "bullet_points",
+    "audience": "engineering_team"
+  }
+}
+
+
+Best for: Multi-step tasks where the agent needs to track progress and intermediate state.
+
+3. Long-term Memory​
+
+The umbrella term for persistent memories that survive across sessions. Subdivides into episodic and semantic memory.
+
+4. Episodic Memory​
+
+What it is: Records of specific events and interactions—what happened, when, with whom.
+
+Human analogy: Autobiographical memory. "Last Tuesday I met Sarah and we discussed the project deadline."
+
+Characteristics:
+
+Time-stamped: knows when events occurred
+Sequential: can recall order of events
+Contextual: includes surrounding circumstances
+Decays over time (older = less detailed)
+
+Example:
+
+Episodic Memory:
+[
+  {
+    "timestamp": "2025-01-15T10:30:00Z",
+    "event": "User asked about authentication patterns",
+    "outcome": "Recommended OAuth 2.0 with PKCE",
+    "user_reaction": "positive"
+  },
+  {
+    "timestamp": "2025-01-17T14:00:00Z",
+    "event": "User reported OAuth implementation issues",
+    "outcome": "Debugged token refresh logic together",
+    "resolution": "Fixed by adding retry mechanism"
+  },
+  {
+    "timestamp": "2025-01-20T09:00:00Z",
+    "event": "User confirmed OAuth working in production",
+    "context": "Three-day project completed successfully"
+  }
+]
+
+
+Best for: Building continuity across sessions. "Last time we discussed..." patterns.
+
+5. Semantic Memory​
+
+What it is: Factual knowledge about entities and their relationships—general knowledge extracted from experiences.
+
+Human analogy: General knowledge. You know Paris is in France without remembering when you learned it.
+
+Characteristics:
+
+Entity-focused: people, projects, concepts
+Relationship-aware: how entities connect
+Abstracted: distilled from multiple episodes
+Relatively stable over time
+
+Example:
+
+Semantic Memory:
+{
+  "entities": {
+    "Alex": {
+      "type": "user",
+      "role": "senior_engineer",
+      "team": "platform",
+      "preferences": ["morning_meetings", "detailed_docs"],
+      "expertise": ["python", "kubernetes", "auth_systems"]
+    },
+    "Phoenix Project": {
+      "type": "project",
+      "status": "active",
+      "deadline": "2025-01-31",
+      "involves": ["auth-service", "user-service"],
+      "owner": "Alex"
+    }
+  },
+  "relationships": [
+    {"from": "Alex", "relation": "owns", "to": "Phoenix Project"},
+    {"from": "Phoenix Project", "relation": "uses", "to": "OAuth 2.0"}
+  ]
+}
+
+
+Best for: Understanding context without explicit reminders. "The project" → Phoenix Project.
+
+Memory Type Comparison​
+Memory Type	Persistence	Scope	Updates	Example Query
+Conversation	Session	Current chat	Every turn	"What did they just say?"
+Working	Task	Current task	Task progress	"What's our current goal?"
+Episodic	Long-term	Past events	After interactions	"When did we last discuss auth?"
+Semantic	Long-term	Entities/facts	When facts change	"What projects is Alex working on?"
+The Two-Tier Architecture​
+
+Research systems like Letta (formerly MemGPT) formalize a two-tier memory model that's worth understanding conceptually.
+
+In-Context Memory (Core Memory)​
+
+Information that stays always visible to the LLM—included in every prompt without retrieval.
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    IN-CONTEXT MEMORY                            │
+│                                                                 │
+│   ┌──────────────────────┐   ┌────────────────────────────┐    │
+│   │    Persona Block     │   │      Human Block           │    │
+│   │                      │   │                            │    │
+│   │  "I am a task        │   │  "User: Alex               │    │
+│   │   management agent   │   │   Role: Senior Engineer    │    │
+│   │   that helps with    │   │   Preferences:             │    │
+│   │   planning and       │   │   - Morning meetings       │    │
+│   │   productivity."     │   │   - Bullet point format"   │    │
+│   │                      │   │                            │    │
+│   └──────────────────────┘   └────────────────────────────┘    │
+│                                                                 │
+│   Always visible to LLM. Updated via self-editing tools.        │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Key insight: Core memory is small but high-value. It's the agent's "active awareness" of who it is and who it's talking to.
+
+Out-of-Context Memory (External Memory)​
+
+Information stored externally and retrieved on demand—too large to keep in context but available when needed.
+
+┌─────────────────────────────────────────────────────────────────┐
+│                   OUT-OF-CONTEXT MEMORY                         │
+│                                                                 │
+│   ┌────────────────────────────────────────────────────────┐   │
+│   │               Archival Memory                           │   │
+│   │               (Vector DB)                               │   │
+│   │                                                         │   │
+│   │   Searchable storage for past conversations,            │   │
+│   │   documents, facts, and extended context.               │   │
+│   │                                                         │   │
+│   │   Retrieved via: archival_memory_search(query)          │   │
+│   └────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   ┌────────────────────────────────────────────────────────┐   │
+│   │               Conversation History                      │   │
+│   │               (Full Log)                                │   │
+│   │                                                         │   │
+│   │   Complete message history. Too large for context.      │   │
+│   │                                                         │   │
+│   │   Retrieved via: conversation_search(query)             │   │
+│   └────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   Retrieved on-demand. Not always visible.                      │
+└─────────────────────────────────────────────────────────────────┘
+
+Self-Editing Memory​
+
+A distinguishing feature of the Letta approach: agents don't just read from memory—they actively manage it.
+
+Memory Tools:
+
+memory_replace(block, old_text, new_text) — Update specific content
+memory_insert(block, text) — Add new information
+memory_rethink(block, new_content) — Complete block rewrite
+
+Example behavior:
+
+User: "Actually, I prefer afternoon meetings now."
+
+Agent thinks: "This contradicts the human block. I should update it."
+Agent action: memory_replace("human", "Morning meetings", "Afternoon meetings")
+Agent says: "Got it—I've updated my notes. Afternoon meetings from now on."
+
+
+The agent maintains its own memory rather than relying on external systems to do it.
+
+Designing Memory for Task API​
+
+Let's apply these concepts to the Task API agent from Chapter 70.
+
+Memory Requirements Analysis​
+Information Type	Memory Type	Rationale
+Current task list	Conversation	Immediate context
+Active task being modified	Working	Task in progress
+"Last week you completed 15 tasks"	Episodic	Past events with timing
+"Alex prefers morning tasks"	Semantic	Stable user fact
+"Phoenix project deadline is Jan 31"	Semantic	Project fact
+"Task estimates typically 50% low"	Semantic	Learned pattern
+Architecture Diagram​
+┌─────────────────────────────────────────────────────────────────┐
+│                  TASK API AGENT MEMORY                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │           CORE MEMORY (always visible)                   │  │
+│   │                                                          │  │
+│   │   Agent: "Task management specialist"                    │  │
+│   │   User: Name, preferences, working patterns              │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                             │                                   │
+│                             │ (retrieval)                       │
+│                             ▼                                   │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │           EXTERNAL MEMORY (on-demand)                    │  │
+│   │                                                          │  │
+│   │   Episodic: Task completion history                      │  │
+│   │   Semantic: Projects, deadlines, patterns                │  │
+│   │   Archival: Past conversations about tasks               │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Example Memory Content​
+
+Core Memory (Human Block):
+
+User: Alex Chen
+Role: Senior Platform Engineer
+Preferences:
+- Prefers tasks created in morning (9-11am)
+- Uses priority labels: critical, high, normal, low
+- Likes estimated_hours on complex tasks
+- Typical task completion: 2-4 per day
+Working on: Phoenix Project (auth migration, deadline Jan 31)
+
+
+Semantic Memory:
+
+{
+  "projects": {
+    "Phoenix": {
+      "type": "migration",
+      "deadline": "2025-01-31",
+      "components": ["auth-service", "user-service"],
+      "status": "active"
+    }
+  },
+  "patterns": {
+    "estimation_accuracy": 0.65,
+    "typical_tasks_per_day": 3.2,
+    "peak_productivity": "morning"
+  }
+}
+
+
+Episodic Memory (recent):
+
+[
+  {
+    "date": "2025-01-20",
+    "event": "Completed OAuth token refresh implementation",
+    "duration_actual": "4 hours",
+    "duration_estimated": "2 hours",
+    "note": "Took longer due to edge cases"
+  }
+]
+
+Try With AI​
+
+Use these prompts to practice memory architecture design with Claude or your preferred AI assistant.
+
+Prompt 1: Memory Type Mapping​
+I'm building a coding assistant agent that helps developers with:
+- Code review suggestions
+- Bug diagnosis
+- Documentation writing
+- API design guidance
+
+For each of these five memory types, give me concrete examples of what the agent should store:
+1. Conversation memory
+2. Working memory
+3. Episodic memory
+4. Semantic memory
+
+Also: What information should be in "core memory" (always visible) vs "external memory" (retrieved on-demand)?
+
+
+What you're learning: How to apply the five memory types to a specific domain. A coding assistant has very different memory needs than a task manager—code patterns, repository structure, and past debugging sessions become critical.
+
+Prompt 2: Episodic Memory for PR Reviews​
+An agent reviews pull requests for a development team. Design its episodic memory system.
+
+Questions to answer:
+1. What events should trigger episodic memory creation?
+2. What metadata should each episode include?
+3. How would the agent use episodic memory when reviewing a new PR from the same author?
+4. How would it use episodic memory when reviewing a PR that touches the same files as a previous PR?
+
+Give me a JSON schema for an episodic memory entry and 3 example entries.
+
+
+What you're learning: Episodic memory isn't just "what happened"—it's about capturing context that enables better future decisions. For PR reviews, past patterns predict future needs.
+
+Prompt 3: Semantic Memory as Knowledge Graph​
+Design a knowledge graph structure for an agent that manages a software project.
+
+The agent needs to understand:
+- Team members and their roles
+- Services and their dependencies
+- Current sprints and deadlines
+- Technical decisions and their rationale
+
+Create:
+1. Entity types (nodes)
+2. Relationship types (edges)
+3. Example queries the agent would run
+4. How the agent would update this graph as the project evolves
+
+Show a visual representation (ASCII or description) of a sample project's knowledge graph.
+
+
+What you're learning: Semantic memory shines when relationships matter. A knowledge graph lets the agent answer "Who owns the service that depends on auth-service?" without searching through conversation logs.

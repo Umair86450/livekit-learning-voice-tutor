@@ -1,0 +1,1151 @@
+Capstone - Production-Ready Dataset
+
+This is the culmination of your data engineering work. You've learned dataset formats, quality dimensions, synthetic generation, and versioning. Now you'll combine everything into a production-ready pipeline.
+
+But we're going to do this the right way: specification first.
+
+You don't write code and hope it works. You define success criteria, build to meet them, and validate the result. This is how professional data engineers work - and it's how you'll avoid the "I think it's good enough" trap that leads to failed fine-tuning runs.
+
+The Spec-First Approach​
+
+Before writing any code, answer: What does "production-ready" mean for this dataset?
+
+If you can't measure it, you can't achieve it. Let's make "production-ready" concrete.
+
+Step 1: Write the Data Quality Specification​
+
+Create specs/task-api-dataset-spec.md:
+
+# Task API Dataset Specification
+
+## Overview
+
+Production-ready training dataset for fine-tuning Task API assistant.
+
+**Dataset Purpose**: Enable a language model to understand and respond to task management requests with high accuracy and appropriate error handling.
+
+## Success Criteria
+
+### 1. Format Compliance (Blocking)
+
+
+|
+ Criterion 
+|
+ Threshold 
+|
+ Measurement 
+|
+
+
+|
+-----------
+|
+-----------
+|
+-------------
+|
+
+
+|
+ Valid JSON 
+|
+ 100% 
+|
+ Pydantic validation passes 
+|
+
+
+|
+ ShareGPT schema 
+|
+ 100% 
+|
+ All examples have 'conversations' array 
+|
+
+
+|
+ Alternating turns 
+|
+ 100% 
+|
+ human/gpt/human/gpt pattern 
+|
+
+
+|
+ Non-empty messages 
+|
+ 100% 
+|
+ No empty 'value' fields 
+|
+
+
+
+**Gate**: If ANY format criterion fails, pipeline blocks.
+
+### 2. Coverage Requirements (Blocking)
+
+
+|
+ Operation 
+|
+ Minimum Examples 
+|
+ Scenario Types 
+|
+
+
+|
+-----------
+|
+-----------------
+|
+----------------
+|
+
+
+|
+ Create 
+|
+ 20 
+|
+ basic, missing-info, invalid-input 
+|
+
+
+|
+ Update 
+|
+ 20 
+|
+ status, partial, not-found 
+|
+
+
+|
+ Complete 
+|
+ 15 
+|
+ normal, already-complete 
+|
+
+
+|
+ Delete 
+|
+ 15 
+|
+ confirm, active-task 
+|
+
+
+|
+ Query 
+|
+ 15 
+|
+ filter, empty-results 
+|
+
+
+|
+**
+Total
+**
+|
+**
+85
+**
+|
+|
+
+
+
+**Gate**: If coverage drops below minimum, pipeline blocks.
+
+### 3. Quality Metrics (Warning)
+
+
+|
+ Metric 
+|
+ Target 
+|
+ Acceptable 
+|
+
+
+|
+--------
+|
+--------
+|
+------------
+|
+
+
+|
+ Avg human message length 
+|
+ 30-80 chars 
+|
+ 20-100 chars 
+|
+
+
+|
+ Avg assistant message length 
+|
+ 80-200 chars 
+|
+ 50-300 chars 
+|
+
+
+|
+ Unique messages 
+|
+ >95% 
+|
+ >90% 
+|
+
+
+|
+ Turn distribution variance 
+|
+ <2.0 
+|
+ <3.0 
+|
+
+
+
+**Warning**: If quality metrics fall in "acceptable" but not "target", generate warning but continue.
+
+### 4. Reproducibility Requirements (Blocking)
+
+
+|
+ Requirement 
+|
+ Status 
+|
+
+
+|
+-------------
+|
+--------
+|
+
+
+|
+ Version metadata present 
+|
+ Required 
+|
+
+
+|
+ SHA256 checksums 
+|
+ Required 
+|
+
+
+|
+ Random seed documented 
+|
+ Required 
+|
+
+
+|
+ Generation model pinned 
+|
+ Required 
+|
+
+
+|
+ Dataset card complete 
+|
+ Required 
+|
+
+
+
+**Gate**: If ANY reproducibility requirement missing, pipeline blocks.
+
+### 5. Split Requirements (Blocking)
+
+
+|
+ Split 
+|
+ Percentage 
+|
+ Min Examples 
+|
+
+
+|
+-------
+|
+------------
+|
+--------------
+|
+
+
+|
+ Train 
+|
+ 80% 
+|
+ 68 
+|
+
+
+|
+ Validation 
+|
+ 10% 
+|
+ 8 
+|
+
+
+|
+ Test 
+|
+ 10% 
+|
+ 8 
+|
+
+
+
+**Gate**: Splits must meet minimum counts and not overlap.
+
+## Validation Report Format
+
+Final validation produces a report:
+
+\`\`\`
+=== DATASET VALIDATION REPORT ===
+Date: 2025-01-01T15:30:00Z
+Version: 1.0.0
+
+FORMAT COMPLIANCE
+  [PASS] Valid JSON: 106/106 (100%)
+  [PASS] ShareGPT schema: 106/106 (100%)
+  [PASS] Alternating turns: 106/106 (100%)
+  [PASS] Non-empty messages: 106/106 (100%)
+
+COVERAGE
+  [PASS] Create: 28 examples (target: 20)
+  [PASS] Update: 24 examples (target: 20)
+  [PASS] Complete: 18 examples (target: 15)
+  [PASS] Delete: 18 examples (target: 15)
+  [PASS] Query: 18 examples (target: 15)
+
+QUALITY METRICS
+  [PASS] Avg human length: 42.3 chars (target: 30-80)
+  [PASS] Avg assistant length: 127.8 chars (target: 80-200)
+  [PASS] Unique messages: 98.2% (target: >95%)
+  [PASS] Turn variance: 1.4 (target: <2.0)
+
+REPRODUCIBILITY
+  [PASS] Version metadata: present
+  [PASS] Checksums: verified
+  [PASS] Random seed: 42
+  [PASS] Model: gpt-4o-mini
+  [PASS] Dataset card: complete
+
+SPLITS
+  [PASS] Train: 84 (78.3%, min: 68)
+  [PASS] Validation: 11 (10.4%, min: 8)
+  [PASS] Test: 11 (10.4%, min: 8)
+
+=== RESULT: PASS ===
+Dataset is production-ready for fine-tuning.
+\`\`\`
+
+## Exit Criteria
+
+Dataset is production-ready when:
+1. All blocking gates pass
+2. No critical warnings
+3. Validation report shows PASS
+4. Dataset card is complete
+5. All files are versioned and checksummed
+
+
+This specification defines exactly what "done" means. No ambiguity.
+
+Step 2: Implement the Pipeline​
+
+Now build a pipeline that meets the specification. The key insight: implement quality gates as code.
+
+The Production Pipeline
+
+Create pipeline/run_pipeline.py:
+
+"""
+Production data pipeline for Task API dataset.
+Implements quality gates defined in task-api-dataset-spec.md
+"""
+import json
+import asyncio
+from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+import hashlib
+
+# Import from previous lessons
+from generate_dataset import generate_variations, create_dataset
+from validate_dataset import analyze_dataset
+
+
+class GateResult(Enum):
+    PASS = "PASS"
+    WARN = "WARN"
+    FAIL = "FAIL"
+
+
+@dataclass
+class ValidationResult:
+    """Result of a single validation check."""
+    name: str
+    result: GateResult
+    message: str
+    blocking: bool = True
+    details: dict = field(default_factory=dict)
+
+
+@dataclass
+class PipelineReport:
+    """Complete pipeline validation report."""
+    timestamp: str
+    version: str
+    results: list[ValidationResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        """Check if all blocking gates passed."""
+        return all(
+            r.result != GateResult.FAIL
+            for r in self.results
+            if r.blocking
+        )
+
+    def add(self, result: ValidationResult):
+        self.results.append(result)
+
+    def render(self) -> str:
+        """Render report as text."""
+        lines = [
+            "=" * 50,
+            "DATASET VALIDATION REPORT",
+            "=" * 50,
+            f"Date: {self.timestamp}",
+            f"Version: {self.version}",
+            ""
+        ]
+
+        # Group by category
+        categories = {}
+        for r in self.results:
+            cat = r.name.split(":")[0] if ":" in r.name else "General"
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(r)
+
+        for cat, results in categories.items():
+            lines.append(cat.upper())
+            for r in results:
+                status = f"[{r.result.value}]"
+                name = r.name.split(":")[-1] if ":" in r.name else r.name
+                lines.append(f"  {status} {name}: {r.message}")
+            lines.append("")
+
+        # Final result
+        lines.append("=" * 50)
+        if self.passed:
+            lines.append("RESULT: PASS")
+            lines.append("Dataset is production-ready for fine-tuning.")
+        else:
+            lines.append("RESULT: FAIL")
+            lines.append("Dataset does not meet production criteria.")
+            failed = [r for r in self.results if r.result == GateResult.FAIL and r.blocking]
+            lines.append(f"Blocking failures: {len(failed)}")
+        lines.append("=" * 50)
+
+        return "\n".join(lines)
+
+
+class QualityGates:
+    """Implementation of quality gates from specification."""
+
+    def __init__(self, conversations: list[dict]):
+        self.conversations = conversations
+
+    def check_format_compliance(self) -> list[ValidationResult]:
+        """Check format requirements (all blocking)."""
+        results = []
+
+        # Valid JSON - already loaded, so passes
+        results.append(ValidationResult(
+            name="Format:Valid JSON",
+            result=GateResult.PASS,
+            message=f"{len(self.conversations)}/{len(self.conversations)} (100%)"
+        ))
+
+        # ShareGPT schema
+        valid_schema = sum(1 for c in self.conversations if "conversations" in c)
+        pct = valid_schema / len(self.conversations) * 100
+        results.append(ValidationResult(
+            name="Format:ShareGPT schema",
+            result=GateResult.PASS if pct == 100 else GateResult.FAIL,
+            message=f"{valid_schema}/{len(self.conversations)} ({pct:.0f}%)"
+        ))
+
+        # Alternating turns
+        valid_turns = 0
+        for conv in self.conversations:
+            messages = conv.get("conversations", [])
+            alternating = True
+            for i, msg in enumerate(messages):
+                expected = "human" if i % 2 == 0 else "gpt"
+                if msg.get("from") != expected:
+                    alternating = False
+                    break
+            if alternating:
+                valid_turns += 1
+
+        pct = valid_turns / len(self.conversations) * 100
+        results.append(ValidationResult(
+            name="Format:Alternating turns",
+            result=GateResult.PASS if pct == 100 else GateResult.FAIL,
+            message=f"{valid_turns}/{len(self.conversations)} ({pct:.0f}%)"
+        ))
+
+        # Non-empty messages
+        valid_content = 0
+        for conv in self.conversations:
+            messages = conv.get("conversations", [])
+            if all(msg.get("value", "").strip() for msg in messages):
+                valid_content += 1
+
+        pct = valid_content / len(self.conversations) * 100
+        results.append(ValidationResult(
+            name="Format:Non-empty messages",
+            result=GateResult.PASS if pct == 100 else GateResult.FAIL,
+            message=f"{valid_content}/{len(self.conversations)} ({pct:.0f}%)"
+        ))
+
+        return results
+
+    def check_coverage(self) -> list[ValidationResult]:
+        """Check coverage requirements (blocking)."""
+        results = []
+
+        # Define keywords for each operation
+        operation_keywords = {
+            "Create": ["create", "new task", "add task", "set up"],
+            "Update": ["update", "change", "modify", "mark as"],
+            "Complete": ["complete", "finish", "done", "completed"],
+            "Delete": ["delete", "remove", "cancel"],
+            "Query": ["show", "list", "what tasks", "overdue", "filter"]
+        }
+
+        minimums = {
+            "Create": 20,
+            "Update": 20,
+            "Complete": 15,
+            "Delete": 15,
+            "Query": 15
+        }
+
+        counts = {op: 0 for op in operation_keywords}
+
+        for conv in self.conversations:
+            messages = conv.get("conversations", [])
+            text = " ".join(m.get("value", "").lower() for m in messages)
+
+            for op, keywords in operation_keywords.items():
+                if any(kw in text for kw in keywords):
+                    counts[op] += 1
+                    break  # Count each conversation once
+
+        for op, count in counts.items():
+            minimum = minimums[op]
+            passed = count >= minimum
+            results.append(ValidationResult(
+                name=f"Coverage:{op}",
+                result=GateResult.PASS if passed else GateResult.FAIL,
+                message=f"{count} examples (target: {minimum})"
+            ))
+
+        return results
+
+    def check_quality_metrics(self) -> list[ValidationResult]:
+        """Check quality metrics (warnings only)."""
+        results = []
+
+        human_lengths = []
+        gpt_lengths = []
+        all_messages = []
+
+        for conv in self.conversations:
+            for msg in conv.get("conversations", []):
+                value = msg.get("value", "")
+                all_messages.append(value)
+                if msg.get("from") == "human":
+                    human_lengths.append(len(value))
+                else:
+                    gpt_lengths.append(len(value))
+
+        # Average lengths
+        avg_human = sum(human_lengths) / len(human_lengths) if human_lengths else 0
+        target_human = (30, 80)
+        acceptable_human = (20, 100)
+
+        if target_human[0] <= avg_human <= target_human[1]:
+            result = GateResult.PASS
+        elif acceptable_human[0] <= avg_human <= acceptable_human[1]:
+            result = GateResult.WARN
+        else:
+            result = GateResult.FAIL
+
+        results.append(ValidationResult(
+            name="Quality:Avg human length",
+            result=result,
+            message=f"{avg_human:.1f} chars (target: {target_human[0]}-{target_human[1]})",
+            blocking=False
+        ))
+
+        avg_gpt = sum(gpt_lengths) / len(gpt_lengths) if gpt_lengths else 0
+        target_gpt = (80, 200)
+        acceptable_gpt = (50, 300)
+
+        if target_gpt[0] <= avg_gpt <= target_gpt[1]:
+            result = GateResult.PASS
+        elif acceptable_gpt[0] <= avg_gpt <= acceptable_gpt[1]:
+            result = GateResult.WARN
+        else:
+            result = GateResult.FAIL
+
+        results.append(ValidationResult(
+            name="Quality:Avg assistant length",
+            result=result,
+            message=f"{avg_gpt:.1f} chars (target: {target_gpt[0]}-{target_gpt[1]})",
+            blocking=False
+        ))
+
+        # Uniqueness
+        unique = len(set(all_messages))
+        total = len(all_messages)
+        pct = unique / total * 100 if total > 0 else 0
+
+        if pct > 95:
+            result = GateResult.PASS
+        elif pct > 90:
+            result = GateResult.WARN
+        else:
+            result = GateResult.FAIL
+
+        results.append(ValidationResult(
+            name="Quality:Unique messages",
+            result=result,
+            message=f"{pct:.1f}% (target: >95%)",
+            blocking=False
+        ))
+
+        return results
+
+    def check_reproducibility(self, dataset_path: str) -> list[ValidationResult]:
+        """Check reproducibility requirements (blocking)."""
+        results = []
+        version_path = Path(dataset_path) / "version.json"
+
+        if not version_path.exists():
+            results.append(ValidationResult(
+                name="Reproducibility:Version metadata",
+                result=GateResult.FAIL,
+                message="version.json not found"
+            ))
+            return results
+
+        with open(version_path) as f:
+            version_info = json.load(f)
+
+        # Check each requirement
+        results.append(ValidationResult(
+            name="Reproducibility:Version metadata",
+            result=GateResult.PASS,
+            message="present"
+        ))
+
+        # Checksums
+        has_checksums = all(
+            "checksum" in split
+            for split in version_info.get("splits", {}).values()
+        )
+        results.append(ValidationResult(
+            name="Reproducibility:Checksums",
+            result=GateResult.PASS if has_checksums else GateResult.FAIL,
+            message="verified" if has_checksums else "missing"
+        ))
+
+        # Random seed
+        gen_config = version_info.get("generation_config", {})
+        has_seed = "random_seed" in gen_config
+        results.append(ValidationResult(
+            name="Reproducibility:Random seed",
+            result=GateResult.PASS if has_seed else GateResult.FAIL,
+            message=str(gen_config.get("random_seed", "missing"))
+        ))
+
+        # Model
+        has_model = "model" in gen_config
+        results.append(ValidationResult(
+            name="Reproducibility:Model",
+            result=GateResult.PASS if has_model else GateResult.FAIL,
+            message=gen_config.get("model", "missing")
+        ))
+
+        # Dataset card
+        readme_path = Path(dataset_path) / "README.md"
+        has_readme = readme_path.exists()
+        results.append(ValidationResult(
+            name="Reproducibility:Dataset card",
+            result=GateResult.PASS if has_readme else GateResult.FAIL,
+            message="complete" if has_readme else "missing"
+        ))
+
+        return results
+
+    def check_splits(self, splits: dict) -> list[ValidationResult]:
+        """Check split requirements (blocking)."""
+        results = []
+        minimums = {"train": 68, "validation": 8, "test": 8}
+
+        total = sum(len(s) for s in splits.values())
+
+        for split_name, data in splits.items():
+            count = len(data)
+            pct = count / total * 100 if total > 0 else 0
+            minimum = minimums.get(split_name, 0)
+
+            passed = count >= minimum
+            results.append(ValidationResult(
+                name=f"Splits:{split_name.capitalize()}",
+                result=GateResult.PASS if passed else GateResult.FAIL,
+                message=f"{count} ({pct:.1f}%, min: {minimum})"
+            ))
+
+        return results
+
+
+async def run_pipeline(
+    seeds_path: str = "seeds/task_api_seeds.json",
+    output_path: str = "data/hf_dataset",
+    version: str = "1.0.0"
+) -> PipelineReport:
+    """Run the complete data pipeline with quality gates."""
+
+    report = PipelineReport(
+        timestamp=datetime.utcnow().isoformat() + "Z",
+        version=version
+    )
+
+    print("=" * 50)
+    print("RUNNING PRODUCTION DATA PIPELINE")
+    print("=" * 50)
+
+    # Step 1: Load seeds
+    print("\n[1/5] Loading seeds...")
+    with open(seeds_path) as f:
+        seeds = json.load(f)["seeds"]
+    print(f"  Loaded {len(seeds)} seed examples")
+
+    # Step 2: Generate variations
+    print("\n[2/5] Generating variations...")
+    # (In production, this would call the async generation)
+    # For capstone, we load existing data
+    data_path = Path("data/task_api_dataset.jsonl")
+    if data_path.exists():
+        with open(data_path) as f:
+            conversations = [json.loads(line) for line in f]
+        print(f"  Loaded {len(conversations)} existing conversations")
+    else:
+        print("  ERROR: No data file found. Run generate_dataset.py first.")
+        return report
+
+    # Step 3: Validate format
+    print("\n[3/5] Validating format compliance...")
+    gates = QualityGates(conversations)
+    for result in gates.check_format_compliance():
+        report.add(result)
+        status = result.result.value
+        print(f"  [{status}] {result.name}: {result.message}")
+
+    # Step 4: Check coverage
+    print("\n[4/5] Checking coverage...")
+    for result in gates.check_coverage():
+        report.add(result)
+        status = result.result.value
+        print(f"  [{status}] {result.name}: {result.message}")
+
+    # Step 5: Quality metrics
+    print("\n[5/5] Analyzing quality metrics...")
+    for result in gates.check_quality_metrics():
+        report.add(result)
+        status = result.result.value
+        print(f"  [{status}] {result.name}: {result.message}")
+
+    # Check if we can proceed
+    if not report.passed:
+        print("\n" + "!" * 50)
+        print("PIPELINE BLOCKED - Quality gates failed")
+        print("!" * 50)
+        return report
+
+    # Additional checks for complete pipeline
+    print("\n[+] Additional validation...")
+
+    # Reproducibility
+    for result in gates.check_reproducibility(output_path):
+        report.add(result)
+
+    # Splits (load from disk if available)
+    splits_path = Path("data/splits")
+    if splits_path.exists():
+        splits = {}
+        for split_name in ["train", "val", "test"]:
+            split_file = splits_path / f"{split_name}.jsonl"
+            if split_file.exists():
+                with open(split_file) as f:
+                    key = "validation" if split_name == "val" else split_name
+                    splits[key] = [json.loads(line) for line in f]
+
+        for result in gates.check_splits(splits):
+            report.add(result)
+
+    return report
+
+
+if __name__ == "__main__":
+    report = asyncio.run(run_pipeline())
+
+    print("\n")
+    print(report.render())
+
+    # Save report
+    report_path = Path("data/validation_report.txt")
+    with open(report_path, "w") as f:
+        f.write(report.render())
+    print(f"\nReport saved to {report_path}")
+
+
+Output:
+
+==================================================
+RUNNING PRODUCTION DATA PIPELINE
+==================================================
+
+[1/5] Loading seeds...
+  Loaded 12 seed examples
+
+[2/5] Generating variations...
+  Loaded 106 existing conversations
+
+[3/5] Validating format compliance...
+  [PASS] Format:Valid JSON: 106/106 (100%)
+  [PASS] Format:ShareGPT schema: 106/106 (100%)
+  [PASS] Format:Alternating turns: 106/106 (100%)
+  [PASS] Format:Non-empty messages: 106/106 (100%)
+
+[4/5] Checking coverage...
+  [PASS] Coverage:Create: 28 examples (target: 20)
+  [PASS] Coverage:Update: 24 examples (target: 20)
+  [PASS] Coverage:Complete: 18 examples (target: 15)
+  [PASS] Coverage:Delete: 18 examples (target: 15)
+  [PASS] Coverage:Query: 18 examples (target: 15)
+
+[5/5] Analyzing quality metrics...
+  [PASS] Quality:Avg human length: 42.3 chars (target: 30-80)
+  [PASS] Quality:Avg assistant length: 127.8 chars (target: 80-200)
+  [PASS] Quality:Unique messages: 98.2% (target: >95%)
+
+[+] Additional validation...
+
+==================================================
+DATASET VALIDATION REPORT
+==================================================
+Date: 2025-01-01T15:30:00Z
+Version: 1.0.0
+
+FORMAT
+  [PASS] Valid JSON: 106/106 (100%)
+  [PASS] ShareGPT schema: 106/106 (100%)
+  [PASS] Alternating turns: 106/106 (100%)
+  [PASS] Non-empty messages: 106/106 (100%)
+
+COVERAGE
+  [PASS] Create: 28 examples (target: 20)
+  [PASS] Update: 24 examples (target: 20)
+  [PASS] Complete: 18 examples (target: 15)
+  [PASS] Delete: 18 examples (target: 15)
+  [PASS] Query: 18 examples (target: 15)
+
+QUALITY
+  [PASS] Avg human length: 42.3 chars (target: 30-80)
+  [PASS] Avg assistant length: 127.8 chars (target: 80-200)
+  [PASS] Unique messages: 98.2% (target: >95%)
+
+REPRODUCIBILITY
+  [PASS] Version metadata: present
+  [PASS] Checksums: verified
+  [PASS] Random seed: 42
+  [PASS] Model: gpt-4o-mini
+  [PASS] Dataset card: complete
+
+SPLITS
+  [PASS] Train: 84 (78.3%, min: 68)
+  [PASS] Validation: 11 (10.4%, min: 8)
+  [PASS] Test: 11 (10.4%, min: 8)
+
+==================================================
+RESULT: PASS
+Dataset is production-ready for fine-tuning.
+==================================================
+
+Report saved to data/validation_report.txt
+
+Step 3: Handle Failures Gracefully​
+
+What happens when quality gates fail? The pipeline should provide actionable feedback.
+
+Failure Handling
+
+def generate_remediation_steps(report: PipelineReport) -> list[str]:
+    """Generate specific steps to fix failed gates."""
+    steps = []
+
+    for result in report.results:
+        if result.result == GateResult.FAIL:
+            if "Format" in result.name:
+                steps.append(f"FIX {result.name}: Run validate_dataset.py to identify malformed examples")
+
+            elif "Coverage" in result.name:
+                op = result.name.split(":")[-1]
+                steps.append(f"FIX {result.name}: Add more seed examples for '{op}' operation")
+
+            elif "Reproducibility" in result.name:
+                if "Version" in result.name:
+                    steps.append("FIX: Run version_dataset.py to create version.json")
+                elif "Checksum" in result.name:
+                    steps.append("FIX: Regenerate checksums with compute_checksum()")
+                elif "Dataset card" in result.name:
+                    steps.append("FIX: Create README.md following HuggingFace template")
+
+            elif "Splits" in result.name:
+                steps.append(f"FIX {result.name}: Add more examples or adjust split ratios")
+
+    return steps
+
+
+# In the main pipeline:
+if not report.passed:
+    print("\nREMEDIATION STEPS:")
+    for i, step in enumerate(generate_remediation_steps(report), 1):
+        print(f"  {i}. {step}")
+
+
+Output (when failing):
+
+RESULT: FAIL
+Dataset does not meet production criteria.
+Blocking failures: 2
+
+REMEDIATION STEPS:
+  1. FIX Coverage:Delete: Add more seed examples for 'Delete' operation
+  2. FIX Reproducibility:Dataset card: Create README.md following HuggingFace template
+
+Step 4: Finalize for Chapter 94​
+
+Your dataset is now ready for fine-tuning. Here's the complete file structure:
+
+data/
+  hf_dataset/
+    README.md                    # Dataset card
+    version.json                 # Version metadata
+    train/
+      data-00000-of-00001.arrow  # Training data
+    validation/
+      data-00000-of-00001.arrow  # Validation data
+    test/
+      data-00000-of-00001.arrow  # Test data (DO NOT TOUCH until final eval)
+
+  splits/
+    train.jsonl                  # 84 examples
+    val.jsonl                    # 11 examples
+    test.jsonl                   # 11 examples
+
+  validation_report.txt          # Final validation report
+
+  archives/
+    1.0.0/                       # Version snapshot
+
+seeds/
+  task_api_seeds.json            # Original seed examples
+
+specs/
+  task-api-dataset-spec.md       # Quality specification
+
+
+Chapter 94 Preview
+
+In the next chapter, you'll use this dataset to fine-tune Llama-3-8B:
+
+# Load your production-ready dataset
+from datasets import load_from_disk
+dataset = load_from_disk("data/hf_dataset")
+
+# The dataset you built meets all requirements
+# - Format: ShareGPT validated
+# - Coverage: All Task API operations
+# - Quality: Verified metrics
+# - Reproducibility: Versioned with checksums
+# - Splits: Ready for training
+
+The Specification-First Mindset​
+
+Notice what we did differently in this capstone:
+
+Traditional Approach	Spec-First Approach
+Build pipeline, hope it works	Define success criteria first
+Manual spot-checking	Automated quality gates
+"Looks good enough"	Measurable pass/fail
+Debug after training fails	Catch issues before training
+
+This mindset transfer to all data engineering work. Define the specification. Build to meet it. Validate the result. Every time.
+
+Try With AI​
+
+Now that you've completed the full pipeline, explore these extensions with your AI partner.
+
+Prompt 1: Design LLM-as-Judge Quality Scoring
+
+My pipeline uses rule-based quality checks (message length, uniqueness, etc.).
+I want to add LLM-as-judge scoring to evaluate:
+
+1. Response helpfulness (does the assistant actually solve the user's problem?)
+2. Tone consistency (does the assistant maintain a professional-friendly voice?)
+3. Information accuracy (are task IDs, dates, and statuses plausible?)
+
+Design a GPT-4o-mini prompt that scores each conversation on these criteria (1-5 scale).
+How do I integrate this into my pipeline without adding too much cost?
+What's the right balance between rule-based and LLM-based checks?
+
+
+What you're learning: LLM-as-judge is a powerful pattern for quality evaluation. This prompt teaches you to design evaluation prompts and integrate them cost-effectively. The technique applies to evaluating fine-tuned model outputs too.
+
+Prompt 2: Scale the Pipeline
+
+My current pipeline handles 100 examples. I need to scale to 10,000 examples:
+
+Current bottlenecks:
+- In-memory processing (all data in RAM)
+- Synchronous validation (one check at a time)
+- No checkpointing (restart from scratch on failure)
+
+Design a scalable version that:
+1. Processes data in batches
+2. Runs validation in parallel
+3. Saves progress so I can resume
+4. Handles partial failures gracefully
+
+I'm using Python with asyncio. Show me the architecture.
+
+
+What you're learning: Production pipelines need to handle scale. This prompt teaches you streaming architectures, parallel processing, and fault tolerance - skills essential for real LLMOps work.
+
+Prompt 3: Continuous Data Quality
+
+My dataset is production-ready today. But I want to add more examples weekly.
+Each addition might introduce quality regressions.
+
+Design a CI/CD workflow that:
+1. Runs on every data PR
+2. Blocks merges that degrade quality
+3. Auto-generates version bumps
+4. Updates the dataset card
+5. Notifies the team of coverage gaps
+
+Show me a GitHub Actions workflow that implements this.
+
+
+What you're learning: Data quality isn't a one-time activity. This prompt teaches you to think about continuous quality in a CI/CD context - an essential practice for teams maintaining production ML systems.
+
+Capstone Completion Checklist​
+
+Before marking this capstone complete, verify:
+
+ Specification written (specs/task-api-dataset-spec.md)
+ Pipeline runs end-to-end without errors
+ All format compliance checks pass (100%)
+ Coverage requirements met (85+ examples)
+ Quality metrics in target range
+ Reproducibility requirements complete
+ Splits created with minimum counts
+ Validation report saved
+ Dataset ready for Chapter 94
+
+If all checks pass, you've built a production-ready dataset. This is real LLMOps engineering.
+
+Reflect on Your Skill​
+
+You built an llmops-data-engineer skill in Lesson 0 and refined it throughout the chapter. This capstone is the final test.
+
+Final Skill Assessment​
+Using my llmops-data-engineer skill, help me validate a production dataset.
+Does my skill now cover the complete pipeline from specification to validation?
+
+Skill Completeness Checklist​
+
+Your skill should now include:
+
+ Dataset format selection (Alpaca vs ShareGPT)
+ Quality dimensions (accuracy, consistency, coverage, diversity)
+ Synthetic data generation with seed design
+ Cleaning and deduplication pipelines
+ Version control and checksums
+ Dataset card documentation
+ Automated quality gates
+ Validation report generation
+Finalize Your Skill​
+
+If any gaps remain:
+
+Finalize my llmops-data-engineer skill based on everything learned in Chapter 93:
+1. Add the spec-first approach (define success criteria before implementation)
+2. Add quality gate implementation patterns
+3. Add validation report format
+4. Add remediation step generation for failures
+5. Ensure the skill produces production-ready datasets
+
+
+Your skill is now battle-tested. You've used it to build a real dataset that will train a real model. That's the difference between theoretical knowledge and practical capability.
+
+Next Chapter: In Chapter 94, you'll use this dataset to fine-tune Llama-3-8B with LoRA/QLoRA. The quality you built here directly affects model quality.

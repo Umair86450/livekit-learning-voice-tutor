@@ -1,0 +1,364 @@
+User Stories & Story Mapping
+
+The engineering lead looks at the Workflow Builder PRD and says: "I need to start estimating. Can you break this into stories? I need to know what each developer is building in the next sprint."
+
+The PRD defines the initiative. User stories translate it into the unit of work that engineers actually build. The difference between a PM who hands over a PRD and one who hands over well-written stories is the difference between a team that spends two days in planning meetings and one that is coding by Tuesday.
+
+This lesson teaches you to take the Workflow Builder PRD from L07 and decompose it into sprint-ready stories using /stories from the custom product-strategy plugin. More importantly, it teaches you to evaluate the agent's output against the three-part quality test: because the agent will generate stories, and some of them will be wrong in exactly the ways that create ambiguity at the sprint boundary.
+
+Story Anatomy: Three Parts, One Purpose​
+
+Every user story has exactly three parts. Each part has a rule, and the rule exists for a reason:
+
+As a [SPECIFIC PERSONA — not "user"],
+I want to [CAPABILITY — behaviour, not UI element],
+So that [USER OUTCOME — value to them, not system action].
+
+The Three-Part Quality Test​
+Part	What Qualifies	What Does Not	Why It Matters
+Persona	A named persona from product.local.md ("Analyst Alex")	"A user," "the customer," "someone"	"A user" implies nothing about context, goals, or constraints. "Analyst Alex" implies SQL-free, time-constrained, report-focused: context that shapes the solution.
+Capability	What the user can do ("filter by date range")	A UI element they click ("click the date picker")	Capabilities describe need; UI elements describe a specific solution. Specifying the UI in the story locks the design before engineering has started.
+User outcome	Benefit to the user ("find relevant data faster")	System action ("so the filter is applied")	The outcome tests whether the story is worth building. If you cannot articulate the user benefit, you may be building a feature that solves a problem no user actually has.
+WHY "A USER" FAILS EVERY TIME
+
+"As a user" tells the engineering team nothing about what this person cares about, what they know, or what constraints they operate under. Analyst Alex builds dashboards without SQL. That context shapes the trigger configuration UI differently than VP Priya, who needs results without touching the product at all. The persona is not a formality: it is the constraint that makes the story testable.
+
+Story Acceptance Criteria​
+
+Each story needs acceptance criteria that define when the story is done. The same rules from L06 apply: plus one additional rule specific to stories:
+
+Rule	Application in Stories
+No "and"	Split compound ACs into two separate lines
+Independently testable	Each AC can be verified on its own
+Behavior not implementation	ACs describe user-visible state, not internal process
+Measurable thresholds	Performance ACs include specific numbers
+Include error states	At least one AC must define what happens when the happy path fails
+
+The error state rule is the one most often missing in agent-generated stories. If the story is about configuring a schedule trigger, there must be an AC that answers: what happens if the schedule configuration is invalid? What happens if the user closes the panel without saving? What happens if the trigger fires but the workflow fails?
+
+Epic / Story / Sub-task Hierarchy​
+
+Stories exist within a hierarchy. Understanding where each level belongs determines whether the right person is writing the right thing:
+
+Level	Definition	Owner	Example
+Epic	A complete user capability too large for one sprint	PM	"Workflow Builder; Automation Configuration"
+Story	A slice of the epic, deliverable in one sprint	PM	"Schedule trigger configuration for Analyst Alex"
+Sub-task	A technical task within a story	Engineer	"Write trigger evaluation service schema migration"
+
+PMs own epics and stories. Engineers own sub-tasks. A PM who writes sub-tasks is making engineering implementation decisions. An engineer who writes stories is making product scope decisions. Both are problems.
+
+When to split a story into sub-tasks: when the engineering team needs to break the story into parallel work streams. When to split a story into new stories: when any of the four splitting triggers apply.
+
+The Four Story Splitting Triggers​
+Trigger	Sign	How to Split
+Cannot complete in one sprint	Estimate exceeds sprint capacity	Split by user flow or by deliverable phase
+More than 7 ACs	AC count suggests multiple distinct behaviors	Split by user flow: each flow becomes a story
+Multiple user flows	Story describes more than one distinct workflow	One story per flow
+Multiple personas	Story serves two different user types	One story per persona
+THE 7-AC SIGNAL
+
+When a story exceeds 7 acceptance criteria, the PM has usually combined two or more user flows into one story. The fix is not to condense the ACs: it is to identify the distinct flows and create one story per flow. A story is a slice, not a summary.
+
+Worked Example: Stories from the Workflow Builder PRD​
+
+Your L07 PRD has three MUST features and one SHOULD feature. The engineering lead needs stories for the MUST features before sprint planning. Run /stories to decompose the PRD into a story backlog:
+
+/stories
+I need user stories from InsightFlow's Workflow Builder PRD.
+
+Context:
+- InsightFlow is a B2B SaaS analytics platform (Series B, 50 employees,
+  200 customers)
+- Primary persona: Analyst Alex — data analyst at 100-500 person companies,
+  builds dashboards without SQL, biggest frustration is manual repetitive work
+- Secondary persona: VP Priya — VP Engineering, needs automated weekly reports
+
+PRD scope (MUST features from L07):
+1. Automation Builder UI — visual canvas for creating workflow sequences
+2. Action Library — available workflow actions (refresh dashboard, export PDF,
+   send email report)
+3. Trigger Configuration — schedule and threshold triggers (from L06 spec)
+
+Engineering team: 12 engineers + 3 designers, 2-week sprints, velocity ~40 pts
+
+Generate stories for all three MUST features. For each story:
+- Use Analyst Alex or VP Priya as the persona — not "a user"
+- Describe capabilities, not UI elements
+- Write user outcomes, not system actions
+- Include at least one error state AC per story
+- Flag any story you estimate as larger than one sprint
+
+
+Sample output from /stories:
+
+USER STORIES: Workflow Builder — All MUST Features
+════════════════════════════════════════════════════════════
+Epic: Workflow Builder — Automation Configuration
+Stories: 8 | Estimated sprints: 4 | Personas: Analyst Alex, VP Priya
+
+── AUTOMATION BUILDER UI STORIES ───────────────────────────
+
+Story 1: Create a New Workflow
+  As Analyst Alex,
+  I want to create a new automation workflow with a name and description,
+  So that I can organise my automations and find them later without
+  scanning an unlabelled list.
+
+  Acceptance Criteria:
+  AC1: Analyst Alex can create a new workflow from the Workflows section
+  AC2: New workflow requires a name (minimum 1 character)
+  AC3: Optional description field accepts up to 500 characters
+  AC4: Created workflow appears in the workflow list immediately
+  AC5: If user navigates away without saving, system shows confirmation:
+       "You have unsaved changes. Leave without saving?"
+
+  Size: S | Dependencies: None | Notes: Foundation for all other
+  workflow stories — should be Sprint 1, Week 1
+
+Story 2: Add and Arrange Workflow Steps
+  As Analyst Alex,
+  I want to add action steps to a workflow in the order I want them
+  to run,
+  So that I can build a custom automation sequence without writing code.
+
+  Acceptance Criteria:
+  AC1: Analyst Alex can add a step from the Action Library to a workflow
+  AC2: Steps display in the order they will execute
+  AC3: Analyst Alex can reorder steps by dragging or using up/down controls
+  AC4: Analyst Alex can remove a step without deleting the entire workflow
+  AC5: Workflow with no steps shows an empty state: "Add your first
+       action to get started"
+  AC6: If a step is removed that another step depends on, system warns:
+       "Removing [step] will affect [dependent step]. Continue?"
+
+  Size: M | Dependencies: Story 1 | Notes: Drag-and-drop is nice-to-have;
+  up/down controls are the MUST behaviour
+
+── ACTION LIBRARY STORIES ──────────────────────────────────
+
+Story 3: Browse and Select an Action
+  As Analyst Alex,
+  I want to browse available workflow actions and add one to my workflow,
+  So that I can understand what automations are possible without
+  having to read documentation.
+
+  Acceptance Criteria:
+  AC1: Action Library shows all available actions with name and
+       one-line description
+  AC2: Analyst Alex can filter actions by category
+  AC3: Analyst Alex can add an action to the current workflow from
+       the Library
+  AC4: If no actions match the filter, Library shows: "No actions
+       in this category yet"
+  AC5: Actions that require configuration (e.g., email address for
+       "Send report") display a configuration step immediately on add
+
+  Size: S | Dependencies: Story 2
+
+Story 4: Configure the "Send Report" Action (EMAIL)
+  As VP Priya,
+  I want to configure a "Send Report" action with my email address
+  and a report selection,
+  So that I receive a formatted report automatically without asking
+  Alex to send it manually.
+
+  Acceptance Criteria:
+  AC1: VP Priya can enter one or more email addresses as recipients
+  AC2: VP Priya can select which InsightFlow dashboard to send as
+       the report
+  AC3: Report format is PDF (no other formats in v1)
+  AC4: Configuration is saved when the workflow is saved (not before)
+  AC5: If an invalid email address is entered, field shows error
+       inline: "Enter a valid email address"
+
+  Size: S | Dependencies: Stories 2, 3
+
+── TRIGGER CONFIGURATION STORIES ──────────────────────────
+
+Story 5: Configure a Schedule Trigger
+  As Analyst Alex,
+  I want to configure a weekly schedule trigger for my workflow,
+  So that my Monday morning dashboard refresh happens automatically
+  without me logging in.
+
+  Acceptance Criteria:
+  AC1: Analyst Alex can open the Trigger panel from any workflow
+  AC2: Analyst Alex can select "Schedule" as the trigger type
+  AC3: Analyst Alex can configure weekly recurrence (day of week + time)
+  AC4: Analyst Alex can set the timezone for the schedule
+  AC5: Trigger shows "Active" status in the workflow list after activation
+  AC6: If the configured time has already passed today, system asks:
+       "Start tomorrow or run now?"
+
+  Size: S | Dependencies: Story 1 | Notes: Detailed spec in L06
+
+Story 6: Configure a Data Threshold Trigger
+  As Analyst Alex,
+  I want to configure a data threshold trigger that starts my workflow
+  when a metric crosses a value,
+  So that I receive automated alerts when something unusual happens
+  in my data, without setting a schedule.
+
+  Acceptance Criteria:
+  AC1: Analyst Alex can select "Data Threshold" as the trigger type
+  AC2: Analyst Alex can select any InsightFlow metric as the condition
+  AC3: Analyst Alex can set a comparison condition (>, <, =) and value
+  AC4: Trigger shows the last evaluation time in the workflow list
+  AC5: If the metric selected is deleted, trigger is deactivated and
+       Analyst Alex is notified via in-app message
+
+  Size: M | Dependencies: Story 5 (Trigger panel foundation)
+
+[Stories 7-8 cover manual trigger and workflow status view...]
+════════════════════════════════════════════════════════════
+
+Evaluating the Output​
+
+Quality test; Story 1: "As Analyst Alex": specific persona. "create a new automation workflow with a name and description": capability, not UI element ("click the workflow button"). "organise my automations and find them later": user outcome, not system action. AC5 includes an error state (unsaved changes). This story passes.
+
+Quality test: look for violations: Scan the output for "As a user." If the agent produced any, note the story number and correct it: replace "a user" with "Analyst Alex" or "VP Priya" based on who the story serves. Also scan for wants that describe clicking ("click the trigger button"): rewrite as capability ("configure a schedule trigger").
+
+Size check: Story 2 is labelled Medium. Six ACs, but all describe one distinct flow (add and arrange steps). Not a split candidate. If a story appeared with 9 ACs covering both the "initial setup" and "editing existing steps" flows, that would be a split candidate: one story per flow.
+
+Error state check: Every story should have at least one AC covering what happens when the happy path fails. Story 5 AC6 covers the edge case of a past-time schedule. Check that no story in the output has only happy-path ACs.
+
+KEEP THIS FILE
+
+Lessons 3-14 build one continuous product management cycle for InsightFlow. Keep your Cowork session and working folder between lessons. The story backlog you produce in this exercise feeds directly into both Lesson 9 (where you will build the roadmap from these stories) and Lesson 10 (where you will RICE-score these stories to prioritise the backlog).
+
+Story Generation from Spec; The Method​
+
+When generating stories from an existing spec or PRD, the /stories skill follows a systematic process:
+
+Identify distinct user flows from the functional requirements
+Identify distinct personas for each flow
+Create one story per persona-flow combination
+Derive ACs from the spec's acceptance criteria
+Flag coverage gaps: any user flow in the spec with no corresponding story
+Flag implementation details: spec ACs that describe technical implementation should become engineering sub-tasks, not story ACs
+
+Step 6 is where students most often need to correct the agent's output. The agent may carry over implementation details from the spec into story ACs. Any AC that mentions a database operation, API call, or service name should be moved to an engineering sub-task.
+
+Try With AI​
+
+Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1; Reproduce (apply what you just learned):
+
+Take the following feature requirement and generate 3 user stories:
+
+Feature: InsightFlow workflow status view
+Description: Users need to see whether their automated workflows ran
+successfully, failed, or are scheduled to run next.
+
+Personas:
+- Analyst Alex (primary) — built the workflows, monitors them
+- VP Priya (secondary) — receives reports from workflows, needs
+  to know if something failed
+
+For each story:
+- Use the named persona, not "a user"
+- Write a capability (what they can do), not a UI element
+- Write a user outcome (benefit to them), not a system action
+- Include at least one error state AC
+
+Flag any story you estimate as larger than one sprint.
+
+
+What you're learning: Generating stories for a monitoring/status feature: a pattern that appears in almost every product. The challenge is writing the "so that" for a status view: the user outcome is not "to see the status" (that's a system description) but "to know whether my Monday report arrived before I get to the office."
+
+Prompt 2; Adapt (change the context):
+
+A PM at a project management SaaS needs user stories for their
+"AI project health check" feature:
+
+- Analyst persona: Project Manager Lisa — manages 15 active projects,
+  wants early warning of slipping timelines without reading every
+  update herself
+- Executive persona: CTO David — wants a portfolio view of all projects
+  without asking PMs for status reports
+
+Generate stories for both personas. After generating, apply the
+three-part quality test to each story and identify any violations.
+Correct any violations you find.
+
+
+What you're learning: Applying the quality test to agent-generated stories in a different domain. Project management stories often default to "a user" as the persona and "view reports" as the capability: both common violations that the quality test catches.
+
+Prompt 3; Apply (connect to your domain):
+
+Think of a feature in your product backlog that serves more than
+one persona — or a feature you've been asked to build that arrives
+as a single vague request.
+
+Generate 3-5 user stories for it:
+1. Write each story in full As a / I want / So that format
+2. Apply the three-part quality test to each story
+3. Write 3-4 acceptance criteria per story (including at least one
+   error state)
+4. Check: does any story have more than 7 ACs? If yes, which
+   splitting trigger applies?
+
+Compare your stories to how the feature was originally described to
+you. What context was implicit in the original request that is now
+explicit in the stories?
+
+
+What you're learning: The ultimate value of user stories is making implicit assumptions explicit. The original feature request contained assumptions about who it serves and why it matters: the story format forces those assumptions to be stated, so they can be challenged or confirmed.
+
+Exercise: Generate Stories for the Workflow Builder Trigger Feature​
+
+Plugin: Custom product-strategy Command: /stories Time: 25 minutes
+
+Step 1; Load the context
+
+You have two sources to ground this exercise: the L07 PRD (initiative scope and personas) and the L06 feature spec (trigger configuration acceptance criteria). Load both as context for /stories.
+
+Step 2; Run /stories
+
+/stories
+Generate user stories for InsightFlow's Workflow Builder trigger
+configuration feature.
+
+Source: L07 PRD (Section 3: User Requirements) and L06 feature spec
+(Trigger Configuration, REVIEW v1.0)
+
+Personas:
+- Analyst Alex (primary) — configures triggers, expects automation
+  to run without her involvement
+- VP Priya (secondary) — receives automated reports via email trigger
+
+Generate stories for:
+- Schedule trigger configuration (Analyst Alex)
+- Data threshold trigger configuration (Analyst Alex)
+- Viewing trigger status in the workflow list (both personas)
+
+Apply the standard /stories output format. Flag any story that
+would take longer than one sprint.
+
+
+Step 3; Apply the three-part quality test
+
+For every story in the output:
+
+Is the persona from product.local.md (Analyst Alex or VP Priya)? If "a user" appears, correct it.
+Is the "want" a capability or a UI element? If it says "click," "open," "select" as the primary verb, rewrite as capability.
+Is the "so that" a user outcome or a system action? If it says "so that the system processes" or "so that the trigger is saved," rewrite as user benefit.
+
+Step 4; Evaluate coverage
+
+Check whether the stories cover all user flows from the L06 spec. The spec defined: (1) schedule trigger setup, (2) data threshold trigger setup, (3) trigger status viewing, (4) trigger editing and deactivation. If any flow has no corresponding story, note the gap and prompt: "Story coverage gap: [flow] has no story. Generate a story for this flow."
+
+Step 5; Identify split candidates
+
+Review each story. If any story has more than 7 ACs or covers more than one distinct user flow, apply the splitting rule. For example: if the "configure schedule trigger" story covers both initial setup AND editing an existing trigger, split it into two stories: one per flow.
+
+What You Built​
+
+You generated a story backlog from the Workflow Builder PRD: translating initiative-level requirements into sprint-ready slices that engineers can estimate and build. You applied the three-part quality test to catch the persona, capability, and outcome violations that turn into ambiguous sprint commitments. You identified coverage gaps and split oversized stories before they entered planning.
+
+This story backlog feeds directly into two lessons: Lesson 9 builds the Q3 roadmap around these stories (using the Now/Next/Later framework), and Lesson 10 RICE-scores the backlog to prioritise which stories enter the first sprint.
+
+Flashcards Study Aid​
+
+Continue to Lesson 9: Roadmap Planning & Communication →

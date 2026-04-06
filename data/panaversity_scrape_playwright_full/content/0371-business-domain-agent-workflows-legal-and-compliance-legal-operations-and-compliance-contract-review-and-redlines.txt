@@ -1,0 +1,257 @@
+Contract Review and Redlines
+What CLM Actually Is​
+
+Concept Box: CLM (Contract Lifecycle Management)
+
+CLM is the end-to-end process of creating, negotiating, executing, storing, monitoring, and renewing or terminating contracts. In a mature CLM system, every contract is searchable, every obligation is tracked, and every renewal date triggers an alert. For example, a company with 500 active vendor contracts and a proper CLM system knows that 23 contracts have renewal notice deadlines in the next 60 days, that 4 contracts have uncapped liability provisions flagged for renegotiation, and that the average negotiation cycle time is 11 days. Without CLM, that same company discovers missed renewals when the invoice arrives for another year of a service they intended to cancel. Why it matters: the World Commerce & Contracting Association estimates that poor contract management costs organisations 5-9% of annual revenue -- for a PKR 10 billion company, that is PKR 500 million to PKR 900 million per year lost to administrative friction.
+
+In Lesson 2, you built a negotiation playbook: the legal.local.md file that calibrates every review to your organisation's positions. Now you will see exactly how that playbook drives the review output. You will run /review-contract against a real vendor agreement, interpret the GREEN/YELLOW/RED classification, and generate attorney-ready redlines that reflect your organisation's standards rather than generic commercial positions.
+
+CONNECTOR DUAL-MODE
+
+If you connected Box, Egnyte, or another document management system in Lesson 1, the agent can pull contracts directly from your storage. If not, upload the contract PDF or paste the text: both paths produce identical quality output.
+
+Contract Lifecycle Management is the end-to-end process by which organisations create, negotiate, execute, store, monitor, and renew or terminate contracts. In most organisations without a dedicated CLM system, this process is chaos: contracts drafted in Word, negotiated via tracked-changes email threads, executed by printing and scanning, stored in a shared drive no one can search, renewed when (and if) a calendar reminder fires.
+
+The World Commerce & Contracting Association estimates that poor contract management costs organisations between 5% and 9% of annual revenue -- through missed renewals, unfavourable auto-renewals, untracked obligations, and failed compliance. For a $100M business, that is between $5M and $9M per year in contractual value lost to administrative friction.
+
+The Claude Legal Plugin transforms CLM at the three stages where the value is greatest: review, obligation tracking, and institutional knowledge accumulation.
+
+Stage 1: Contract Review with /review-contract​
+
+The plugin's contract review workflow follows a seven-step process that mirrors how a senior lawyer approaches a new contract. As Anthropic's GitHub documentation describes it:
+
+Step 1 -- Accept the contract. The agent accepts PDF, DOCX, or documents from connected document management systems via MCP connector (Google Drive, SharePoint).
+
+Step 2 -- Gather context. The agent asks:
+
+Which party are you? (Customer / Vendor / Licensor / Licensee / Partner)
+When does this need to be finalised?
+Any specific concerns or unusual aspects to flag?
+Relevant business context that should affect the review?
+
+This step is critical. The same limitation of liability clause means something entirely different depending on your side of the transaction. The agent's analysis changes materially based on your position.
+
+Step 3 -- Load the playbook. The agent reads legal.local.md. If no playbook is found, it informs you and proceeds against general commercial standards, clearly labelling the review.
+
+Step 4 -- Clause-by-clause analysis. The agent reads the entire contract before flagging anything -- a principle Anthropic encodes explicitly because clauses interact. An uncapped indemnity may be partially mitigated by a broad limitation of liability. An unusual IP ownership provision may be commercially reasonable given the pricing structure. Context matters.
+
+Step 5 -- Flag deviations using three-tier classification:
+
+GREEN -- Acceptable. Within standard position or acceptable range.
+YELLOW -- Negotiate. Outside standard but within acceptable range. Agent provides primary redline and fallback.
+RED -- Escalate. Outside acceptable range. Requires attorney review before proceeding.
+
+Concept Box: Redline
+
+A redline is a proposed change to contract language, presented in a format that shows exactly what text to remove and what text to insert. The term comes from the historical practice of marking changes in red ink. For example, a redline might change "Liability of either party is limited to fees paid in the three months prior to the claim" to "Liability of either party is limited to the greater of (i) total fees paid or payable in the twelve months prior to the claim, or (ii) PKR 5,000,000." The Legal Plugin generates redlines as exact replacement text -- not vague suggestions -- ready for an attorney to review and send to the counterparty. Why it matters: specific, ready-to-use redlines reduce attorney review time from drafting (30+ minutes per clause) to review-and-approve (5 minutes per clause).
+
+Concept Box: Limitation of Liability
+
+A limitation of liability clause caps the maximum amount one or both parties can claim from the other for breach of contract. For example, in a SaaS agreement worth PKR 2,400,000 per year, a limitation of liability set at "12 months' fees" means neither party can claim more than PKR 2,400,000 regardless of the actual loss suffered. Carve-outs -- exceptions to the cap -- are common for IP infringement, data breaches, and confidentiality breaches. A clause that caps your vendor's liability at 3 months' fees (PKR 600,000) while leaving your liability uncapped is an asymmetric provision that the Legal Plugin would flag as RED. Why it matters: this is the single most negotiated clause in commercial contracts and the one where playbook configuration has the greatest impact on review accuracy.
+
+Step 6 -- Generate redline suggestions. For each YELLOW and RED item, the agent generates specific proposed language -- not vague guidance, but exact text ready to insert. Each suggestion follows this format (per Anthropic's official documentation):
+
+CLAUSE:     Limitation of Liability (Section 12.3)
+STATUS:     YELLOW
+CURRENT:    "Liability of either party is limited to fees paid in
+             the three months prior to the claim."
+ISSUE:      Cap is below our acceptable range. Current value = GBP 45,000
+            on this contract.
+REDLINE:    "Liability of either party is limited to the greater of
+             (i) total fees paid or payable in the twelve months prior
+             to the claim, or (ii) GBP [floor amount]."
+FALLBACK:   If counterparty resists 12 months, propose 6 months with
+            a floor of GBP [2x annual value].
+RATIONALE:  "Standard commercial practice; proposed cap reflects total
+             value at risk under the agreement."
+PRIORITY:   Nice-to-have
+
+
+Step 7 -- Holistic risk summary. Overall risk assessment: GREEN/YELLOW/RED item counts, the single most material risk, recommended action (approve / negotiate / escalate / decline), and priority negotiation order.
+
+Worked Example: Noor Technologies Reviews a Vendor SaaS Agreement​
+
+Noor Technologies is a 180-person software company headquartered in Karachi, Pakistan. Their Head of Legal Operations, Bilal Hussain, has received a SaaS agreement from CloudStack Inc., a US-based project management tool vendor. The annual contract value is PKR 4,800,000 (approximately USD 17,000). Noor Technologies is the customer.
+
+PREDICTION MOMENT
+
+Before Bilal runs /review-contract, predict: which clauses will the plugin flag as RED? Which will be GREEN? Read the contract description above: a US-based SaaS vendor, PKR 4.8M annual value, Pakistani customer. Write your predictions, then compare them to the output below.
+
+Bilal opens Cowork and begins the review:
+
+/review-contract
+[Upload: CloudStack_MSA_v3.1.pdf]
+
+We are the Customer. SaaS agreement for project management software.
+Need to finalise by end of month -- about 3 weeks. Annual value PKR 4,800,000
+(approx USD 17,000). Concerned about data residency -- our client data will
+be in this system and we need to comply with Pakistan's PDPA 2023.
+New vendor -- first engagement.
+
+
+What to expect: The agent loads your playbook, identifies the governing law, and produces a clause-by-clause analysis using the seven-step process described above. Your output will vary, but look for these sections:
+
+Section	Intent	What to Verify
+Header with ATTORNEY REVIEW: REQUIRED	Governance boundary	Present on every output
+Limitation of Liability clause	Compares the contract's cap against your playbook standard	Should flag the gap between the contract's short cap and your playbook's 12-month standard
+Data Protection clause	Assesses DPA adequacy against PDPA 2023	Should identify a bare "comply with applicable laws" clause as insufficient without a DPA
+Governing Law clause	Evaluates jurisdiction enforceability for a Pakistani company	Should assess enforcement practicality of foreign law
+IP Ownership clause	Checks vendor/customer IP split	Standard SaaS position should be acceptable
+Holistic Risk Summary	Overall recommendation with priority negotiation order	Should prioritise regulatory requirements (DPA) over commercial preferences
+YOUR OUTPUT WILL VARY
+
+The specific redline language, fallback positions, and priority rankings depend on your playbook configuration and the contract details. Focus on whether the agent correctly identifies the gap between the contract terms and your playbook standards. The teaching point is calibrated analysis: the agent uses your playbook to produce specific, actionable redlines rather than generic observations.
+
+Bilal reviews the output. He forwards it to Ayesha (the GC), who reviews the redlines, adjusts any liability floor figures for cleaner negotiation optics, and sends the marked-up contract to CloudStack's legal team. Total time: roughly 40 minutes of combined review: compared to 3-4 hours of manual attorney review without the plugin.
+
+Stage 2: Obligation Tracking with /vendor-check​
+
+A signed contract is the beginning of a legal relationship, not the end of legal work. Contracts contain obligations -- deliverables, payments, notices, audits, SLA thresholds, renewal windows -- and those obligations need active tracking. The /vendor-check command queries your connected contract repository and produces:
+
+Obligations summary -- what each party must do and when
+Upcoming deadlines -- obligations due in the next 30/60/90 days
+Overdue items -- obligations with no recorded completion
+Renewal calendar -- auto-renewal dates, notice windows, recommended action dates
+SLA monitoring -- if connected to your performance management system, current SLA performance against contractual thresholds
+/vendor-check [vendor name or contract reference]
+
+Worked Example: Tracking Obligations After Execution​
+
+After the CloudStack agreement is negotiated and executed, Bilal runs:
+
+/vendor-check CloudStack Inc.
+
+
+What to expect: The agent queries your contract repository and produces a structured obligation summary. Your output will vary, but look for these sections:
+
+Section	Intent	What to Verify
+Contract summary	Key terms at a glance (term, value, governing law)	Should match the negotiated terms
+Upcoming obligations (30/60/90 days)	Deliverables, payments, audit rights with dates and owners	Each obligation should have a clear owner and deadline
+Renewal alert	Auto-renewal date and last date for non-renewal notice	Should flag the notice window so you do not miss it
+Overdue items	Obligations past their deadline	Address any overdue items immediately
+YOUR OUTPUT WILL VARY
+
+The specific dates, amounts, and obligation details depend on the contract you executed and the data in your repository. The teaching point is that a signed contract is the beginning of a legal relationship: the agent transforms it from a static document into an actively monitored set of obligations.
+
+Stage 3: The Contract Repository as Intelligence​
+
+The most underused asset in most legal departments is the archive of executed contracts. These documents contain years of negotiated positions, accepted compromises, and market data about what counterparties will and will not agree to. Connected via MCP to your document management system, the agent transforms this archive from static storage into queryable intelligence:
+
+/brief topic:"limitation of liability benchmarking"
+      scope:"all executed software vendor contracts 2022-2025"
+
+
+The agent searches your archive and returns: the range of liability caps accepted and achieved, which counterparties accepted your standard position, which required negotiation, and at what compromise position RED escalations were ultimately resolved. This is institutional memory that currently lives nowhere -- not in any system, not in any document. The agent builds it automatically.
+
+Worked Example: Querying the Contract Repository​
+
+Bilal wants to prepare for a negotiation with a large enterprise vendor. He queries Noor Technologies' contract archive:
+
+/brief topic:"limitation of liability benchmarking"
+      scope:"all executed vendor SaaS contracts, 2024-2026"
+      output:"ranges by contract value tier"
+
+
+What to expect: The agent searches your contract archive and produces benchmarking data. Your output will vary, but look for these sections:
+
+Section	Intent	What to Verify
+Source count	How many executed contracts inform the analysis	More contracts produce more reliable benchmarks
+Cap ranges by value tier	Average liability cap by contract size	Compare against your playbook standard
+Position outcomes	How often you achieved your standard position vs. settled	Reveals your actual negotiation track record
+Counterparty resistance patterns	Which vendor types push back hardest	Informs preparation for future negotiations
+YOUR OUTPUT WILL VARY
+
+The benchmarking results depend entirely on the contracts in your repository. The teaching point is that your archive of executed contracts is institutional intelligence: it transforms anecdotal negotiation experience into evidence-based positions. When a vendor insists on a short liability cap, your portfolio data provides specific evidence of what comparable vendors have accepted.
+
+The agent reviews, triages, drafts, and flags. The licensed attorney advises, decides, and signs.
+
+CROSS-BORDER CONTRACTS
+
+When your contracts involve parties, performance, or data flows across multiple jurisdictions, the review gets more complex. Lesson 4 covers cross-border analysis in depth: including multi-overlay loading, the five cross-border pitfalls, and e-signature routing with /signature-request.
+
+What You Built​
+A complete contract review with GREEN/YELLOW/RED classification and attorney-ready redlines for the CloudStack SaaS agreement
+An obligation tracking dashboard showing upcoming deadlines, renewal alerts, and overdue items via /vendor-check
+An institutional benchmarking query against Noor Technologies' contract repository: evidence-based negotiation positions derived from 34 executed contracts
+Flashcards Study Aid​
+Try With AI​
+
+Setup: Use these prompts in Cowork or your preferred AI assistant.
+
+Prompt 1: Reproduce​
+I am practising with the Claude Legal Plugin. The lesson walked
+through a cross-border services agreement. Now I want to test
+my skills on a different contract type.
+
+Here is a SaaS subscription agreement (you are the customer):
+
+- Vendor: a US-incorporated cloud analytics platform
+- Annual value: GBP 72,000
+- Governing law: State of California
+- These four clauses need review:
+  1. Auto-renewal with 90-day non-renewal notice window
+     (your standard is 60 days)
+  2. Vendor may modify the service "at any time with 30 days'
+     notice" including removing features you rely on
+  3. Indemnification is one-way (vendor indemnifies for IP
+     infringement only; no indemnification for data breaches)
+  4. Data processing addendum references "applicable law" but
+     does not specify UK GDPR or include SCCs for international
+     transfers
+
+Run /review-contract with your jurisdiction skill active (use
+UK law or your own jurisdiction). For each clause, provide the
+GREEN/YELLOW/RED classification, a proposed redline, and a
+fallback position.
+
+What you are checking: Did the agent flag the service modification
+clause as a material risk (it should — the vendor can remove
+features you depend on with only 30 days' notice)? Did it
+identify the international data transfer gap in the DPA? Compare
+the agent's classification against your own judgment — where do
+you agree and where would you override?
+
+
+What you are learning: Applying contract review to a SaaS subscription agreement tests whether you can transfer the classification framework to a different contract type. The service modification clause is the kind of risk that a generic review might miss but a jurisdiction-aware review with a mature playbook should catch -- it has real business impact even though it is not a traditional "legal risk" clause.
+
+Prompt 2: Adapt​
+A company has just executed a 12-month SaaS agreement with these
+key terms:
+- Annual value: $120,000, paid quarterly
+- Auto-renewal with 60-day notice for non-renewal
+- Vendor must provide SOC 2 Type II report within 60 days of execution
+- Customer has quarterly data processing audit rights
+- 72-hour breach notification requirement
+- Vendor must delete all customer data within 30 days of termination
+
+Design the obligation tracking output that /vendor-check should
+produce for this contract. Include:
+- All upcoming obligations with dates and owners
+- The renewal alert with recommended action date
+- Any calendar reminders that should be set automatically
+
+
+What you are learning: A signed contract is the beginning, not the end, of legal work. Designing the obligation tracking output teaches you to think about contracts as ongoing relationships with active requirements -- the mindset that prevents missed renewals, overlooked audit rights, and compliance gaps.
+
+Prompt 3: Apply​
+Take a real vendor agreement from your organisation (or use a
+sample SaaS agreement you can find online). Run /review-contract
+with your playbook active.
+
+Before running: predict which clauses will be flagged RED
+and which will be GREEN. Write your predictions.
+
+After running: compare the agent's classification against
+your predictions. Where do you agree? Where did the agent
+catch something you missed? Where would you override the
+agent's classification based on your knowledge of the
+commercial relationship?
+
+This comparison — agent output vs. your judgment — is exactly
+what attorney review means in practice.
+
+
+What you are learning: The real test of the contract review workflow is applying it to your own agreements. The prediction-then-comparison exercise builds the judgment calibration that makes you effective at reviewing agent output: knowing when to accept the classification and when to override it based on context the agent does not have.
+
+Continue to Lesson 4: Cross-Border Contracts and E-Signatures ->

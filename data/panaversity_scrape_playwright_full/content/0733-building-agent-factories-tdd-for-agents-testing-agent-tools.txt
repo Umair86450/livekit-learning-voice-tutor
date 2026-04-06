@@ -1,0 +1,671 @@
+Testing Agent Tools
+
+When an agent fails, is it the LLM or the tool?
+
+This question haunted a team at a fintech startup. Their investment analysis agent kept returning incorrect calculations. They spent three days debugging LLM prompts, adjusting temperature, rewriting system messages. The actual problem? A currency conversion tool had a floating-point precision bug that truncated decimal places.
+
+The bug was in plain Python code. No LLM reasoning involved. But because they tested the agent as a monolith, they never isolated the tool to find the real cause.
+
+This lesson teaches you to test tools in isolation. By the time you finish, you will know exactly where failures occur because you will have tested each component independently before testing them together.
+
+Tool Isolation: The Core Insight​
+
+Agent tools are just functions with special signatures. The @function_tool decorator (or its equivalent in your SDK) tells the agent framework about the tool, but the logic inside is regular Python.
+
+You can test that logic without the decorator.
+
+# app/tools.py - Your production tool
+from agents import function_tool
+
+@function_tool
+async def search_tasks(query: str, status: str = "all") -> list[dict]:
+    """Search tasks by query string and optional status filter."""
+    # Validate input
+    if not query or len(query) < 2:
+        raise ValueError("Query must be at least 2 characters")
+
+    # This is the logic we want to test
+    results = await db.execute(
+        select(Task).where(Task.title.contains(query))
+    )
+    return [task.model_dump() for task in results.scalars()]
+
+
+The decorator adds metadata for the agent framework. The function logic remains testable Python:
+
+# tests/test_tools.py - Testing the logic directly
+import pytest
+from app.tools import search_tasks  # Import the decorated function
+
+@pytest.mark.asyncio
+async def test_search_tasks_returns_matching_results(session):
+    """Test search_tasks returns tasks matching the query."""
+    # Create test data
+    task = Task(title="Write documentation", status="pending")
+    session.add(task)
+    await session.commit()
+
+    # Call the function directly - decorator doesn't interfere
+    results = await search_tasks("documentation")
+
+    assert len(results) == 1
+    assert results[0]["title"] == "Write documentation"
+
+
+Output:
+
+tests/test_tools.py::test_search_tasks_returns_matching_results PASSED
+
+
+The decorator is transparent to testing. Python runs the decorated function just like any other async function.
+
+Why Isolation Matters​
+
+Consider debugging without isolation:
+
+Agent fails → Was it the prompt? The LLM? The tool? The database?
+           → Test everything together → Slow, expensive, unclear
+
+
+Now with isolation:
+
+Tool tests pass → Tool logic is correct
+Agent test fails → Problem is in orchestration, not tool logic
+                → Much smaller search space for debugging
+
+
+Isolation transforms debugging from archaeology into science.
+
+Testing Input Validation​
+
+Your tools accept user input that came through an LLM. The LLM might pass anything. Your tools must defend themselves.
+
+SQL Injection Testing​
+# tests/test_tools_security.py
+import pytest
+from app.tools import search_tasks, ValidationError
+
+class TestSearchTasksSecurity:
+    """Security tests for search_tasks tool."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_sql_injection_semicolon(self):
+        """Test tool rejects SQL injection with semicolon."""
+        malicious = "'; DROP TABLE tasks; --"
+
+        with pytest.raises(ValidationError) as exc_info:
+            await search_tasks(malicious)
+
+        assert "invalid characters" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_sql_injection_union(self):
+        """Test tool rejects UNION-based SQL injection."""
+        malicious = "test' UNION SELECT * FROM users --"
+
+        with pytest.raises(ValidationError) as exc_info:
+            await search_tasks(malicious)
+
+        assert "invalid characters" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_sql_injection_comment(self):
+        """Test tool rejects SQL comment injection."""
+        malicious = "test -- ignore rest"
+
+        with pytest.raises(ValidationError) as exc_info:
+            await search_tasks(malicious)
+
+        assert "invalid characters" in str(exc_info.value).lower()
+
+
+Output:
+
+tests/test_tools_security.py::TestSearchTasksSecurity::test_rejects_sql_injection_semicolon PASSED
+tests/test_tools_security.py::TestSearchTasksSecurity::test_rejects_sql_injection_union PASSED
+tests/test_tools_security.py::TestSearchTasksSecurity::test_rejects_sql_injection_comment PASSED
+
+
+These tests verify your validation catches attacks before they reach the database.
+
+The Validation Function Pattern​
+
+Create a dedicated validation function that's easy to test:
+
+# app/validation.py
+import re
+from typing import Any
+
+class ValidationError(Exception):
+    """Raised when input validation fails."""
+    pass
+
+def validate_search_query(query: str) -> str:
+    """
+    Validate and sanitize search query input.
+
+    Raises:
+        ValidationError: If input contains dangerous characters
+
+    Returns:
+        Sanitized query string
+    """
+    if not query:
+        raise ValidationError("Query cannot be empty")
+
+    if len(query) < 2:
+        raise ValidationError("Query must be at least 2 characters")
+
+    if len(query) > 100:
+        raise ValidationError("Query cannot exceed 100 characters")
+
+    # Reject SQL injection patterns
+    dangerous_patterns = [
+        r"['\";]",           # Quotes and semicolons
+        r"--",               # SQL comments
+        r"/\*",              # Block comment start
+        r"\*/",              # Block comment end
+        r"\b(UNION|SELECT|DROP|DELETE|INSERT|UPDATE)\b",  # SQL keywords
+    ]
+
+    for pattern in dangerous_patterns:
+        if re.search(pattern, query, re.IGNORECASE):
+            raise ValidationError(f"Query contains invalid characters")
+
+    return query.strip()
+
+
+Now test the validator directly:
+
+# tests/test_validation.py
+import pytest
+from app.validation import validate_search_query, ValidationError
+
+class TestValidateSearchQuery:
+    """Tests for search query validation."""
+
+    def test_accepts_valid_query(self):
+        """Normal queries pass validation."""
+        result = validate_search_query("write documentation")
+        assert result == "write documentation"
+
+    def test_strips_whitespace(self):
+        """Leading and trailing whitespace is removed."""
+        result = validate_search_query("  test query  ")
+        assert result == "test query"
+
+    def test_rejects_empty_query(self):
+        """Empty string raises ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            validate_search_query("")
+        assert "empty" in str(exc_info.value).lower()
+
+    def test_rejects_short_query(self):
+        """Single character raises ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            validate_search_query("a")
+        assert "2 characters" in str(exc_info.value)
+
+    def test_rejects_long_query(self):
+        """Query over 100 characters raises ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            validate_search_query("x" * 101)
+        assert "100 characters" in str(exc_info.value)
+
+    @pytest.mark.parametrize("malicious_input", [
+        "'; DROP TABLE users; --",
+        "test' OR '1'='1",
+        "test UNION SELECT * FROM passwords",
+        "test /* comment */ injection",
+        'test"; DELETE FROM tasks; --',
+    ])
+    def test_rejects_sql_injection_patterns(self, malicious_input):
+        """Various SQL injection patterns are rejected."""
+        with pytest.raises(ValidationError):
+            validate_search_query(malicious_input)
+
+
+Output:
+
+tests/test_validation.py::TestValidateSearchQuery::test_accepts_valid_query PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_strips_whitespace PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_empty_query PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_short_query PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_long_query PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_sql_injection_patterns['; DROP TABLE users; --] PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_sql_injection_patterns[test' OR '1'='1] PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_sql_injection_patterns[test UNION SELECT * FROM passwords] PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_sql_injection_patterns[test /* comment */ injection] PASSED
+tests/test_validation.py::TestValidateSearchQuery::test_rejects_sql_injection_patterns[test"; DELETE FROM tasks; --] PASSED
+
+
+The @pytest.mark.parametrize decorator runs the same test with multiple inputs, giving you comprehensive coverage with minimal code.
+
+Mocking External Dependencies in Tools​
+
+Tools often call external services: APIs, databases, file systems. Test them by mocking these dependencies.
+
+Mocking External API Calls​
+# app/tools.py
+from agents import function_tool
+import httpx
+
+@function_tool
+async def get_weather(city: str) -> dict:
+    """Get current weather for a city using external API."""
+    validate_city_name(city)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"https://api.weather.example.com/v1/current",
+            params={"city": city}
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+Test it without making real API calls:
+
+# tests/test_tools_external.py
+import pytest
+import respx
+import httpx
+from app.tools import get_weather
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_weather_returns_parsed_response():
+    """Test weather tool parses API response correctly."""
+    respx.get("https://api.weather.example.com/v1/current").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "city": "London",
+                "temperature": 15,
+                "condition": "cloudy",
+                "humidity": 75
+            }
+        )
+    )
+
+    result = await get_weather("London")
+
+    assert result["city"] == "London"
+    assert result["temperature"] == 15
+    assert result["condition"] == "cloudy"
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_weather_handles_api_error():
+    """Test weather tool handles API errors gracefully."""
+    respx.get("https://api.weather.example.com/v1/current").mock(
+        return_value=httpx.Response(
+            500,
+            json={"error": "Internal server error"}
+        )
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await get_weather("London")
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_weather_handles_timeout():
+    """Test weather tool handles network timeout."""
+    respx.get("https://api.weather.example.com/v1/current").mock(
+        side_effect=httpx.TimeoutException("Connection timed out")
+    )
+
+    with pytest.raises(httpx.TimeoutException):
+        await get_weather("London")
+
+
+Output:
+
+tests/test_tools_external.py::test_get_weather_returns_parsed_response PASSED
+tests/test_tools_external.py::test_get_weather_handles_api_error PASSED
+tests/test_tools_external.py::test_get_weather_handles_timeout PASSED
+
+Mocking Database Operations​
+
+When tools perform database operations, use your test database fixture:
+
+# tests/test_tools_db.py
+import pytest
+from app.tools import create_task, search_tasks
+from app.models import Task
+
+@pytest.mark.asyncio
+async def test_create_task_inserts_into_database(session):
+    """Test create_task tool actually creates database record."""
+    result = await create_task(
+        title="Test task",
+        priority="high",
+        session=session  # Inject test session
+    )
+
+    # Verify database state
+    task = await session.get(Task, result["id"])
+    assert task is not None
+    assert task.title == "Test task"
+    assert task.priority == "high"
+
+@pytest.mark.asyncio
+async def test_search_tasks_queries_database(session):
+    """Test search_tasks tool queries database correctly."""
+    # Arrange: Create test data
+    session.add(Task(title="Write tests", status="pending"))
+    session.add(Task(title="Write docs", status="completed"))
+    session.add(Task(title="Review code", status="pending"))
+    await session.commit()
+
+    # Act: Search for tasks
+    results = await search_tasks("Write", session=session)
+
+    # Assert: Only matching tasks returned
+    assert len(results) == 2
+    titles = [r["title"] for r in results]
+    assert "Write tests" in titles
+    assert "Write docs" in titles
+    assert "Review code" not in titles
+
+
+Output:
+
+tests/test_tools_db.py::test_create_task_inserts_into_database PASSED
+tests/test_tools_db.py::test_search_tasks_queries_database PASSED
+
+Testing Tool Error Handling​
+
+Tools must fail gracefully. Test every error path.
+
+# tests/test_tools_errors.py
+import pytest
+from app.tools import update_task, TaskNotFoundError, PermissionError
+
+@pytest.mark.asyncio
+async def test_update_task_not_found(session):
+    """Test updating non-existent task raises appropriate error."""
+    with pytest.raises(TaskNotFoundError) as exc_info:
+        await update_task(
+            task_id=99999,
+            updates={"title": "New title"},
+            session=session
+        )
+
+    assert "99999" in str(exc_info.value)
+
+@pytest.mark.asyncio
+async def test_update_task_wrong_owner(session, user_alice, user_bob):
+    """Test users cannot update others' tasks."""
+    # Create task owned by Alice
+    task = Task(title="Alice's task", owner_id=user_alice.id)
+    session.add(task)
+    await session.commit()
+
+    # Bob tries to update
+    with pytest.raises(PermissionError) as exc_info:
+        await update_task(
+            task_id=task.id,
+            updates={"title": "Bob's title"},
+            user=user_bob,
+            session=session
+        )
+
+    assert "permission" in str(exc_info.value).lower()
+
+@pytest.mark.asyncio
+async def test_update_task_invalid_status(session):
+    """Test updating with invalid status raises validation error."""
+    task = Task(title="Test task", status="pending")
+    session.add(task)
+    await session.commit()
+
+    with pytest.raises(ValidationError) as exc_info:
+        await update_task(
+            task_id=task.id,
+            updates={"status": "invalid_status"},
+            session=session
+        )
+
+    assert "status" in str(exc_info.value).lower()
+
+
+Output:
+
+tests/test_tools_errors.py::test_update_task_not_found PASSED
+tests/test_tools_errors.py::test_update_task_wrong_owner PASSED
+tests/test_tools_errors.py::test_update_task_invalid_status PASSED
+
+Hands-On Exercise​
+
+Create a test file for your agent's tools. Use this structure:
+
+Create tests/test_tools.py:
+
+"""
+Tool isolation tests for Task API agent.
+
+Requirements:
+1. Test each tool function independently (without agent)
+2. Include input validation tests (security)
+3. Mock external dependencies
+4. Test error handling paths
+5. All tests pass with no network calls
+"""
+
+import pytest
+import respx
+import httpx
+from app.tools import create_task, search_tasks, update_task, delete_task
+from app.validation import ValidationError
+from app.models import Task
+
+class TestCreateTask:
+    """Tests for create_task tool."""
+
+    @pytest.mark.asyncio
+    async def test_creates_task_with_required_fields(self, session):
+        """Tool creates task with title only."""
+        # TODO: Implement
+        pass
+
+    @pytest.mark.asyncio
+    async def test_creates_task_with_all_fields(self, session):
+        """Tool creates task with all optional fields."""
+        # TODO: Implement
+        pass
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_title(self, session):
+        """Tool rejects empty title with ValidationError."""
+        # TODO: Implement
+        pass
+
+
+class TestSearchTasks:
+    """Tests for search_tasks tool."""
+
+    @pytest.mark.asyncio
+    async def test_returns_matching_tasks(self, session):
+        """Tool returns tasks matching query."""
+        # TODO: Implement
+        pass
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_no_matches(self, session):
+        """Tool returns empty list when nothing matches."""
+        # TODO: Implement
+        pass
+
+    @pytest.mark.asyncio
+    async def test_rejects_sql_injection(self, session):
+        """Tool rejects SQL injection attempts."""
+        # TODO: Implement
+        pass
+
+
+class TestUpdateTask:
+    """Tests for update_task tool."""
+
+    @pytest.mark.asyncio
+    async def test_updates_task_fields(self, session):
+        """Tool updates specified fields."""
+        # TODO: Implement
+        pass
+
+    @pytest.mark.asyncio
+    async def test_raises_not_found_for_invalid_id(self, session):
+        """Tool raises TaskNotFoundError for missing task."""
+        # TODO: Implement
+        pass
+
+
+class TestDeleteTask:
+    """Tests for delete_task tool."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_existing_task(self, session):
+        """Tool removes task from database."""
+        # TODO: Implement
+        pass
+
+    @pytest.mark.asyncio
+    async def test_raises_not_found_for_invalid_id(self, session):
+        """Tool raises TaskNotFoundError for missing task."""
+        # TODO: Implement
+        pass
+
+
+Run your tests:
+
+pytest tests/test_tools.py -v
+
+
+Success criteria:
+
+All tool functions have at least one test
+Security tests exist for user-facing inputs
+Error paths are tested
+All tests pass in under 5 seconds (no network calls)
+Skill Pattern Extraction​
+
+You have now tested tools in isolation, validated security, and mocked external dependencies. These patterns repeat across every agent project.
+
+Notice what emerged:
+
+Tool Isolation Pattern: Test the function, not the decorator. The @function_tool wrapper is transparent to pytest.
+
+Validation Layer Pattern: Extract validation to a separate function. Test it with parametrized inputs covering attack vectors.
+
+External Mock Pattern: Use respx for HTTP APIs, fixture injection for databases. Same pattern, different dependencies.
+
+Error Path Pattern: Test every error that can occur. Users will trigger them; your code should handle them gracefully.
+
+These patterns belong in your agent-tdd skill.
+
+Try With AI​
+Prompt 1: Extract Tool for Testing​
+My agent has this tool:
+
+@function_tool
+async def create_task(title: str, priority: str = "medium"):
+    """Create a new task with the given title and priority."""
+    if not title or len(title) < 3:
+        raise ValueError("Title must be at least 3 characters")
+
+    task = Task(title=title, priority=priority)
+    db.add(task)
+    await db.commit()
+    return {"id": task.id, "title": task.title}
+
+How do I test this function without the @function_tool decorator
+affecting the test? Show me the isolation pattern, including how
+to inject a test database session.
+
+
+What you're learning: The decorator is metadata for the agent framework. The function itself is just Python. You can call it directly in tests, injecting your own database session instead of the production one.
+
+Prompt 2: Security Testing​
+Your test doesn't check for SQL injection. My tool accepts a
+search query that goes into a database WHERE clause:
+
+results = await session.execute(
+    select(Task).where(Task.title.contains(query))
+)
+
+Even though SQLAlchemy parameterizes queries, I want to validate
+input before it reaches the database. Generate security-focused
+tests that verify my validation layer blocks:
+- SQL injection patterns
+- Excessively long inputs
+- Special characters that could cause issues
+
+Also show me how to implement the validation function these tests require.
+
+
+What you're learning: Defense in depth. SQLAlchemy parameterizes queries, but you validate anyway. Multiple layers of security catch different attack vectors. AI helps you identify attack patterns you might miss.
+
+Prompt 3: Design Reusable Pattern​
+I've written tool tests for 5 different tools. Each test file has
+similar patterns:
+- Arrange: Create test data in database
+- Act: Call tool function with test session
+- Assert: Verify return value and database state
+
+I also repeat security tests for every tool that accepts user input.
+
+What patterns repeat? Let's design reusable fixtures and helpers
+for my agent-tdd skill that I can use in every project.
+
+
+What you're learning: Extracting patterns into reusable components is Layer 3 intelligence design. Your agent-tdd skill should include these patterns so you never rewrite them.
+
+Reflect on Your Skill​
+Test Your Skill​
+Using my agent-tdd skill, show me how to test an agent tool in
+isolation. Does my skill include:
+- The isolation pattern (testing decorated functions directly)?
+- Security testing patterns for input validation?
+- External dependency mocking for tools that call APIs?
+- Error path testing patterns?
+
+Identify Gaps​
+
+After running that prompt, ask yourself:
+
+Does my skill explain why isolation testing matters for debugging?
+Does it include parametrized tests for security attack patterns?
+Does it show how to inject test database sessions?
+Does it cover the relationship between tool tests and integration tests?
+Improve Your Skill​
+
+If you found gaps:
+
+My agent-tdd skill needs tool testing patterns. Add:
+
+1. Tool isolation pattern:
+   - Import decorated function directly
+   - Call with test dependencies injected
+   - Verify return value and side effects
+
+2. Security testing pattern:
+   - Extract validation to testable function
+   - Use @pytest.mark.parametrize for attack payloads
+   - Include SQL injection, XSS, command injection examples
+
+3. External dependency mocking:
+   - Use respx for HTTP APIs
+   - Inject test database session
+   - Mock file system operations with tmp_path fixture
+
+4. Error path testing:
+   - Test every exception the tool can raise
+   - Verify error messages are helpful
+   - Test permission and not-found scenarios
+
+Each pattern should include a complete test example that I can
+adapt for my own tools.
+
+
+Your agent-tdd skill grows more valuable with each pattern you add. Tool isolation testing catches bugs at the source, saving hours of debugging at the integration level.

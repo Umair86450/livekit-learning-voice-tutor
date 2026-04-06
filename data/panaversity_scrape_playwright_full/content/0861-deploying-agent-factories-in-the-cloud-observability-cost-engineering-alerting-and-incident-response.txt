@@ -1,0 +1,477 @@
+Alerting and Incident Response
+
+It is 3am. Your phone buzzes. "ALERT: Task API Error Rate High." You roll out of bed, open your laptop, and spend 20 minutes diagnosing... a 30-second traffic spike that already resolved itself. Back to sleep. At 3:47am, another alert. Same story. By morning, you have gotten 90 minutes of broken sleep across 6 false alarms.
+
+This is alert fatigue, and it destroys on-call engineers. When every alert is treated as urgent, nothing is actually urgent. Teams start ignoring alerts, and when a real incident happens, nobody responds because they have been conditioned to expect false positives.
+
+The solution is SLO-based alerting. Instead of alerting on instantaneous metrics ("error rate exceeded 1%"), you alert on error budget consumption ("we are burning our monthly budget at 14x the sustainable rate"). This approach, documented in Google's SRE Workbook, reduces alert noise while catching real problems faster.
+
+In this lesson, you will implement multi-window, multi-burn-rate alerting for your Task API, configure Alertmanager to route alerts appropriately, and create runbooks that make 3am incidents manageable.
+
+Why Threshold Alerting Fails​
+
+Before understanding the solution, you need to understand the problem with traditional alerting.
+
+Direct threshold alerting looks like this:
+
+# Alert when error rate exceeds 0.1%
+ALERT TaskAPIHighErrors
+  IF task_api:error_ratio:rate5m > 0.001
+  FOR 1m
+
+
+This has two failure modes:
+
+Problem	What Happens	Impact
+Too sensitive	Brief spikes (30 seconds) trigger alerts	False positives, alert fatigue, ignored alerts
+Too slow	Waiting 5 minutes misses fast incidents	Real problems go unnoticed
+
+You cannot fix this by tuning thresholds. If you set the threshold high, you miss real incidents. If you set it low, you get noise. The fundamental approach is wrong.
+
+Burn rate alerting asks a different question: "How fast are we consuming our error budget?"
+
+Approach	Question Asked	Awareness
+Threshold	"Is error rate above X right now?"	None of SLO or budget
+Burn rate	"At this rate, when do we exhaust our budget?"	SLO-aware, budget-aware
+
+A 0.5% error rate might be fine if your SLO is 99% (5x your budget). But 0.5% is a crisis if your SLO is 99.9% (you are burning budget at 5x sustainable rate and will exhaust it in 6 days instead of 30).
+
+Burn Rate Formula​
+
+Burn rate measures how fast you consume error budget relative to the sustainable rate.
+
+Burn Rate = Error Rate / Error Budget
+
+For a 99.9% SLO:
+  Error Budget = 100% - 99.9% = 0.1%
+  Sustainable Burn Rate = 1x (budget lasts exactly 30 days)
+
+  If error rate = 0.1%: Burn Rate = 0.1% / 0.1% = 1x (normal)
+  If error rate = 1.44%: Burn Rate = 1.44% / 0.1% = 14.4x (critical)
+  If error rate = 0.6%: Burn Rate = 0.6% / 0.1% = 6x (elevated)
+
+
+The insight: a 14.4x burn rate consumes 2% of your monthly budget in 1 hour. A 6x burn rate consumes 5% in 6 hours. These numbers translate directly into urgency levels.
+
+Burn Rate	Budget Consumed	Time Window	Response
+14.4x	2%	1 hour	Page immediately (critical)
+6x	5%	6 hours	Create ticket (warning)
+1x	100%	30 days	Normal operation
+Multi-Window, Multi-Burn-Rate Alerting​
+
+Google's SRE Workbook recommends using two time windows for each burn rate threshold:
+
+Short window (5 minutes): Detects the problem quickly
+Long window (1 hour): Confirms it is sustained, not a spike
+
+Both conditions must be true to fire an alert. This eliminates false positives from brief spikes while still catching real incidents quickly.
+
+# task-api-slo-alerts.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: task-api-slo-alerts
+  namespace: monitoring
+  labels:
+    release: prometheus  # Must match your Helm release label
+spec:
+  groups:
+  - name: task-api.slo.recording
+    interval: 30s
+    rules:
+    # Recording rule: compute error ratio for clean queries
+    - record: task_api:error_ratio:rate5m
+      expr: |
+        sum(rate(task_api_requests_total{status=~"5.."}[5m]))
+        /
+        sum(rate(task_api_requests_total[5m]))
+
+    - record: task_api:error_ratio:rate1h
+      expr: |
+        sum(rate(task_api_requests_total{status=~"5.."}[1h]))
+        /
+        sum(rate(task_api_requests_total[1h]))
+
+    - record: task_api:error_ratio:rate6h
+      expr: |
+        sum(rate(task_api_requests_total{status=~"5.."}[6h]))
+        /
+        sum(rate(task_api_requests_total[6h]))
+
+  - name: task-api.slo.alerts
+    rules:
+    # CRITICAL: 14.4x burn rate (2% budget in 1 hour) - page immediately
+    - alert: TaskAPIHighErrorBudgetBurn
+      expr: |
+        (
+          task_api:error_ratio:rate5m > (14.4 * 0.001)
+          and
+          task_api:error_ratio:rate1h > (14.4 * 0.001)
+        )
+      for: 2m
+      labels:
+        severity: critical
+        slo: availability
+      annotations:
+        summary: "Task API burning error budget rapidly"
+        description: "Error rate {{ $value | humanizePercentage }} exceeds 14.4x burn rate. At this rate, monthly budget exhausts in {{ printf \"%.0f\" (30 / 14.4) }} days."
+        runbook_url: "https://runbooks.example.com/task-api-high-error-rate"
+        dashboard_url: "https://grafana.example.com/d/task-api-slo"
+
+    # WARNING: 6x burn rate (5% budget in 6 hours) - create ticket
+    - alert: TaskAPIElevatedErrorRate
+      expr: |
+        (
+          task_api:error_ratio:rate30m > (6 * 0.001)
+          and
+          task_api:error_ratio:rate6h > (6 * 0.001)
+        )
+      for: 5m
+      labels:
+        severity: warning
+        slo: availability
+      annotations:
+        summary: "Task API error rate elevated"
+        description: "Error rate {{ $value | humanizePercentage }} exceeds 6x burn rate. Budget impact requires attention."
+        runbook_url: "https://runbooks.example.com/task-api-elevated-errors"
+
+    # LATENCY SLO: P95 above 200ms target
+    - alert: TaskAPIHighLatency
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(task_api_request_duration_seconds_bucket[5m])) by (le)
+        ) > 0.2
+      for: 5m
+      labels:
+        severity: warning
+        slo: latency
+      annotations:
+        summary: "Task API P95 latency above SLO"
+        description: "P95 latency is {{ $value | humanizeDuration }}, exceeds 200ms target"
+
+
+Apply the PrometheusRule:
+
+kubectl apply -f task-api-slo-alerts.yaml
+
+
+Output:
+
+prometheusrule.monitoring.coreos.com/task-api-slo-alerts created
+
+
+Verify Prometheus loaded the rules:
+
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+
+
+Navigate to http://localhost:9090/alerts. You should see TaskAPIHighErrorBudgetBurn and TaskAPIElevatedErrorRate listed (inactive if your error rate is healthy).
+
+Alertmanager Configuration​
+
+Alertmanager receives alerts from Prometheus and routes them to notification channels. The routing tree determines which alerts go where based on labels.
+
+Alertmanager config structure:
+
+# alertmanager-config.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-prometheus-kube-prometheus-alertmanager
+  namespace: monitoring
+stringData:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+      slack_api_url: 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+
+    route:
+      receiver: 'default-receiver'
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+      # Critical SLO alerts: page immediately via PagerDuty
+      - match:
+          severity: critical
+          slo: availability
+        receiver: 'pagerduty-critical'
+        group_wait: 10s
+        repeat_interval: 1h
+
+      # Warning alerts: send to Slack
+      - match:
+          severity: warning
+        receiver: 'slack-warnings'
+        group_wait: 5m
+        repeat_interval: 4h
+
+    receivers:
+    - name: 'default-receiver'
+      email_configs:
+      - to: 'team@example.com'
+        send_resolved: true
+
+    - name: 'pagerduty-critical'
+      pagerduty_configs:
+      - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+        severity: critical
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          dashboard: '{{ .CommonAnnotations.dashboard_url }}'
+          runbook: '{{ .CommonAnnotations.runbook_url }}'
+
+    - name: 'slack-warnings'
+      slack_configs:
+      - channel: '#alerts'
+        title: '{{ .CommonLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+        actions:
+        - type: button
+          text: 'Runbook'
+          url: '{{ .CommonAnnotations.runbook_url }}'
+        - type: button
+          text: 'Dashboard'
+          url: '{{ .CommonAnnotations.dashboard_url }}'
+
+
+Key configuration elements:
+
+Element	Purpose
+group_by	Combine alerts with same labels into one notification
+group_wait	How long to wait before sending first notification (collect related alerts)
+group_interval	Minimum time between notifications for same group
+repeat_interval	How often to resend unresolved alerts
+routes	Match alerts to receivers based on labels
+
+Apply the configuration:
+
+kubectl apply -f alertmanager-config.yaml
+
+
+Output:
+
+secret/alertmanager-prometheus-kube-prometheus-alertmanager configured
+
+
+Alertmanager reloads configuration automatically within 30 seconds.
+
+Alert Hygiene: Severity Levels and Actionability​
+
+Not every alert should wake someone up at 3am. Define clear severity levels with concrete response expectations.
+
+Severity	Response Time	Who Responds	Channel
+critical	Immediate	On-call engineer	PagerDuty page
+warning	Next business day	Owning team	Slack channel
+info	Best effort	Anyone interested	Dashboard only
+
+The actionability test: Before creating any alert, ask:
+
+Is this actionable? Can someone do something about it right now?
+Is this urgent? Does it need attention immediately or can it wait?
+Is there a runbook? Does the responder know what to do?
+
+If any answer is "no," the alert should not page. Recategorize as warning or info, or remove entirely.
+
+Common anti-patterns to avoid:
+
+Anti-Pattern	Problem	Solution
+Alerting on symptoms and causes	Double alerts for same incident	Alert on customer impact only
+Page on every 5xx	Brief spikes wake people up	Use burn rate, not instantaneous rate
+No runbook	Responder wastes time diagnosing	Every page needs a runbook URL
+Vague descriptions	"Error rate high" tells nothing	Include current value, threshold, impact
+Incident Response: Runbooks and Escalation​
+
+When an alert fires, the on-call engineer needs to diagnose and mitigate quickly. Runbooks provide step-by-step guidance.
+
+Runbook template for TaskAPIHighErrorBudgetBurn:
+
+# Runbook: TaskAPIHighErrorBudgetBurn
+
+## Alert Meaning
+
+Task API is returning 5xx errors at a rate that will exhaust monthly error budget
+in approximately 2 days if sustained.
+
+## Immediate Diagnostics (first 5 minutes)
+
+### Step 1: Check current error rate
+
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+
+Query: task_api:error_ratio:rate5m
+
+Expected: Value should be above 0.0144 (14.4x burn rate for 99.9% SLO)
+
+### Step 2: Identify error sources
+
+Query: sum(rate(task_api_requests_total{status=~"5.."}[5m])) by (endpoint, status)
+
+Look for: Which endpoints are failing? Is it one or all?
+
+### Step 3: Check recent deployments
+
+kubectl rollout history deployment/task-api -n production
+
+Look for: Was there a deployment in the last hour?
+
+### Step 4: Check pod health
+
+kubectl get pods -n production -l app=task-api
+kubectl logs -n production -l app=task-api --tail=50
+
+Look for: CrashLoopBackOff, OOMKilled, connection errors
+
+## Decision Tree
+
+- If single endpoint failing -> Check database connections for that route
+- If all endpoints failing -> Check shared dependencies (database, cache)
+- If after recent deployment -> Rollback immediately
+- If external dependency -> Check status page, implement circuit breaker
+
+## Mitigation Actions
+
+### Rollback deployment
+
+kubectl rollout undo deployment/task-api -n production
+
+### Scale up (if load-related)
+
+kubectl scale deployment/task-api -n production --replicas=5
+
+### Enable circuit breaker (if external dependency)
+
+kubectl patch configmap task-api-config -n production \
+  --patch '{"data":{"CIRCUIT_BREAKER_ENABLED":"true"}}'
+
+## Escalation Path
+
+- 15 minutes unresolved: Escalate to senior on-call
+- 30 minutes unresolved: Escalate to engineering lead
+- Customer impact confirmed: Initiate incident communication
+
+## Post-Incident
+
+- Create post-incident review ticket
+- Update this runbook with new learnings
+- Adjust SLO if appropriate
+
+
+Link runbooks to alerts via the runbook_url annotation:
+
+annotations:
+  runbook_url: "https://runbooks.example.com/task-api-high-error-rate"
+
+
+When an engineer receives a page, they click the runbook link and have immediate context.
+
+Post-Incident Reviews and SLO Impact​
+
+After every significant incident, conduct a blameless post-incident review. The goal is learning, not punishment.
+
+Post-incident review template:
+
+Section	Content
+Timeline	When did the issue start, detect, mitigate, resolve?
+Impact	Error budget consumed, customers affected, duration
+Root Cause	What actually broke? (technical, not human)
+Detection	Did alerting work? How long until we knew?
+Mitigation	What actions resolved the issue?
+Prevention	What changes prevent recurrence?
+Action Items	Specific tasks with owners and deadlines
+
+SLO impact calculation:
+
+After an incident, calculate the error budget impact:
+
+# Error budget consumed during incident (1 hour window)
+1 - (
+  sum(increase(task_api_requests_total{status!~"5.."}[1h]))
+  /
+  sum(increase(task_api_requests_total[1h]))
+) / 0.001
+
+
+If this value exceeds your remaining monthly budget, you are now in "budget exhausted" mode. According to SRE principles, this means:
+
+No feature releases until budget replenishes
+Focus engineering effort on reliability improvements
+Communicate SLO status to stakeholders
+Reflect on Your Skill​
+
+Now that you understand alerting patterns, test your observability skill:
+
+Ask your skill to generate multi-burn-rate alerting rules:
+
+Generate PrometheusRule YAML for multi-burn-rate alerting on my Task API.
+SLO: 99.9% availability
+Metrics: task_api_requests_total with status label
+
+I need:
+1. Critical alert at 14.4x burn rate (short: 5m, long: 1h)
+2. Warning alert at 6x burn rate (short: 30m, long: 6h)
+3. Recording rules for clean queries
+4. Annotations with summary, description, runbook_url
+
+
+Verify your skill produces rules similar to what you learned. Check whether it correctly calculates the threshold (14.4 * 0.001 = 0.0144) and includes both time windows with and operator. If the skill uses different patterns, evaluate whether they represent improvements or need correction based on your specific requirements.
+
+Try With AI​
+Part 1: Alert Design Review​
+
+Share your alerting configuration with AI:
+
+Review my SLO alerting setup:
+
+SLO: 99.9% availability (43 minutes error budget per month)
+Current alerts:
+- Critical at 14.4x burn rate (5m AND 1h windows)
+- Warning at 6x burn rate (30m AND 6h windows)
+
+Questions:
+1. Are these thresholds appropriate for a user-facing API?
+2. What about latency SLOs - how should I alert on P95 latency?
+3. Should I add a low-severity alert for 1x burn rate (sustained degradation)?
+
+
+What you're learning: SLO alerting strategy. AI can suggest whether your burn rate thresholds match your business needs and propose additional alert types (latency, saturation) that protect user experience.
+
+Part 2: Runbook Generation​
+
+Ask AI to help create a runbook:
+
+Help me create an incident response runbook for this alert:
+
+Alert: TaskAPIHighLatency
+Condition: P95 latency > 200ms for 5 minutes
+Service: FastAPI application with PostgreSQL and Redis dependencies
+
+Generate a runbook with:
+1. Immediate diagnostic commands (kubectl, promql)
+2. Decision tree for common causes
+3. Mitigation actions for each cause
+4. Escalation path
+
+
+What you're learning: Runbook structure and diagnostic methodology. AI suggests commands you might not know, while you validate they work in your specific environment and cluster configuration.
+
+Part 3: Alertmanager Routing​
+
+Work through a routing scenario:
+
+I want to configure Alertmanager routing:
+- Critical SLO alerts (availability) -> PagerDuty, page immediately
+- Warning SLO alerts -> Slack #sre-alerts
+- Info alerts about capacity -> Slack #capacity-planning
+- All alerts should also go to email as backup
+
+Help me design the routing tree with correct match conditions and receivers.
+
+
+What you're learning: Alertmanager route hierarchy. AI explains the evaluation order (most specific first) and helps you avoid common mistakes like overly broad matchers that swallow alerts.
+
+Safety Note​
+
+When configuring alerting for production systems, always test alert routing in a staging environment first. Misconfigured routing can result in pages going to the wrong team, alerts being swallowed entirely, or notification floods that violate rate limits on PagerDuty/Slack. Use Alertmanager's /api/v1/alerts endpoint to simulate alerts before relying on them for production incidents.

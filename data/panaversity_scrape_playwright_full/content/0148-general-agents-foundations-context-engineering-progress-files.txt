@@ -1,0 +1,780 @@
+Long-Horizon Work: Progress Files and Session Architecture
+
+You're working on something substantial. Not a quick task you can finish in one sitting,a real project that matters. Maybe it's a multi-phase contract review. A marketing campaign launch spanning several weeks. A comprehensive literature review for your research. A consulting engagement with multiple deliverables. You've estimated five hours of work, but life happens. You close the laptop after ninety minutes, promising to continue tomorrow.
+
+Tomorrow arrives. You open Claude Code. Where were you? What decisions did you make? Which aspects did you complete? What's left?
+
+Without a system, you spend the first thirty minutes re-establishing context,re-reading documents, re-explaining the goal, hoping Claude picks up where you left off. Sometimes it does. Often it doesn't. Work gets repeated. Decisions get forgotten. Progress feels like walking up an escalator going down.
+
+This lesson introduces the architecture for long-horizon work: progress files that persist state across sessions, task decomposition that turns vague goals into trackable deliverables, and session protocols that ensure every session starts informed and ends with work preserved.
+
+The Problem with Long Conversations​
+
+Lesson 6 taught you when to /compact versus /clear. But compaction and session resumption only help within a single narrative,a conversation that grows, gets compressed, and continues.
+
+Real projects don't work that way.
+
+Real projects span multiple days, interrupted by meetings, sleep, weekends, and the hundred other demands on your attention. Each interruption creates a session boundary. Each session boundary creates a continuity problem.
+
+Claude Code offers --continue to resume the most recent session, but sessions accumulate context rot (Lesson 2). After 3-4 days, resumed sessions become convoluted,too many tangents, too much noise. You need a different architecture.
+
+The Harness Architecture​
+
+Harrison Chase, CEO of LangChain, introduced what he calls the "harness architecture" for long-horizon tasks. The insight: don't try to maintain one continuous conversation. Instead, treat each session as independent, coordinated through a shared artifact.
+
+Traditional single-agent architecture:
+
+[User] → [Single Agent] → [Output]
+
+
+One session, one agent, one conversation. Context accumulates until it overflows. Works for tasks you can finish in one sitting.
+
+Long-horizon harness architecture:
+
+[Initializer Agent] → [Progress File] ← [Coding Agent Session 1]
+                                      ← [Coding Agent Session 2]
+                                      ← [Coding Agent Session N]
+
+
+The progress file becomes the coordination mechanism. Each session reads it to understand state, does work, then writes back to it. Sessions don't need to share context,they share the file.
+
+The Two-Agent Mental Model​
+
+Think of it as two collaborating agents:
+
+The Initializer Agent runs once at project start. Its job:
+
+Break down the project into granular tasks
+Create the initial progress file
+Establish the working context and baseline state
+Make the first key decisions
+
+The Working Agent runs in each subsequent session. Its job:
+
+Read the progress file to understand current state
+Select the highest-priority incomplete task
+Do focused work on that task
+Update the progress file before ending
+
+You might be thinking: "But I'm using Claude Code for both." Yes. The distinction is mental, not technical. The Initializer phase happens in your first session. Every subsequent session is a Working Agent session. The progress file bridges them.
+
+Progress File Anatomy​
+
+Here's the template that makes this work:
+
+# Project: [Feature Name]
+
+## Last Updated: [Date/Time]
+
+## Current Session: [Session Number]
+
+## Completed
+
+- [x] Task description (Session 1)
+- [x] Task description (Session 1)
+- [x] Task description (Session 2)
+
+## In Progress
+
+- [ ] Task description (started Session 3)
+
+## Blocked
+
+- [ ] Task description (waiting on: specific blocker)
+
+## Not Started
+
+- [ ] Task description
+- [ ] Task description
+
+## Decisions Made
+
+- Decision: [What you decided]
+  - Rationale: [Why you decided it]
+  - Session: [When you decided it]
+  - Alternatives considered: [What you rejected]
+
+## Known Issues
+
+- Issue: [What's broken or concerning]
+  - Impact: [How bad is it]
+  - Plan: [What to do about it]
+
+## Session Log
+
+### Session 1 (Date)
+
+- Started: [time]
+- Ended: [time]
+- Commits: [commit hashes]
+- Summary: [One paragraph of what happened]
+
+### Session 2 (Date)
+
+- Started: [time]
+- Ended: [time]
+- Commits: [commit hashes]
+- Summary: [One paragraph of what happened]
+
+
+Let's break down why each section matters.
+
+Completed (with Session Markers)​
+## Completed
+
+- [x] Scope and objectives documented (Session 1)
+- [x] Initial research completed (Session 1)
+- [x] Key stakeholders identified (Session 2)
+- [x] First draft of main deliverable (Session 2)
+- [x] Stakeholder feedback incorporated (Session 3)
+
+
+The session markers aren't just for tracking. They help future-you understand the project arc. If something goes wrong in Session 5, you can trace back: "The stakeholder feedback was Session 3,what else changed then?"
+
+In Progress​
+## In Progress
+
+- [ ] Executive summary draft (started Session 3, 70% complete)
+  - Done: Key findings section, methodology overview
+  - Remaining: Recommendations section, final formatting
+
+
+Don't just mark things "in progress." Annotate them. What's done within this task? What remains? When you return after a weekend, this annotation prevents you from re-doing completed subtasks.
+
+Blocked​
+## Blocked
+
+- [ ] Competitor analysis section (waiting on: Q4 market data from finance team)
+- [ ] Final recommendations (waiting on: decision on budget allocation approach)
+
+
+Blocked items need specific blockers. "Blocked on information" is useless. "Blocked on Q4 market data from finance team" is actionable,you can follow up with them.
+
+Decisions Made​
+
+This is the most undervalued section.
+
+## Decisions Made
+
+- Decision: Organizing report by business unit, not by timeline
+  - Rationale: Stakeholders care most about their unit's performance; timeline view available in appendix
+  - Session: 2
+  - Alternatives considered: Chronological (rejected: harder to find unit-specific info), by metric type (rejected: loses narrative flow)
+
+- Decision: Using conservative revenue projections, not optimistic
+  - Rationale: CFO prefers under-promise/over-deliver; matches company culture
+  - Session: 3
+  - Alternatives considered: Optimistic (rejected: credibility risk), range-based (rejected: too complex for executive summary)
+
+- Decision: Including competitor benchmarks in main body, not appendix
+  - Rationale: Competitive context essential for understanding our position; leadership specifically requested visibility
+  - Session: 3
+  - Alternatives considered: Appendix only (rejected: too buried), separate report (rejected: fragments the narrative)
+
+
+Why does this matter? Because in Session 7, you'll look at your deliverable and think "Why did we organize by business unit? Should we reorganize by timeline?" Without the decision log, you'll have to research the tradeoffs again,or worse, restructure and introduce inconsistency.
+
+The decision log is your institutional memory. It answers "why did we do it this way?" when you've forgotten.
+
+Known Issues​
+## Known Issues
+
+- Issue: Q3 data incomplete for European markets
+  - Impact: Regional analysis less reliable; acknowledged in methodology section
+  - Plan: Flag as limitation; update when finance provides complete data
+
+- Issue: Two stakeholder interviews still pending
+  - Impact: May miss perspectives from operations team; low risk for initial draft
+  - Plan: Schedule interviews; incorporate feedback in revision cycle
+
+
+Known issues aren't failures,they're conscious acknowledgments of limitations. You know about them, you've assessed their impact, you have a plan. This prevents the "surprise" of discovering problems you actually knew about but forgot.
+
+Session Log​
+## Session Log
+
+### Session 3 (2026-01-29)
+
+- Started: 14:00
+- Ended: 16:30
+- Checkpoint: Saved draft v3, exported PDF for stakeholder review
+- Summary: Drafted executive summary and key findings. Chose conservative projections based on CFO preference. Hit a snag with competitor data formatting—decided to include benchmarks in main body per leadership request. Left off at 70% complete on executive summary; recommendations section remaining.
+
+
+The session log is narrative context. When the progress file sections give you facts, the session log gives you story. "Hit a snag with competitor data formatting" explains why Session 3 took longer than expected.
+
+Task Decomposition: The Art of Granular Work​
+
+The harness architecture only works if your tasks are granular enough to complete within a session. "Complete the market analysis" isn't a task,it's a project. You need decomposition.
+
+Bad decomposition:
+
+## Not Started
+
+- [ ] Do the research
+- [ ] Write the report
+- [ ] Handle feedback
+
+
+These are too vague. "Do the research" could take five sessions or fifteen. You can't track progress against it. You can't know when you're 50% done.
+
+Good decomposition varies by domain. Here are examples across professional contexts:
+
+Legal: Contract Review Project​
+## Not Started
+
+- [ ] Create contract review checklist from template
+- [ ] Extract key terms from counterparty's draft (parties, dates, amounts)
+- [ ] Identify non-standard clauses requiring attention
+- [ ] Draft redline suggestions for liability section
+- [ ] Draft redline suggestions for indemnification section
+- [ ] Review IP assignment language against company policy
+- [ ] Flag termination provisions for partner review
+- [ ] Prepare summary of material changes for client
+- [ ] Draft negotiation talking points (priority order)
+- [ ] Create comparison table: their draft vs. our standard terms
+- [ ] Review force majeure and dispute resolution clauses
+- [ ] Compile list of open items requiring client decision
+- [ ] Prepare final recommendation memo
+
+Marketing: Campaign Launch​
+## Not Started
+
+- [ ] Define campaign objectives and KPIs
+- [ ] Identify target audience segments (3 personas)
+- [ ] Audit existing content assets for reuse
+- [ ] Create messaging framework (value props, proof points)
+- [ ] Draft email sequence (awareness, consideration, decision)
+- [ ] Create social media content calendar (4 weeks)
+- [ ] Design landing page copy and structure
+- [ ] Develop A/B test plan for subject lines
+- [ ] Set up tracking parameters for attribution
+- [ ] Create performance dashboard template
+- [ ] Draft launch announcement for internal stakeholders
+- [ ] Prepare contingency messaging for common objections
+- [ ] Create post-launch optimization checklist
+
+Research: Literature Review​
+## Not Started
+
+- [ ] Define research questions (3-5 specific questions)
+- [ ] Establish inclusion/exclusion criteria for sources
+- [ ] Search primary databases and export citations
+- [ ] Screen abstracts for relevance (first pass)
+- [ ] Obtain full text for shortlisted papers (20-30)
+- [ ] Create extraction template for key data points
+- [ ] Extract data from methodology sections
+- [ ] Extract data from findings sections
+- [ ] Identify themes across sources
+- [ ] Map contradictions and debates in literature
+- [ ] Draft synthesis of current consensus
+- [ ] Identify gaps for future research
+- [ ] Write annotated bibliography for top 10 sources
+- [ ] Draft literature review narrative
+
+Consulting: Client Engagement​
+## Not Started
+
+- [ ] Document current state from intake interview notes
+- [ ] Map key stakeholders and their priorities
+- [ ] Identify quick wins (implementable in 30 days)
+- [ ] Analyze root causes for top 3 pain points
+- [ ] Benchmark against industry standards
+- [ ] Draft options matrix (3 approaches with tradeoffs)
+- [ ] Create financial impact model for recommendations
+- [ ] Develop implementation timeline (phases)
+- [ ] Identify risks and mitigation strategies
+- [ ] Prepare executive summary for steering committee
+- [ ] Create detailed implementation playbook
+- [ ] Draft success metrics and measurement plan
+- [ ] Prepare transition/handoff documentation
+
+Software Development: Feature Build​
+## Not Started
+
+- [ ] Design database schema for users table
+- [ ] Create User model with TypeScript types
+- [ ] Implement registration endpoint (POST /api/register)
+- [ ] Add password validation (min 8 chars, requires number)
+- [ ] Implement password hashing with bcrypt
+- [ ] Create login endpoint (POST /api/login)
+- [ ] Implement JWT token generation
+- [ ] Add token verification middleware
+- [ ] Implement refresh token rotation
+- [ ] Create logout endpoint (POST /api/logout)
+- [ ] Add rate limiting to auth endpoints
+- [ ] Write integration tests for auth flows
+- [ ] Document API endpoints
+
+The Common Pattern​
+
+Notice what all these decompositions share:
+
+Each task is concrete: "Extract key terms" not "Review contract stuff"
+Each task is verifiable: You know when it's done
+Each task is completable: Most can be finished in 30-90 minutes
+Tasks are sequenced: Later tasks depend on earlier ones
+
+The 10-15 rule: For a ~5 hour project, aim for 10-15 granular tasks. Fewer tasks means each is too large; more means overhead exceeds value.
+
+Universal Decomposition Technique​
+
+When facing a large project, use this questioning protocol:
+
+What's the first thing that has to exist? (Scope definition, criteria, framework)
+What depends on that? (Research, data gathering, initial analysis)
+What's the first tangible output? (Draft, prototype, initial findings)
+What validates that output? (Review, testing, stakeholder feedback)
+What makes it complete? (Polish, documentation, handoff materials)
+
+Apply this recursively until each answer is a 30-90 minute task.
+
+Session Initialization Protocol​
+
+Every work session should start the same way. Consistency prevents context-reconstruction delays.
+
+The Five-Step Initialization:
+
+1. Check working context (where are your files?)
+2. Read progress file
+3. Verify current state of deliverables
+4. Select highest-priority incomplete item
+5. Establish baseline (what's working, what exists)
+
+
+In practice, tell Claude at session start:
+
+I'm resuming work on [project name]. Read my progress file to understand
+current state, check the status of my working files, then tell me:
+1. What was completed in previous sessions
+2. What's currently in progress
+3. What's blocked and why
+4. What you recommend tackling next
+5. Verify the current state of my deliverables
+
+
+This prompt does several things:
+
+Forces Claude to read the progress file (grounding in documented state)
+Checks for unsaved or in-progress work (prevents losing changes)
+Gets Claude's recommendation (leverages its understanding)
+Establishes baseline (so you know the current state before continuing)
+
+The output should look like:
+
+Reading progress file...
+
+## Session State Summary
+
+**Previous Sessions:** 3 sessions, last on 2026-01-28
+**Completed:** 8 of 15 tasks (53%)
+- Scope defined, research framework established, stakeholder map complete,
+  initial data gathered, first draft of findings, executive summary started
+
+**In Progress:** Executive summary (70% - recommendations section remaining)
+
+**Blocked:**
+- Competitor analysis (waiting on Q4 market data from finance team)
+- Final projections (waiting on budget allocation decision)
+
+**Recommendation:** Complete executive summary (30 min remaining), then move to
+implementation timeline which depends on it.
+
+Verifying deliverables...
+✓ Draft v3 saved and backed up
+✓ All source documents accessible
+Baseline established.
+
+
+Now you know exactly where you are. No reconstruction. No guessing.
+
+Session Exit Protocol​
+
+Ending a session well is as important as starting one well. The exit protocol ensures continuity.
+
+The Two-Step Exit:
+
+1. Save work at a stable checkpoint
+2. Update progress file with session summary
+
+
+The Work Checkpoint Pattern:
+
+Never end a session with work in an unstable state. This is critical.
+
+If your deliverable is half-edited with notes to yourself scattered throughout, next session starts with cleanup instead of progress. If your research notes are unsorted, you'll waste time re-organizing before you can continue.
+
+Different domains have different checkpoint mechanisms:
+
+Domain	Checkpoint Method
+Software	Git commit with passing tests
+Documents	Save versioned draft (v1, v2, v3) or export snapshot
+Research	Export bibliography, save organized notes file
+Legal	Save redlined version with clear change summary
+Marketing	Save campaign assets to organized folder with date
+Consulting	Export deliverable snapshot, save working files
+Before ending this session:
+1. Ensure deliverables are in a clean, resumable state
+2. Save/commit all work with a descriptive note
+3. If anything is half-done and messy, either:
+   a. Finish it to a clean stopping point (preferred), or
+   b. Note clearly what's incomplete and save the stable portions
+4. Update your progress file with this session's work
+
+
+The checkpoint becomes a recovery point. If next session goes badly, you can return to this state. Your progress is preserved even if your experiments fail.
+
+Progress File Update:
+
+At session end, update all sections:
+
+Update progress file:
+- Move completed tasks from "In Progress" to "Completed" with session marker
+- Add any new decisions to "Decisions Made" with rationale
+- Add any new issues discovered to "Known Issues"
+- Add this session to the "Session Log" with summary
+- Adjust "Not Started" if scope changed
+
+
+Example update prompt:
+
+Session complete. Update my progress file:
+- Executive summary is now complete (was in progress)
+- New decision: Using conservative projections (reasoning: matches CFO preference)
+- New issue: Need stakeholder sign-off before final formatting
+- Session summary: Completed executive summary and recommendations. Chose
+  conservative projections per finance guidance. Identified need for one more
+  stakeholder review before finalizing.
+
+Version Control and Recovery​
+
+Progress files and version control work together. Your checkpoint history becomes a recovery mechanism.
+
+For Software Projects (Git)​
+feat(auth): complete login endpoint with JWT generation
+
+Session 4 of user-auth feature
+- Implemented POST /api/login
+- Added JWT generation with RS256 signing
+- Token middleware now validates all protected routes
+
+Progress: 10/15 tasks (67%)
+Next: Refresh token rotation
+
+
+Recovery scenario:
+
+git stash                    # Save your broken work
+git checkout HEAD~1          # Return to last checkpoint
+cat claude-progress.txt      # Session 5's state is intact
+
+For Document-Based Projects​
+
+Checkpoint naming convention:
+
+ProjectName_v3_Session4_2026-01-29.docx
+ProjectName_v3_Session4_2026-01-29.pdf
+
+
+Cloud storage with version history:
+
+Google Docs: Version history tracks all changes
+Microsoft 365: Version history in OneDrive/SharePoint
+Dropbox: File version history for recovery
+
+Recovery scenario: Your latest edits made the document worse. You can't remember what it looked like before.
+
+Open version history
+Find "Session 4" checkpoint
+Restore or copy from that version
+Progress file from Session 4 tells you exactly where you were
+For Research Projects​
+
+Citation manager checkpoints:
+
+Zotero: Export collection snapshot (.rdf)
+Mendeley: Export library backup
+EndNote: Export compressed library
+
+Note-taking checkpoints:
+
+Notion: Export workspace backup
+Obsidian: Commit vault to git or export .md files
+OneNote: Export section backups
+Universal Checkpoint Log​
+
+Whatever your domain, your progress file should capture checkpoints:
+
+## Session Log
+
+### Session 4 (2026-01-29)
+
+- Started: 14:00
+- Ended: 16:30
+- Checkpoint: [describe what you saved and where]
+- Summary: [what you accomplished]
+
+
+You've lost one session's work, not four. The progress file from the previous session tells you exactly where you were. Resume from there.
+
+Lab: The Five-Session Project​
+
+Objective: Complete a real project across 5 sessions using progress tracking. Experience the full harness architecture lifecycle.
+
+Duration: 5+ hours across 5 sessions (can span multiple days)
+
+Deliverable: A completed project AND a reusable progress file template refined from your experience.
+
+Phase 1: Initialization (Session 1)​
+
+Step 1: Choose a Real Project
+
+Pick something that matters to you,a real work deliverable or personal project. It should require approximately 5 hours of work. Choose from your professional domain:
+
+Legal Projects:
+
+Multi-phase contract review with redlines and negotiation memo
+Due diligence summary for a transaction
+Policy compliance audit with recommendations
+
+Marketing Projects:
+
+Campaign launch plan with messaging framework and content calendar
+Competitive analysis with positioning recommendations
+Customer journey map with touchpoint optimization plan
+
+Research Projects:
+
+Literature review on a topic relevant to your work
+Industry analysis with trend synthesis
+Case study compilation with cross-case themes
+
+Consulting Projects:
+
+Client diagnostic with current state and recommendations
+Process improvement proposal with implementation roadmap
+Stakeholder analysis with engagement strategy
+
+Software Projects:
+
+User authentication system for a side project
+API integration with a third-party service
+Test suite for an existing codebase
+
+Step 2: Create Initial Progress File
+
+Create a text file in your project folder:
+
+project-progress.txt
+
+
+Step 3: Decomposition
+
+Ask Claude to help decompose:
+
+I'm working on [describe your project in 2-3 sentences].
+My domain is [legal/marketing/research/consulting/software/other].
+
+Help me decompose this into 10-15 granular tasks that can each be completed
+in 30-90 minutes. Each task should be:
+- Concrete (specific deliverable)
+- Verifiable (clear completion criteria)
+- Sequenced (respect dependencies)
+
+Start with scoping and research, move to analysis and drafting, then to
+review and polish.
+
+
+Step 4: Populate Progress File
+
+Based on the decomposition, create your initial progress file with all sections. Verify your baseline state (files accessible, tools working). Save your first checkpoint:
+
+Session 1 checkpoint:
+- Created progress file with 12 tasks
+- Verified all source materials accessible
+- First task: [task name]
+
+Progress: 0/12 tasks (0%)
+Next: [first task]
+
+
+Step 5: Complete First Tasks
+
+Work on 2-3 tasks. Practice the checkpoint pattern. End session with progress file update.
+
+Phase 2: Continuation (Sessions 2-4)​
+
+For each session:
+
+Start:
+
+I'm resuming work on [project]. Read my progress file and tell me current state.
+Verify my working files are accessible. What should I focus on this session?
+
+
+Work: Complete 2-4 tasks per session, depending on complexity.
+
+End:
+
+Session complete. Help me save a checkpoint and update my progress file with:
+- Tasks completed (move to Completed with session marker)
+- Any new decisions (with rationale)
+- Any new issues discovered
+- Session summary for the log
+
+
+Track: Note what works and what doesn't about your progress file format. What's missing? What's unnecessary?
+
+Phase 3: Completion (Session 5)​
+
+Final tasks and polish:
+
+Complete remaining tasks
+Address any known issues marked as blocking
+Review deliverable for quality and completeness
+Prepare handoff or final materials
+
+Retrospective:
+
+After completing the project, answer these questions:
+
+Continuity: How long did it take to re-establish context at each session start?
+
+Session 2: ___ minutes
+Session 3: ___ minutes
+Session 4: ___ minutes
+Session 5: ___ minutes
+
+Progress accuracy: How well did your decomposition match reality?
+
+Tasks that took longer than expected: ___
+Tasks that weren't needed: ___
+Tasks you had to add: ___
+
+Decision utility: How often did you reference the "Decisions Made" section?
+
+Never / Once / Multiple times
+
+Template refinement: What would you change about your progress file format?
+
+Deliverable:
+
+Completed project deliverable
+Final progress file (completed state)
+Refined progress file template based on your experience
+Retrospective notes
+Assessment Criteria​
+
+Basic (Passing):
+
+Project deliverable complete
+Progress file maintained across all 5 sessions
+Checkpoints saved at each session end
+
+Proficient:
+
+All basic criteria
+Decisions documented with rationale
+Session context reconstruction under 10 minutes average
+Decomposition accuracy within 20% (tasks added/removed)
+
+Advanced:
+
+All proficient criteria
+Progress file template refined based on retrospective
+Known issues tracked and resolved
+Session log narrative provides useful context
+Common Failure Modes​
+
+Failure: Vague tasks that never complete
+
+## In Progress
+
+- [ ] Address feedback (Session 2, 3, 4, 5...)
+
+
+"Address feedback" is infinite. It's never done because it's not defined. Replace with specific tasks: "Incorporate CFO's three budget comments," "Revise executive summary per marketing review," "Add competitor comparison table requested by VP."
+
+Failure: Forgetting to update progress file
+
+You close the laptop without updating. Next session, the progress file is stale. You re-do work that was already done.
+
+Prevention: Make progress file update part of your checkpoint routine. They happen together or not at all.
+
+Failure: Ending with work in disarray
+
+"I'll organize this first thing tomorrow." Tomorrow, you've forgotten what was half-finished. You spend 30 minutes figuring out the current state before you can even start.
+
+Prevention: Never end with work in disarray. If you can't clean it up in 10 minutes, save the stable portions and note clearly what's incomplete.
+
+Failure: Decision amnesia
+
+Session 3: "Let's use conservative projections." Session 6: "Should we use optimistic projections? Wait, did we already decide this?"
+
+Prevention: Every decision goes in the Decisions Made section. Every time.
+
+Beyond Individual Projects​
+
+The harness architecture scales beyond solo work.
+
+Team coordination: Multiple team members can use the same progress file, with session logs attributed to individuals. The file becomes a lightweight standup replacement,everyone reads current state, no meeting required.
+
+Handoffs: When you need to hand work to someone else, the progress file is the handoff document. They don't need to understand your conversation history,they read the file.
+
+Context for AI: Future AI sessions don't share your memory. The progress file IS the memory. Every session's Claude starts fresh but informed.
+
+Try With AI​
+Prompt 1: Project Decomposition Practice​
+I want to complete [describe your project in 2-3 sentences].
+My domain is [legal/marketing/research/consulting/software/other].
+
+Help me decompose this into 10-15 granular tasks using this protocol:
+1. Start with scoping—what must be defined or gathered first
+2. Move to research and analysis that builds on the scope
+3. Then initial drafts or prototypes
+4. Then review, validation, and refinement
+5. Finally polish and deliverable preparation
+
+For each task, specify:
+- What exactly gets produced (concrete deliverable)
+- How I'll know it's done (verification criteria)
+- Approximately how long it takes (30-90 min target)
+
+Challenge me if my project is too vague to decompose properly.
+
+
+What you're learning: Task decomposition is a skill that transfers across domains. Most people start too coarse ("complete the analysis") or too fine ("format page 3"). This prompt trains the middle ground,tasks granular enough to track but substantial enough to matter. You're learning to think in completable units regardless of your professional context.
+
+Prompt 2: Progress File Audit​
+Here's my current progress file:
+
+[paste your progress file]
+
+Audit it for these common problems:
+1. Tasks too vague to verify completion
+2. Missing decisions that should be documented
+3. "In Progress" items without progress annotation
+4. Blocked items without specific blockers
+5. Missing session context in the log
+
+Suggest specific improvements. Be harsh—I want this file to actually work
+across multiple sessions.
+
+
+What you're learning: Progress files degrade. Without auditing, they become stale documentation rather than living coordination artifacts. This prompt builds the habit of treating your progress file as a system that needs maintenance, not a document you write once.
+
+Prompt 3: Session Protocol Execution​
+I'm starting a new session on [project name]. Execute the full initialization protocol:
+
+1. Read my progress file and summarize current state
+2. Check the status of my working files and deliverables
+3. Verify my source materials are accessible
+4. Recommend what to work on next and why
+5. Identify any blockers that need resolution before productive work
+
+Format the output as a "Session Briefing" I can scan in 30 seconds.
+
+
+What you're learning: Consistency in session starts. By having Claude execute the same protocol every time, you build muscle memory. Eventually, you'll internalize the checklist. Until then, let the prompt be your checklist. You're learning that good processes can be encoded as prompts,whether you're resuming a legal brief, a marketing plan, or a software feature.
+
+Flashcards Study Aid​

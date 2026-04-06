@@ -1,0 +1,598 @@
+Quality Gates
+
+Evaluation produces numbers. Quality gates turn those numbers into deployment decisions. A model with 88% accuracy, 3% harmful response rate, and 92% format compliance: Should it ship?
+
+Quality gates define the boundaries between "deploy" and "block." This lesson teaches you to design gates that protect production quality while enabling rapid iteration.
+
+The Gate Hierarchy​
+
+Not all quality dimensions are equal. Some failures are blocking, others are warnings.
+
+┌─────────────────────────────────────────────────────────────┐
+│                    BLOCKING GATES                            │
+│   Failure = Deployment STOPS                                 │
+│   • Safety: harmful_rate > 5%                                │
+│   • Format: json_valid < 95%                                 │
+│   • Regression: accuracy drop > 5%                           │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ PASS
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    WARNING GATES                             │
+│   Failure = Flag for review, deployment continues            │
+│   • Accuracy: < 90% (target, not blocker)                    │
+│   • Latency: p99 > 2s (performance concern)                  │
+│   • Cost: per-request > $0.01                                │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ PASS (with warnings)
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    DEPLOYMENT                                │
+└─────────────────────────────────────────────────────────────┘
+
+Designing Multi-Dimensional Gates​
+Gate Configuration Schema​
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+class GateType(Enum):
+    BLOCKING = "blocking"      # Failure stops deployment
+    WARNING = "warning"        # Failure flags but continues
+    INFORMATIONAL = "info"     # Logged only
+
+class Comparison(Enum):
+    GREATER_THAN = ">"
+    GREATER_EQUAL = ">="
+    LESS_THAN = "<"
+    LESS_EQUAL = "<="
+    EQUALS = "=="
+
+@dataclass
+class QualityGate:
+    name: str
+    metric: str
+    threshold: float
+    comparison: Comparison
+    gate_type: GateType
+    description: str
+    weight: Optional[float] = None  # For composite scoring
+
+# Task API Quality Gates
+TASK_API_GATES = [
+    # Blocking gates - any failure stops deployment
+    QualityGate(
+        name="safety_gate",
+        metric="harmful_rate",
+        threshold=0.05,
+        comparison=Comparison.LESS_THAN,
+        gate_type=GateType.BLOCKING,
+        description="Harmful responses must be below 5%"
+    ),
+    QualityGate(
+        name="format_gate",
+        metric="json_valid_rate",
+        threshold=0.95,
+        comparison=Comparison.GREATER_EQUAL,
+        gate_type=GateType.BLOCKING,
+        description="JSON validity must be at least 95%"
+    ),
+    QualityGate(
+        name="regression_gate",
+        metric="accuracy_vs_baseline",
+        threshold=-0.05,
+        comparison=Comparison.GREATER_EQUAL,
+        gate_type=GateType.BLOCKING,
+        description="Accuracy cannot regress more than 5%"
+    ),
+
+    # Warning gates - flag issues but allow deployment
+    QualityGate(
+        name="accuracy_target",
+        metric="accuracy",
+        threshold=0.90,
+        comparison=Comparison.GREATER_EQUAL,
+        gate_type=GateType.WARNING,
+        description="Target accuracy is 90%+"
+    ),
+    QualityGate(
+        name="schema_compliance",
+        metric="schema_valid_rate",
+        threshold=0.98,
+        comparison=Comparison.GREATER_EQUAL,
+        gate_type=GateType.WARNING,
+        description="Schema compliance should be 98%+"
+    ),
+    QualityGate(
+        name="latency_target",
+        metric="p99_latency_ms",
+        threshold=2000,
+        comparison=Comparison.LESS_THAN,
+        gate_type=GateType.WARNING,
+        description="99th percentile latency should be under 2s"
+    ),
+
+    # Informational - logged for tracking
+    QualityGate(
+        name="average_latency",
+        metric="mean_latency_ms",
+        threshold=500,
+        comparison=Comparison.LESS_THAN,
+        gate_type=GateType.INFORMATIONAL,
+        description="Average latency tracking"
+    )
+]
+
+Gate Evaluation Engine​
+from typing import NamedTuple
+
+class GateResult(NamedTuple):
+    gate_name: str
+    passed: bool
+    actual_value: float
+    threshold: float
+    gate_type: GateType
+    message: str
+
+class QualityGateEvaluator:
+    """Evaluate model metrics against quality gates."""
+
+    def __init__(self, gates: list[QualityGate]):
+        self.gates = gates
+
+    def evaluate(self, metrics: dict) -> dict:
+        """Evaluate all gates and return pass/fail decision."""
+        results = []
+        blocking_failures = []
+        warnings = []
+
+        for gate in self.gates:
+            # Get metric value
+            if gate.metric not in metrics:
+                result = GateResult(
+                    gate_name=gate.name,
+                    passed=False,
+                    actual_value=None,
+                    threshold=gate.threshold,
+                    gate_type=gate.gate_type,
+                    message=f"Metric '{gate.metric}' not found in evaluation results"
+                )
+            else:
+                value = metrics[gate.metric]
+                passed = self._compare(value, gate.threshold, gate.comparison)
+                result = GateResult(
+                    gate_name=gate.name,
+                    passed=passed,
+                    actual_value=value,
+                    threshold=gate.threshold,
+                    gate_type=gate.gate_type,
+                    message=f"{gate.metric}: {value:.3f} {gate.comparison.value} {gate.threshold}"
+                )
+
+            results.append(result)
+
+            if not result.passed:
+                if gate.gate_type == GateType.BLOCKING:
+                    blocking_failures.append(result)
+                elif gate.gate_type == GateType.WARNING:
+                    warnings.append(result)
+
+        return {
+            'deploy_allowed': len(blocking_failures) == 0,
+            'blocking_failures': blocking_failures,
+            'warnings': warnings,
+            'all_results': results,
+            'summary': self._generate_summary(blocking_failures, warnings)
+        }
+
+    def _compare(self, value: float, threshold: float, comparison: Comparison) -> bool:
+        if comparison == Comparison.GREATER_THAN:
+            return value > threshold
+        elif comparison == Comparison.GREATER_EQUAL:
+            return value >= threshold
+        elif comparison == Comparison.LESS_THAN:
+            return value < threshold
+        elif comparison == Comparison.LESS_EQUAL:
+            return value <= threshold
+        elif comparison == Comparison.EQUALS:
+            return value == threshold
+
+    def _generate_summary(self, blocking: list, warnings: list) -> str:
+        if blocking:
+            return f"BLOCKED: {len(blocking)} blocking failure(s)"
+        elif warnings:
+            return f"PASSED with {len(warnings)} warning(s)"
+        else:
+            return "PASSED: All gates passed"
+
+# Usage
+evaluator = QualityGateEvaluator(TASK_API_GATES)
+metrics = {
+    'harmful_rate': 0.02,
+    'json_valid_rate': 0.97,
+    'accuracy_vs_baseline': -0.01,
+    'accuracy': 0.88,
+    'schema_valid_rate': 0.95,
+    'p99_latency_ms': 1800,
+    'mean_latency_ms': 450
+}
+result = evaluator.evaluate(metrics)
+
+
+Output:
+
+{
+    "deploy_allowed": true,
+    "blocking_failures": [],
+    "warnings": [
+        {
+            "gate_name": "accuracy_target",
+            "passed": false,
+            "actual_value": 0.88,
+            "threshold": 0.90,
+            "message": "accuracy: 0.880 >= 0.90"
+        },
+        {
+            "gate_name": "schema_compliance",
+            "passed": false,
+            "actual_value": 0.95,
+            "threshold": 0.98,
+            "message": "schema_valid_rate: 0.950 >= 0.98"
+        }
+    ],
+    "summary": "PASSED with 2 warning(s)"
+}
+
+Setting Threshold Values​
+The Threshold Calibration Process​
+
+Setting thresholds requires balancing business requirements against achievable quality:
+
+def calibrate_thresholds(historical_data: list[dict], target_pass_rate: float = 0.80) -> dict:
+    """Calibrate thresholds based on historical model performance."""
+
+    calibrated = {}
+
+    for metric in ['accuracy', 'json_valid_rate', 'harmful_rate']:
+        values = [d[metric] for d in historical_data if metric in d]
+
+        if metric == 'harmful_rate':
+            # For bad metrics, set threshold at worst acceptable
+            threshold = np.percentile(values, 100 - target_pass_rate * 100)
+        else:
+            # For good metrics, set threshold at target percentile
+            threshold = np.percentile(values, (1 - target_pass_rate) * 100)
+
+        calibrated[metric] = {
+            'suggested_threshold': round(threshold, 3),
+            'historical_mean': round(np.mean(values), 3),
+            'historical_std': round(np.std(values), 3),
+            'would_pass_rate': sum(1 for v in values if v >= threshold) / len(values)
+        }
+
+    return calibrated
+
+# Example
+historical = [
+    {'accuracy': 0.85, 'json_valid_rate': 0.96, 'harmful_rate': 0.03},
+    {'accuracy': 0.88, 'json_valid_rate': 0.97, 'harmful_rate': 0.02},
+    {'accuracy': 0.87, 'json_valid_rate': 0.98, 'harmful_rate': 0.04},
+    # ... more historical evaluations
+]
+calibration = calibrate_thresholds(historical, target_pass_rate=0.80)
+
+
+Output:
+
+{
+    "accuracy": {
+        "suggested_threshold": 0.852,
+        "historical_mean": 0.867,
+        "historical_std": 0.015,
+        "would_pass_rate": 0.80
+    },
+    "json_valid_rate": {
+        "suggested_threshold": 0.961,
+        "historical_mean": 0.970,
+        "historical_std": 0.010,
+        "would_pass_rate": 0.80
+    }
+}
+
+Stakeholder-Driven Thresholds​
+
+Different stakeholders care about different metrics:
+
+Stakeholder	Primary Concern	Threshold Focus
+Product Manager	User experience	Helpfulness, accuracy
+Security Team	Safety	Harmful rate, refusal rate
+Engineering	Reliability	Format compliance, latency
+Finance	Cost	Per-request cost, throughput
+Legal/Compliance	Risk	Bias, safety, audit trail
+STAKEHOLDER_REQUIREMENTS = {
+    "product": {
+        "priority_metric": "user_satisfaction_score",
+        "threshold": 4.0,
+        "rationale": "Users rate helpfulness 1-5, target 4.0+"
+    },
+    "security": {
+        "priority_metric": "harmful_rate",
+        "threshold": 0.01,
+        "rationale": "Zero tolerance, 1% accounts for measurement error"
+    },
+    "engineering": {
+        "priority_metric": "p99_latency_ms",
+        "threshold": 3000,
+        "rationale": "SLA requires 3s max response time"
+    },
+    "finance": {
+        "priority_metric": "cost_per_request",
+        "threshold": 0.005,
+        "rationale": "Budget allows $0.005/request at projected volume"
+    }
+}
+
+def merge_stakeholder_gates(requirements: dict) -> list[QualityGate]:
+    """Convert stakeholder requirements to quality gates."""
+    gates = []
+
+    for stakeholder, req in requirements.items():
+        # Security requirements are always blocking
+        gate_type = GateType.BLOCKING if stakeholder == "security" else GateType.WARNING
+
+        gates.append(QualityGate(
+            name=f"{stakeholder}_{req['priority_metric']}",
+            metric=req['priority_metric'],
+            threshold=req['threshold'],
+            comparison=Comparison.LESS_THAN if 'rate' in req['priority_metric'] or 'cost' in req['priority_metric'] or 'latency' in req['priority_metric'] else Comparison.GREATER_EQUAL,
+            gate_type=gate_type,
+            description=req['rationale']
+        ))
+
+    return gates
+
+Composite Quality Scores​
+
+Sometimes you need a single number for dashboards or quick decisions:
+
+def compute_composite_score(metrics: dict, weights: dict) -> dict:
+    """Compute weighted composite quality score."""
+
+    # Normalize metrics to 0-1 scale
+    normalized = {}
+    for metric, value in metrics.items():
+        if metric in ['harmful_rate', 'error_rate']:
+            # Invert bad metrics: lower is better
+            normalized[metric] = max(0, 1 - value)
+        elif metric in ['p99_latency_ms', 'mean_latency_ms']:
+            # Normalize latency: 0ms = 1.0, 5000ms = 0.0
+            normalized[metric] = max(0, 1 - value / 5000)
+        else:
+            # Good metrics: higher is better, already 0-1
+            normalized[metric] = value
+
+    # Compute weighted average
+    weighted_sum = 0
+    weight_total = 0
+
+    for metric, weight in weights.items():
+        if metric in normalized:
+            weighted_sum += normalized[metric] * weight
+            weight_total += weight
+
+    composite = weighted_sum / weight_total if weight_total > 0 else 0
+
+    return {
+        'composite_score': round(composite, 3),
+        'normalized_metrics': normalized,
+        'grade': _score_to_grade(composite)
+    }
+
+def _score_to_grade(score: float) -> str:
+    if score >= 0.95:
+        return 'A+'
+    elif score >= 0.90:
+        return 'A'
+    elif score >= 0.85:
+        return 'B'
+    elif score >= 0.80:
+        return 'C'
+    elif score >= 0.70:
+        return 'D'
+    else:
+        return 'F'
+
+# Example
+weights = {
+    'accuracy': 0.30,
+    'json_valid_rate': 0.20,
+    'harmful_rate': 0.25,
+    'schema_valid_rate': 0.15,
+    'p99_latency_ms': 0.10
+}
+composite = compute_composite_score(metrics, weights)
+
+
+Output:
+
+{
+    "composite_score": 0.891,
+    "normalized_metrics": {
+        "accuracy": 0.88,
+        "json_valid_rate": 0.97,
+        "harmful_rate": 0.98,
+        "schema_valid_rate": 0.95,
+        "p99_latency_ms": 0.64
+    },
+    "grade": "B"
+}
+
+Gate Reporting​
+
+Clear reporting helps teams understand gate decisions:
+
+def generate_gate_report(evaluation_result: dict, model_info: dict) -> str:
+    """Generate human-readable gate report."""
+
+    report = []
+    report.append("=" * 60)
+    report.append("QUALITY GATE EVALUATION REPORT")
+    report.append("=" * 60)
+    report.append(f"\nModel: {model_info['name']}")
+    report.append(f"Version: {model_info['version']}")
+    report.append(f"Evaluated: {datetime.now().isoformat()}")
+
+    report.append(f"\n{'='*60}")
+    report.append(f"RESULT: {evaluation_result['summary']}")
+    report.append("=" * 60)
+
+    # Blocking failures
+    if evaluation_result['blocking_failures']:
+        report.append("\n⛔ BLOCKING FAILURES:")
+        for failure in evaluation_result['blocking_failures']:
+            report.append(f"  • {failure.gate_name}: {failure.message}")
+
+    # Warnings
+    if evaluation_result['warnings']:
+        report.append("\n⚠️  WARNINGS:")
+        for warning in evaluation_result['warnings']:
+            report.append(f"  • {warning.gate_name}: {warning.message}")
+
+    # All gates
+    report.append("\n📊 ALL GATES:")
+    for result in evaluation_result['all_results']:
+        status = "✅" if result.passed else "❌"
+        report.append(f"  {status} {result.gate_name}: {result.message}")
+
+    report.append("\n" + "=" * 60)
+
+    return "\n".join(report)
+
+report = generate_gate_report(result, {'name': 'task-api-v2', 'version': '2.0.1'})
+print(report)
+
+
+Output:
+
+============================================================
+QUALITY GATE EVALUATION REPORT
+============================================================
+
+Model: task-api-v2
+Version: 2.0.1
+Evaluated: 2025-01-02T14:32:15
+
+============================================================
+RESULT: PASSED with 2 warning(s)
+============================================================
+
+⚠️  WARNINGS:
+  • accuracy_target: accuracy: 0.880 >= 0.90
+  • schema_compliance: schema_valid_rate: 0.950 >= 0.98
+
+📊 ALL GATES:
+  ✅ safety_gate: harmful_rate: 0.020 < 0.05
+  ✅ format_gate: json_valid_rate: 0.970 >= 0.95
+  ✅ regression_gate: accuracy_vs_baseline: -0.010 >= -0.05
+  ❌ accuracy_target: accuracy: 0.880 >= 0.90
+  ❌ schema_compliance: schema_valid_rate: 0.950 >= 0.98
+  ✅ latency_target: p99_latency_ms: 1800.000 < 2000
+
+============================================================
+
+Update Your Skill​
+
+Add to llmops-evaluator/SKILL.md:
+
+## Quality Gates
+
+### Gate Hierarchy
+
+1. **Blocking Gates** (must pass to deploy):
+   - Safety: harmful_rate < 5%
+   - Format: json_valid_rate >= 95%
+   - Regression: accuracy >= baseline - 5%
+
+2. **Warning Gates** (flag but allow deploy):
+   - Accuracy: >= 90% target
+   - Schema: >= 98% compliance
+   - Latency: p99 < 2000ms
+
+3. **Informational** (tracking only):
+   - Cost per request
+   - Average latency
+   - Token usage
+
+### Threshold Setting Process
+
+1. Gather historical performance data
+2. Identify stakeholder requirements
+3. Set blocking thresholds at minimum acceptable
+4. Set warning thresholds at target quality
+5. Validate with calibration (80% historical pass rate)
+6. Review quarterly for adjustment
+
+### Gate Report Template
+
+
+
+GATE: [name] METRIC: [what is measured] THRESHOLD: [value] ACTUAL: [model value] RESULT: [PASS/FAIL] TYPE: [BLOCKING/WARNING/INFO] ACTION: [what happens on failure]
+
+Try With AI​
+Prompt 1: Design Gates for Your Use Case​
+I'm deploying a customer support chatbot for an e-commerce company.
+
+Key requirements:
+- Must not provide incorrect return policy information
+- Should maintain friendly, helpful tone
+- Cannot leak customer data
+- Should resolve issues without escalation when possible
+
+Design quality gates with:
+1. 3 blocking gates (deployment stops)
+2. 3 warning gates (flags but continues)
+3. Thresholds and rationale for each
+
+
+What you are learning: Domain-specific gate design. Generic gates miss industry-specific requirements. Your AI partner helps translate business requirements into technical thresholds.
+
+Prompt 2: Resolve Stakeholder Conflicts​
+I'm setting thresholds and have conflicting requirements:
+
+Product Team: "Accuracy must be 95%+ or users will complain"
+Engineering: "We can realistically achieve 88% with current data"
+Security: "Any harmful response is unacceptable"
+Finance: "We can't afford more than $0.003 per request"
+
+Help me:
+1. Identify which requirements can coexist
+2. Propose compromises where needed
+3. Design a gate configuration that balances all stakeholders
+4. Draft talking points for stakeholder discussions
+
+
+What you are learning: Stakeholder negotiation. Quality gates require cross-functional alignment. Your AI partner helps find solutions that balance competing priorities.
+
+Prompt 3: Debug Gate Failures​
+My model keeps failing the quality gate with these results:
+
+- safety_gate: PASS (harmful_rate: 0.02)
+- format_gate: FAIL (json_valid_rate: 0.93)
+- accuracy_gate: PASS (accuracy: 0.89)
+
+The format gate threshold is 95%.
+
+Analyze:
+1. What might cause 7% JSON failures?
+2. How can I identify which inputs cause failures?
+3. Should I adjust the threshold or fix the model?
+4. What data would help me investigate?
+
+
+What you are learning: Gate debugging. When gates fail, you need to understand why. Your AI partner helps develop investigation strategies.
+
+Safety Note​
+
+Quality gates provide confidence, not guarantees. A model passing all gates can still fail in production on inputs your evaluation did not cover. Always implement monitoring, logging, and human review processes alongside quality gates.

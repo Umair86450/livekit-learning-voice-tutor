@@ -1,0 +1,425 @@
+What to Remember and What to Forget
+
+A memory that stores everything is as useless as one that stores nothing. When you ask your agent about a preference, it shouldn't wade through years of irrelevant conversations to find the answer. And when a user says "forget everything about me," the agent must comply—completely and immediately.
+
+Good memory systems are selective. They prioritize what matters, compress what's old, and delete what shouldn't exist. This lesson teaches you how to design those selection mechanisms.
+
+The Memory Prioritization Problem​
+
+Agents interact with users constantly. Every conversation generates potential memories. Without prioritization, you face three problems:
+
+Problem	Impact
+Storage costs	Memory grows unbounded. Vector databases cost money.
+Retrieval noise	Too many memories = wrong memories retrieved.
+Contradiction chaos	Old information conflicts with new information.
+
+The solution is selective memory—storing what's valuable and actively managing what isn't.
+
+Relevance Scoring​
+
+Not all memories are equally valuable. A relevance scoring system helps prioritize which memories to keep, retrieve, and surface.
+
+Scoring Factors​
+
+Three factors typically influence memory relevance:
+
+1. Semantic Similarity How closely does this memory match the current query?
+
+Query: "What are Alex's task preferences?"
+Memory A: "Alex prefers morning tasks" → High similarity (0.92)
+Memory B: "Alex completed 5 tasks yesterday" → Medium similarity (0.65)
+Memory C: "Weather was sunny last Tuesday" → Low similarity (0.12)
+
+
+2. Recency How recently was this memory created or accessed?
+
+Memory A: Created 2 days ago → High recency
+Memory B: Created 30 days ago → Medium recency
+Memory C: Created 1 year ago → Low recency
+
+
+3. Access Frequency How often is this memory retrieved?
+
+Memory A: Retrieved 15 times → Frequently accessed
+Memory B: Retrieved 3 times → Occasionally accessed
+Memory C: Retrieved 0 times → Never accessed
+
+The Scoring Formula​
+
+A weighted combination of these factors produces a relevance score:
+
+def calculate_relevance(memory, query, current_time):
+    """
+    Score = w1 * semantic_similarity
+          + w2 * recency_decay
+          + w3 * access_frequency
+
+    Weights should sum to 1.0
+    """
+    # Semantic similarity (0 to 1)
+    semantic = cosine_similarity(
+        embed(memory.text),
+        embed(query)
+    )
+
+    # Recency decay (exponential, 0 to 1)
+    days_old = (current_time - memory.created_at).days
+    recency = math.exp(-days_old / 30)  # Half-life of ~30 days
+
+    # Access frequency (normalized, 0 to 1)
+    max_accesses = get_max_access_count()
+    frequency = memory.access_count / max_accesses if max_accesses > 0 else 0
+
+    # Weighted combination
+    w1, w2, w3 = 0.5, 0.3, 0.2
+    return w1 * semantic + w2 * recency + w3 * frequency
+
+Tuning Weights for Use Cases​
+
+Different agents need different weight distributions:
+
+Agent Type	Semantic (w1)	Recency (w2)	Frequency (w3)
+Customer Support	0.6	0.3	0.1
+Personal Assistant	0.4	0.4	0.2
+Research Agent	0.7	0.1	0.2
+Task Manager	0.5	0.3	0.2
+
+A customer support agent cares most about matching the current issue (semantic). A personal assistant cares about recent context (recency). A research agent cares about topic relevance regardless of when it was learned.
+
+Memory Consolidation​
+
+Old detailed memories consume space and add noise. Consolidation compresses them into summaries without losing essential information.
+
+The Consolidation Process​
+BEFORE (10 detailed memories):
+├── "Jan 1: Alex created task 'Fix login bug', priority high"
+├── "Jan 2: Alex completed 'Fix login bug' in 3 hours"
+├── "Jan 3: Alex created task 'Add password reset', priority normal"
+├── "Jan 4: Alex completed 'Add password reset' in 2 hours"
+├── "Jan 5: Alex created task 'Review PR #45', priority high"
+├── "Jan 6: Alex completed 'Review PR #45' in 1 hour"
+├── "Jan 7: Alex created task 'Update docs', priority low"
+├── "Jan 8: Alex completed 'Update docs' in 4 hours"
+├── "Jan 9: Alex created task 'Deploy to staging', priority critical"
+└── "Jan 10: Alex completed 'Deploy to staging' in 2 hours"
+
+AFTER (1 consolidated memory):
+└── "Week of Jan 1-10: Alex completed 5 tasks averaging 2.4 hours each.
+     Priority distribution: 1 critical, 2 high, 1 normal, 1 low.
+     Pattern: Tasks consistently completed same day as created."
+
+Consolidation Strategies​
+
+1. Time-based Consolidation
+
+Daily details → Weekly summary → Monthly summary → Yearly summary
+
+Trigger: When memory age exceeds threshold
+- After 7 days: Daily → Weekly
+- After 30 days: Weekly → Monthly
+- After 365 days: Monthly → Yearly
+
+
+2. Count-based Consolidation
+
+When memories in a category exceed N, consolidate oldest half.
+
+Trigger: Memory count exceeds threshold
+- If task_memories > 100: consolidate oldest 50 into summary
+
+
+3. Importance-based Retention
+
+Never consolidate high-importance memories.
+Only consolidate routine, low-value memories.
+
+High value (keep detailed): Decisions, preferences, errors
+Low value (consolidate): Routine completions, minor updates
+
+Consolidation Example Code​
+def consolidate_old_memories(user_id: str, days_threshold: int = 30):
+    """Consolidate memories older than threshold into summaries."""
+    cutoff = datetime.now() - timedelta(days=days_threshold)
+
+    # Get old memories
+    old_memories = memory.search(
+        query="",
+        filters={
+            "user_id": user_id,
+            "created_at": {"lte": cutoff.isoformat()}
+        }
+    )
+
+    # Group by category
+    by_category = group_memories_by_category(old_memories)
+
+    for category, memories in by_category.items():
+        if len(memories) < 5:  # Don't consolidate small groups
+            continue
+
+        # Generate summary using LLM
+        summary = generate_summary(memories)
+
+        # Store summary as new memory
+        memory.add([{
+            "role": "system",
+            "content": f"Consolidated summary of {category}: {summary}"
+        }], user_id=user_id, metadata={
+            "type": "summary",
+            "category": category,
+            "consolidated_count": len(memories),
+            "date_range": f"{memories[0].created_at} to {memories[-1].created_at}"
+        })
+
+        # Delete original detailed memories
+        for mem in memories:
+            memory.delete(mem.id)
+
+Active Forgetting​
+
+Some information must be deleted, not just deprioritized. Active forgetting is a critical capability.
+
+When to Forget​
+
+1. User Request
+
+User: "Forget that I mentioned my salary."
+Agent: Deletes all memories containing salary information.
+
+
+2. Privacy Compliance (GDPR Article 17) The "right to be forgotten" requires complete deletion upon user request:
+
+async def handle_deletion_request(user_id: str):
+    """GDPR-compliant complete user deletion."""
+    # Get ALL user memories
+    all_memories = memory.search(
+        query="",
+        filters={"user_id": user_id},
+        limit=10000  # Get everything
+    )
+
+    # Delete each one
+    deleted_count = 0
+    for mem in all_memories['results']:
+        memory.delete(mem['id'])
+        deleted_count += 1
+
+    # Audit log (required for compliance)
+    log_deletion_event(
+        user_id=user_id,
+        deleted_count=deleted_count,
+        timestamp=datetime.now(),
+        reason="user_request_gdpr"
+    )
+
+    return {"status": "deleted", "count": deleted_count}
+
+
+3. Outdated Information When new information supersedes old:
+
+Old memory: "Alex's phone number is 555-1234"
+New statement: "My new phone number is 555-5678"
+Action: Delete old memory, store new one
+
+
+4. Time-based Expiration Some memories should auto-expire:
+
+# Store with expiration
+memory.add(
+    messages,
+    user_id=user_id,
+    metadata={
+        "expires_at": (datetime.now() + timedelta(days=90)).isoformat(),
+        "type": "temporary_context"
+    }
+)
+
+# Cleanup job (run daily)
+def cleanup_expired_memories():
+    expired = memory.search(
+        query="",
+        filters={"expires_at": {"lte": datetime.now().isoformat()}}
+    )
+    for mem in expired['results']:
+        memory.delete(mem['id'])
+
+Privacy Requirements Summary​
+Requirement	Implementation
+User deletion request	Delete all user memories immediately
+Consent withdrawal	Delete memories created after consent given
+Purpose limitation	Only store memories for stated purpose
+Data minimization	Don't store more than necessary
+Accuracy	Correct or delete inaccurate memories
+Audit trail	Log all deletions with timestamps
+Contradiction Resolution​
+
+Users change. Preferences evolve. Facts update. Your memory system must handle contradictions gracefully.
+
+Detection​
+def detect_contradiction(new_memory: str, existing_memories: list) -> list:
+    """Find memories that contradict the new information."""
+    contradictions = []
+
+    for existing in existing_memories:
+        # Use LLM to detect contradiction
+        prompt = f"""
+        Existing memory: {existing.content}
+        New information: {new_memory}
+
+        Do these contradict each other? If yes, explain how.
+        Respond with: CONTRADICTION: [explanation] or NO_CONTRADICTION
+        """
+        result = llm.generate(prompt)
+
+        if result.startswith("CONTRADICTION"):
+            contradictions.append({
+                "existing": existing,
+                "explanation": result.split(": ", 1)[1]
+            })
+
+    return contradictions
+
+Resolution Strategies​
+
+1. Timestamp-based (Newer Wins)
+
+def resolve_by_timestamp(old_memory, new_memory):
+    """Most recent information wins."""
+    if new_memory.created_at > old_memory.created_at:
+        memory.delete(old_memory.id)
+        memory.add(new_memory)
+        return "replaced_with_newer"
+    return "kept_older"
+
+
+2. Explicit Update
+
+User: "I'm vegetarian now"
+Old memory: "Loves steak dinners"
+
+Agent: "I notice this contradicts an earlier memory about food preferences.
+        I'll update my notes to reflect that you're now vegetarian.
+        Should I remove all previous food preference memories?"
+
+
+3. Version History
+
+def update_with_history(memory_id, new_content):
+    """Update memory while preserving history."""
+    existing = memory.get(memory_id)
+
+    # Store version history
+    history = existing.metadata.get("history", [])
+    history.append({
+        "content": existing.content,
+        "valid_until": datetime.now().isoformat()
+    })
+
+    # Update with new content
+    memory.update(memory_id, new_content, metadata={
+        "history": history,
+        "updated_at": datetime.now().isoformat()
+    })
+
+Example Contradiction Flow​
+Turn 1 (January):
+User: "I prefer morning meetings"
+→ Store: {"preference": "morning_meetings", "created": "2025-01"}
+
+Turn 2 (March):
+User: "Actually, afternoon works better for me now"
+
+Detection:
+→ Search finds: "morning meetings" preference
+→ LLM identifies: CONTRADICTION
+
+Resolution:
+→ Option A: Replace silently (timestamp wins)
+→ Option B: Confirm with user (explicit update)
+→ Option C: Keep both with dates (version history)
+
+Agent chooses Option A:
+→ Delete: "morning meetings" memory
+→ Store: "afternoon meetings" preference with March date
+→ Reply: "Got it—I've updated my notes. Afternoons from now on."
+
+Safety Note: Memory Privacy​
+
+Memory systems handle sensitive personal information. Always implement:
+
+Encryption at rest — Memories stored in encrypted databases
+Access controls — Only authorized services read memories
+Audit logging — Track all access and modifications
+Consent management — Store proof of user consent
+Data minimization — Don't store what you don't need
+Try With AI​
+
+Use these prompts to practice memory prioritization design with Claude or your preferred AI assistant.
+
+Prompt 1: Design a Relevance Scoring System​
+I'm building an e-commerce customer support agent. Design a relevance scoring system for its memories.
+
+The agent handles:
+- Order inquiries
+- Return requests
+- Product questions
+- Shipping issues
+
+For each of these factors, explain how you'd weight them and why:
+1. Semantic similarity to current query
+2. Recency of the memory
+3. Access frequency
+
+Create a scoring formula and show how it would rank these 4 memories when the user asks "Where is my order?":
+- Memory A: "Order #123 shipped 2 days ago" (created 2 days ago, accessed 5 times)
+- Memory B: "User prefers email updates" (created 30 days ago, accessed 12 times)
+- Memory C: "User had delivery issue last month" (created 30 days ago, accessed 3 times)
+- Memory D: "User's name is Alex" (created 60 days ago, accessed 20 times)
+
+
+What you're learning: How to tune scoring weights for a specific domain. E-commerce support cares heavily about order recency—a 2-day-old shipping memory is gold when the user asks about delivery.
+
+Prompt 2: Handle Contradictions​
+A user's stated preferences have evolved over time:
+
+Timeline:
+- January: "I love steak, it's my favorite food"
+- March: "I'm trying to eat less red meat"
+- June: "I'm fully vegetarian now"
+- September: User asks: "Can you recommend a restaurant for my birthday dinner?"
+
+Questions:
+1. How should the agent handle this preference evolution?
+2. Should it keep all three memories, or consolidate them?
+3. What should it recommend, and how should it reference the user's dietary journey?
+4. What if in November the user says "I'm eating meat again"—how does that affect the memory?
+
+Design a contradiction resolution strategy for dietary preferences that handles:
+- Gradual evolution
+- Explicit reversals
+- Temporary vs permanent changes
+
+
+What you're learning: Contradictions aren't always "wrong"—sometimes they're evolution. A good memory system captures change over time rather than just keeping the latest value.
+
+Prompt 3: Consolidation Strategy for Customer Support​
+A customer support agent has accumulated these memories about a user over 6 months:
+
+[15 memories about individual support tickets]
+[8 memories about product preferences]
+[12 memories about billing inquiries]
+[5 memories about feature requests]
+
+Design a consolidation strategy that answers:
+1. Which memories should be consolidated and which kept detailed?
+2. What triggers consolidation (time? count? both?)
+3. What information must the summaries preserve?
+4. How do you handle a situation where a consolidated ticket becomes relevant again?
+
+Create example "before and after" for the support ticket category, showing:
+- The 15 individual ticket memories
+- The consolidated summary
+- What was preserved vs. lost
+
+
+What you're learning: Consolidation is lossy compression—you choose what to keep. For support tickets, patterns matter more than details: "User has had 3 billing issues" is more useful than 3 separate ticket summaries after 6 months.

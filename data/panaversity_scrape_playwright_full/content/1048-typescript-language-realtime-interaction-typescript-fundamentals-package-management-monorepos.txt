@@ -1,0 +1,432 @@
+Package Management and Monorepos
+
+You're building an AI chat application. The backend uses FastAPI with Python. The frontend uses Next.js with TypeScript. Both need to understand the same message types, tool call formats, and streaming chunk structures. Copy-paste the types into both codebases? They'll drift apart within a week. Define them once in a shared package? Now you're building production software.
+
+Python developers know this pattern. You've used pip, poetry, or uv to manage dependencies. You've probably organized related code into packages. TypeScript's ecosystem offers the same capabilities with different tools. The concepts transfer directly.
+
+This lesson covers the package management essentials: why pnpm wins for serious projects, how package.json structures TypeScript projects, and how pnpm workspaces let you share code across a monorepo. By the end, you'll structure AI projects where types flow from a single source of truth.
+
+Package Manager Comparison​
+
+Three package managers dominate the TypeScript ecosystem:
+
+Manager	Disk Usage	Install Speed	Monorepo Support	Learning Curve
+npm	High (duplicates packages)	Slow	Basic	Low
+pnpm	Low (content-addressable)	Fast	Excellent	Low
+bun	Medium	Fastest	Good	Low
+Why pnpm Wins for Production​
+
+pnpm uses a content-addressable store. When ten projects need React 18.2.0, pnpm stores one copy and creates hard links. npm copies React into each project's node_modules, wasting gigabytes.
+
+Install pnpm globally:
+
+npm install -g pnpm
+
+
+Verify installation:
+
+pnpm --version
+
+
+Output:
+
+9.15.0
+
+When to Use Each​
+npm: Legacy projects, minimal setup, CI environments that expect npm
+pnpm: New projects, monorepos, disk-constrained systems (primary recommendation)
+bun: Speed-critical workflows, projects using Bun runtime, experimental features acceptable
+
+For this book's AI applications, pnpm is the default. It's stable, fast, and handles monorepos elegantly.
+
+The package.json Anatomy​
+
+Every TypeScript project starts with package.json. It's the manifest that describes your package, its dependencies, and how to build it.
+
+Essential Fields for TypeScript Projects​
+{
+  "name": "ai-chat-sdk",
+  "version": "1.0.0",
+  "description": "Type-safe SDK for AI chat applications",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.0.0",
+    "vitest": "^2.0.0"
+  }
+}
+
+Field Breakdown​
+
+Identification:
+
+name: Package name. Use lowercase, hyphens for multi-word names
+version: Semantic version (major.minor.patch)
+description: One-line summary
+
+Module Configuration:
+
+"type": "module": Use ESM (import/export) instead of CommonJS (require)
+main: Entry point for JavaScript consumers
+types: Entry point for TypeScript type definitions
+exports: Modern field for specifying what the package exposes
+
+Scripts:
+
+"scripts": {
+  "build": "tsc",           // Compile TypeScript to JavaScript
+  "dev": "tsx watch src/index.ts",  // Development with hot reload
+  "test": "vitest",         // Run tests
+  "typecheck": "tsc --noEmit"  // Type check without emitting files
+}
+
+
+Run scripts with:
+
+pnpm build    # or pnpm run build
+pnpm dev
+pnpm test
+
+
+Dependencies:
+
+dependencies: Packages needed at runtime
+devDependencies: Packages needed only for development (TypeScript, testing, linting)
+Installing Dependencies​
+# Add runtime dependency
+pnpm add zod
+
+# Add development dependency
+pnpm add -D typescript tsx vitest
+
+# Remove dependency
+pnpm remove zod
+
+# Install all dependencies from package.json
+pnpm install
+
+Lockfiles: Why pnpm-lock.yaml Matters​
+
+When you run pnpm install, pnpm creates pnpm-lock.yaml. This file locks exact versions of every dependency and sub-dependency.
+
+Why lockfiles are essential:
+
+Without lockfile:
+
+Today: zod@3.23.0
+Next week: zod@3.24.0 (breaking change)
+Your code: breaks mysteriously
+
+
+With lockfile:
+
+Always: zod@3.23.0 (exact version locked)
+Your code: works consistently
+
+Lockfile Rules​
+Commit lockfiles to git: pnpm-lock.yaml belongs in version control
+Don't edit manually: Let pnpm manage it
+Update deliberately: Run pnpm update when you want newer versions
+# Update all dependencies to latest (respecting semver)
+pnpm update
+
+# Update specific package
+pnpm update zod
+
+pnpm Workspaces for Monorepos​
+
+A monorepo contains multiple packages in a single repository. AI projects benefit because you can share types, utilities, and configurations across frontend, backend, and SDK packages.
+
+Directory Structure​
+ai-workspace/
+├── package.json          # Root package.json
+├── pnpm-workspace.yaml   # Workspace configuration
+├── pnpm-lock.yaml        # Shared lockfile
+├── packages/
+│   └── shared-types/     # Shared type definitions
+│       ├── package.json
+│       ├── tsconfig.json
+│       └── src/
+│           └── index.ts
+└── apps/
+    ├── api/              # FastAPI-connected TypeScript API client
+    │   ├── package.json
+    │   └── src/
+    └── web/              # Next.js frontend
+        ├── package.json
+        └── src/
+
+Root Configuration​
+
+pnpm-workspace.yaml (at repository root):
+
+packages:
+  - "packages/*"
+  - "apps/*"
+
+
+This tells pnpm: "Treat directories in packages/ and apps/ as linked packages."
+
+Root package.json:
+
+{
+  "name": "ai-workspace",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
+
+
+Key points:
+
+"private": true prevents accidental npm publishing
+pnpm -r runs commands recursively across all workspace packages
+--parallel runs commands simultaneously for faster execution
+Creating the Shared Types Package​
+
+packages/shared-types/package.json:
+
+{
+  "name": "@ai-workspace/shared-types",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
+
+
+The @ai-workspace/ prefix creates a scoped package name, preventing conflicts with public npm packages.
+
+packages/shared-types/src/index.ts:
+
+// Message types shared between frontend and backend
+export type MessageRole = "user" | "assistant" | "system";
+
+export interface ChatMessage {
+  role: MessageRole;
+  content: string;
+  timestamp: Date;
+}
+
+// Streaming chunk types for real-time responses
+export type StreamingChunk =
+  | { type: "content"; delta: string }
+  | { type: "tool_call"; name: string; arguments: Record<string, unknown> }
+  | { type: "done"; usage: TokenUsage };
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+// API response types
+export interface ChatResponse {
+  id: string;
+  messages: ChatMessage[];
+  usage: TokenUsage;
+}
+
+Consuming Shared Types in Apps​
+
+apps/web/package.json:
+
+{
+  "name": "@ai-workspace/web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build"
+  },
+  "dependencies": {
+    "@ai-workspace/shared-types": "workspace:*",
+    "next": "^15.0.0",
+    "react": "^19.0.0"
+  }
+}
+
+
+The magic is "workspace:*". This tells pnpm: "Link to the local @ai-workspace/shared-types package in this workspace, not a published npm package."
+
+apps/web/src/components/Chat.tsx:
+
+import type { ChatMessage, StreamingChunk } from "@ai-workspace/shared-types";
+
+interface ChatProps {
+  messages: ChatMessage[];
+  onChunk: (chunk: StreamingChunk) => void;
+}
+
+export function Chat({ messages, onChunk }: ChatProps) {
+  return (
+    <div>
+      {messages.map((msg, i) => (
+        <div key={i} className={msg.role}>
+          {msg.content}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+Types flow from packages/shared-types to apps/web automatically. Change a type in one place, TypeScript catches mismatches everywhere.
+
+Installing and Building​
+
+From the workspace root:
+
+# Install all dependencies across all packages
+pnpm install
+
+# Build all packages (shared-types first, then apps)
+pnpm build
+
+# Run type checking across all packages
+pnpm typecheck
+
+
+pnpm understands dependency order. It builds shared-types before web because web depends on shared-types.
+
+Practical Workflow​
+Adding a New Shared Type​
+Edit packages/shared-types/src/index.ts:
+// Add new type
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+Rebuild shared types:
+pnpm --filter @ai-workspace/shared-types build
+
+Use in any app:
+import type { ToolDefinition } from "@ai-workspace/shared-types";
+
+
+TypeScript auto-completes. No publish step. No version coordination.
+
+Adding a New Package​
+Create directory structure:
+mkdir -p packages/ai-client/src
+
+Create package.json:
+{
+  "name": "@ai-workspace/ai-client",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@ai-workspace/shared-types": "workspace:*"
+  }
+}
+
+Install to link:
+pnpm install
+
+
+The new package is immediately available to other workspace packages.
+
+Common Patterns for AI Projects​
+Pattern 1: Types Package + Multiple Consumers​
+packages/
+├── types/           # Shared types (messages, tools, responses)
+├── ai-client/       # TypeScript client for AI API
+└── validation/      # Zod schemas for runtime validation
+
+apps/
+├── web/             # Next.js frontend
+├── cli/             # Command-line interface
+└── api/             # Backend API client
+
+
+All apps import from @workspace/types. The AI client uses types for API calls. The CLI uses types for command parsing.
+
+Pattern 2: Gradual Migration​
+
+Start with a single package.json. When complexity grows:
+
+Extract shared types to packages/shared-types
+Add pnpm-workspace.yaml
+Update imports to use @workspace/shared-types
+
+You don't need a monorepo on day one. Add structure when complexity demands it.
+
+Try With AI​
+Prompt 1: Create a package.json​
+Create a package.json for a TypeScript SDK that provides a type-safe
+client for an AI chat API. Include:
+- ESM module configuration
+- TypeScript build script
+- Type exports
+- Dependencies for zod (validation) and ky (HTTP client)
+
+What fields are essential for TypeScript library consumers?
+
+
+What you're learning: How package.json structure affects consumers of your TypeScript packages
+
+Prompt 2: Design a Monorepo​
+I'm building an AI application with:
+- Next.js frontend (chat UI)
+- CLI tool (terminal chat client)
+- Shared types (messages, streaming chunks, tool definitions)
+
+Design the pnpm-workspace.yaml and directory structure.
+Show the package.json for the shared-types package and
+how the frontend would import from it.
+
+
+What you're learning: How to structure monorepos for type sharing across AI applications
+
+Prompt 3: Troubleshoot Dependencies​
+I added a dependency with workspace:* but TypeScript says
+"Cannot find module". Walk me through:
+1. Checking pnpm-workspace.yaml configuration
+2. Verifying the package builds correctly
+3. Ensuring the consuming package has the dependency in package.json
+4. Running pnpm install to link packages
+
+What's the most common cause of this error?
+
+
+What you're learning: How to debug workspace linking issues and understand pnpm's package resolution

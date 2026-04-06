@@ -1,0 +1,407 @@
+The LLM Lifecycle
+
+In Lesson 1, you learned what LLMOps is and why proprietary intelligence matters. Now you need to understand how custom models come to life—the complete journey from raw data to production deployment.
+
+The LLM lifecycle isn't a one-time process. It's a continuous loop where each stage feeds the next, and production monitoring triggers new iterations. Understanding this lifecycle is the foundation for everything else in Part 8.
+
+The Five Stages​
+
+Every custom model project moves through five stages:
+
+┌────────────────────────────────────────────────────────────────────┐
+│                                                                    │
+│   ┌─────────┐     ┌─────────┐     ┌──────────┐     ┌──────────┐  │
+│   │  DATA   │────▶│TRAINING │────▶│EVALUATION│────▶│DEPLOYMENT│  │
+│   │CURATION │     │         │     │          │     │          │  │
+│   └─────────┘     └─────────┘     └──────────┘     └──────────┘  │
+│        ▲                                                  │       │
+│        │                                                  ▼       │
+│        │              ┌──────────┐                               │
+│        └──────────────│MONITORING│◀──────────────────────────────┘│
+│           feedback    │          │                                │
+│             loop      └──────────┘                                │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+
+
+Let's examine each stage in detail.
+
+Stage 1: Data Curation​
+
+The question: What data will teach the model what we need it to know?
+
+Data curation is where most LLMOps projects succeed or fail. The quality of your custom model is directly determined by the quality of your training data.
+
+What Happens in Data Curation​
+Activity	Purpose	Key Considerations
+Collection	Gather raw data from sources	What sources represent the target behavior?
+Cleaning	Remove noise, errors, duplicates	What quality threshold is acceptable?
+Formatting	Convert to training-ready format	What format does the training framework expect?
+Annotation	Add labels, preferences, feedback	Who annotates? How do we ensure consistency?
+Safety Review	Check for harmful, biased, or sensitive content	What could go wrong if this data is learned?
+The Data Format Question​
+
+Different training approaches require different data formats:
+
+Supervised Fine-Tuning (SFT):
+
+{
+  "messages": [
+    {"role": "user", "content": "How do I prioritize tasks?"},
+    {"role": "assistant", "content": "The Eisenhower Matrix works well..."}
+  ]
+}
+
+
+Preference Tuning (DPO):
+
+{
+  "prompt": "How do I prioritize tasks?",
+  "chosen": "The Eisenhower Matrix categorizes by urgency and importance...",
+  "rejected": "Just do whatever feels most important to you."
+}
+
+
+Instruction Tuning:
+
+{
+  "instruction": "Explain task prioritization",
+  "input": "",
+  "output": "Task prioritization involves..."
+}
+
+
+The format you choose depends on what you're trying to teach the model. We'll dive deep into data preparation in Chapter 93.
+
+Data Curation Pitfalls​
+Pitfall	Consequence	Prevention
+Too little data	Model doesn't learn pattern	Minimum 1,000 examples for simple tasks
+Biased data	Model reproduces biases	Audit data for representation issues
+Low quality data	Model learns errors	Human review of sample
+Data leakage	Evaluation metrics inflated	Strict train/test separation
+PII in data	Privacy/compliance violations	Automated PII detection and removal
+Task API Example: Data Curation​
+
+For our Task Management Assistant, data curation might involve:
+
+Collection: Export 10,000 user conversations with the Task API
+Cleaning: Remove duplicates, fix malformed messages, filter spam
+Formatting: Convert to conversation format with user/assistant turns
+Annotation: Mark which responses best exemplify target behavior
+Safety Review: Remove any personal information, check for harmful patterns
+
+Output: A clean dataset of 5,000 high-quality task management conversations.
+
+Stage 2: Training​
+
+The question: How do we update the model's weights to encode our knowledge?
+
+Training is where the magic happens—but it's also where things can go expensively wrong. Understanding training approaches helps you choose the right method for your use case.
+
+Training Approaches​
+Approach	What It Does	When to Use	Compute Cost
+Full Fine-Tuning	Updates all model weights	Fundamental behavior changes	Very High
+LoRA/QLoRA	Updates small adapter layers	Most use cases	Low
+Prompt Tuning	Learns soft prompt tokens	Minor adjustments	Very Low
+Continued Pretraining	Extends base knowledge	New domain vocabulary	High
+
+For most LLMOps projects, LoRA (Low-Rank Adaptation) hits the sweet spot. It achieves 90-95% of full fine-tuning quality at 1-5% of the compute cost.
+
+Training Configuration Decisions​
+Decision	Options	Tradeoff
+Base Model	Llama, Mistral, Qwen, Gemma	Capability vs. size vs. license
+Model Size	7B, 13B, 70B parameters	Quality vs. inference cost
+Training Method	Full, LoRA, QLoRA	Quality vs. compute cost
+Learning Rate	1e-5 to 1e-4 typical	Fast learning vs. stability
+Epochs	1-5 typical	Underfitting vs. overfitting
+The Overfitting Problem​
+
+A critical concept: overfitting means the model memorizes training data instead of learning generalizable patterns.
+
+Signs of overfitting:
+
+Training loss keeps decreasing
+Validation loss starts increasing
+Model outputs training examples verbatim
+Poor performance on new, unseen inputs
+
+Prevention:
+
+Regularization (dropout, weight decay)
+Early stopping (stop when validation loss rises)
+Sufficient data diversity
+Proper train/validation/test splits
+Task API Example: Training​
+
+For our Task Assistant, training might involve:
+
+Base Model Selection: Qwen2.5-7B (good instruction following, permissive license)
+Method: QLoRA (4-bit quantization, runs on 16GB GPU)
+Configuration: Learning rate 2e-4, 3 epochs, batch size 4
+Duration: ~2 hours on consumer GPU
+
+Output: A fine-tuned model checkpoint with task management knowledge.
+
+Stage 3: Evaluation​
+
+The question: Does this model meet our quality requirements?
+
+Evaluation is where you determine if training succeeded. Unlike traditional ML with clear accuracy metrics, LLM evaluation is multidimensional.
+
+Evaluation Dimensions​
+Dimension	What It Measures	How to Measure
+Task Performance	Does it solve the target task?	Task-specific benchmarks, human eval
+Instruction Following	Does it follow instructions correctly?	Instruction benchmarks (IFEval)
+Safety	Does it avoid harmful outputs?	Safety benchmarks, red teaming
+Truthfulness	Does it avoid hallucinations?	TruthfulQA, factual accuracy tests
+Coherence	Does output make sense?	Perplexity, human rating
+The Evaluation Pipeline​
+┌─────────────────────────────────────────────────────────────┐
+│                    EVALUATION PIPELINE                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Trained    ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  Model  ───▶│ AUTOMATED │─▶│  HUMAN   │─▶│ SAFETY   │───▶? │
+│             │  METRICS  │  │   EVAL   │  │  CHECKS  │       │
+│             └──────────┘  └──────────┘  └──────────┘       │
+│                  │              │             │             │
+│                  ▼              ▼             ▼             │
+│             Perplexity     Preference     Red team         │
+│             Accuracy       ratings        results          │
+│             BLEU/ROUGE     Quality        Safety           │
+│                            scores         score            │
+│                                                             │
+│             GATE: All metrics must pass thresholds         │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+
+Automated vs. Human Evaluation​
+Evaluation Type	Strengths	Weaknesses
+Automated Metrics	Fast, consistent, cheap	May not correlate with quality
+LLM-as-Judge	Scalable, nuanced	Can inherit evaluator biases
+Human Evaluation	Ground truth for quality	Expensive, slow, inconsistent
+
+Best Practice: Automated metrics as gates (must pass to proceed), human evaluation for final quality assessment, LLM-as-Judge for scaling human-like evaluation.
+
+Evaluation Metrics Explained​
+Metric	What It Measures	Typical Threshold
+Perplexity	How "surprised" model is by text	Lower is better; compare to baseline
+Task Accuracy	Correct answers on domain tasks	80%+ for most applications
+Win Rate	Human prefers new model vs. baseline	60%+ to deploy
+Safety Score	Passes safety evaluations	95%+ required
+Task API Example: Evaluation​
+
+For our Task Assistant, evaluation might include:
+
+Automated Metrics:
+
+Task completion accuracy on 500 held-out examples
+Perplexity on task management corpus
+
+LLM-as-Judge:
+
+Compare responses to baseline (Claude API)
+Rate helpfulness, accuracy, tone
+
+Human Evaluation:
+
+50 random responses rated by domain experts
+Check for hallucinated task features
+
+Safety Checks:
+
+Red team prompts for task-related edge cases
+PII leakage testing
+
+Gate: Must achieve 85%+ task accuracy, 60%+ win rate vs. baseline, 95%+ safety score.
+
+Stage 4: Deployment​
+
+The question: How do we serve this model to users reliably?
+
+Deployment transforms a model checkpoint into a production service. This stage involves infrastructure, scaling, and operational concerns.
+
+Deployment Options​
+Option	Description	Best For
+Self-Hosted	Run on your own GPU servers	Full control, data sovereignty
+Managed Platforms	Turing, Replicate, Modal	Minimal ops overhead
+Serverless	On-demand inference	Variable traffic patterns
+Edge Deployment	On-device inference	Latency-critical, offline needs
+Deployment Considerations​
+Concern	Question	Typical Requirement
+Latency	How fast must responses be?	<500ms for interactive, <2s for batch
+Throughput	How many requests per second?	Size infrastructure accordingly
+Availability	What uptime is required?	99.9% for production services
+Cost	What's the budget per request?	Balance model size vs. cost
+Scaling	How does traffic vary?	Auto-scaling for variable loads
+Model Serving Architecture​
+┌────────────────────────────────────────────────────────────────┐
+│                    PRODUCTION ARCHITECTURE                     │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│   Clients      Load          Model           GPU              │
+│     │        Balancer       Servers         Cluster           │
+│     │            │              │              │              │
+│     ▼            ▼              ▼              ▼              │
+│  ┌─────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐        │
+│  │ API │───▶│   LB    │───▶│ vLLM /  │───▶│ A100s / │        │
+│  │Calls│    │         │    │ TGI     │    │ L40s    │        │
+│  └─────┘    └─────────┘    └─────────┘    └─────────┘        │
+│                  │              │              │              │
+│                  ▼              ▼              ▼              │
+│             Request        Inference       GPU Memory         │
+│             routing        optimization    management         │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+Task API Example: Deployment​
+
+For our Task Assistant:
+
+Platform: Managed inference on Turing (start simple)
+Endpoint: REST API with OpenAI-compatible format
+Scaling: Auto-scale 1-4 replicas based on traffic
+Latency Target: <1 second per response
+Integration: Connect to Task API as agent backend
+Stage 5: Monitoring​
+
+The question: Is the model still performing as expected?
+
+Models degrade over time. User behavior shifts. Edge cases emerge. Monitoring catches problems before users complain.
+
+What to Monitor​
+Category	Metrics	Alert Threshold
+Latency	P50, P95, P99 response time	P95 > 2x baseline
+Errors	Error rate, error types	>1% error rate
+Quality	LLM-as-Judge scores on sample	<80% quality score
+Safety	Flagged response rate	Any safety flags
+Cost	Tokens per request, $/request	>budget threshold
+Drift	Distribution of inputs, outputs	Significant shift
+The Feedback Loop​
+
+Monitoring isn't just about alerts—it's about continuous improvement:
+
+┌──────────────────────────────────────────────────────────┐
+│                    FEEDBACK LOOP                          │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│   Monitor ──▶ Detect Issue ──▶ Diagnose ──▶ Action       │
+│      │                                         │         │
+│      │         ┌─────────────────────────────┐│         │
+│      │         │ Data Problem? → Curate more ││         │
+│      │         │ Training Gap? → Retrain     ││         │
+│      └─────────│ Eval Miss? → Add test cases ││         │
+│                │ Deployment? → Fix infra     │◀┘         │
+│                └─────────────────────────────┘           │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+
+
+Example Feedback Scenarios:
+
+Observation	Diagnosis	Action
+"Model hallucinates new feature"	Missing from training data	Add examples to dataset, retrain
+"Latency spiked to 3 seconds"	Traffic exceeded capacity	Scale up, optimize serving
+"Users report wrong tone"	Persona not strong enough	Add persona examples, retrain
+"Safety flags increased"	Edge case discovered	Add safety data, retrain
+Task API Example: Monitoring​
+
+For our Task Assistant:
+
+Latency: Track P95, alert if >1.5 seconds
+Quality: Sample 100 responses/day, run LLM-as-Judge
+Safety: Flag any responses mentioning personal data
+Feedback: Log user corrections, feed into next training iteration
+Stage Interdependencies​
+
+The lifecycle isn't linear—stages affect each other:
+
+Upstream Dependencies​
+If This Stage Has Problems...	These Stages Are Affected
+Data Curation	Training learns wrong patterns, evaluation misleading, deployment serves bad model
+Training	Evaluation results poor, deployment won't meet requirements
+Evaluation	Deployment of subpar model, monitoring catches issues too late
+Deployment	Monitoring has nothing to observe, no production feedback
+Downstream Signals​
+Monitoring Reveals...	Trigger This Stage
+Quality degradation	Data curation (gather new examples)
+Missing capabilities	Training (add training data, retrain)
+Incorrect behavior	Evaluation (add test cases, re-evaluate)
+Performance issues	Deployment (optimize serving)
+The Continuous Loop​
+
+Production LLMOps is never "done." The lifecycle continues:
+
+v1: Initial deployment based on historical data
+v2: Retrain after 3 months of production feedback
+v3: Add new capabilities based on user requests
+v4: Safety improvements after edge case discovery
+
+Each version moves through all five stages, incorporating lessons from previous iterations.
+
+Putting It Together: The LLMOps Project Plan​
+
+When planning a custom model project, map activities to lifecycle stages:
+
+Stage	Activities	Duration	Dependencies
+Data Curation	Collection, cleaning, formatting, review	1-4 weeks	Raw data access
+Training	Configuration, training runs, checkpoints	1-3 days	Curated data
+Evaluation	Automated tests, human eval, safety checks	1-2 weeks	Trained model
+Deployment	Infra setup, endpoint creation, integration	1-2 weeks	Passing evaluation
+Monitoring	Dashboard setup, alerting, feedback collection	Ongoing	Deployed model
+
+Total timeline: 4-8 weeks for initial deployment, then continuous iteration.
+
+Try With AI​
+
+Use your AI companion to internalize the lifecycle thinking.
+
+Prompt 1: Trace a Problem Through Stages​
+I'm building a custom model for [your domain]. Help me understand stage
+interdependencies by walking through a scenario:
+
+"The model occasionally gives advice that contradicts company policy."
+
+Ask me questions to diagnose:
+1. Which lifecycle stage is the root cause?
+2. How did this problem escape previous stages?
+3. What changes in each stage would prevent this?
+
+Help me think through the full feedback loop.
+
+
+What you're learning: Root cause analysis across the lifecycle. This is essential for debugging production issues.
+
+Prompt 2: Plan a Custom Model Project​
+I want to create a custom model for: [describe your use case]
+
+Help me create a rough project plan by asking about each lifecycle stage:
+1. Data Curation: What data sources do I have? What quality challenges?
+2. Training: What base model and method makes sense?
+3. Evaluation: What metrics define success?
+4. Deployment: What are my latency/cost constraints?
+5. Monitoring: What signals would indicate problems?
+
+Challenge my assumptions—where am I likely to underestimate effort?
+
+
+What you're learning: Project planning with lifecycle awareness. You're building the skill to scope LLMOps work realistically.
+
+Prompt 3: Identify Lifecycle Stage Questions​
+For each lifecycle stage, help me develop a checklist of questions I should
+ask before moving to the next stage.
+
+Format as:
+- Stage: [name]
+- Gate Questions: [what must be true to proceed]
+- Warning Signs: [what indicates problems]
+- Artifacts Produced: [deliverables from this stage]
+
+Make this specific to my domain: [your industry/use case]
+
+
+What you're learning: Quality gate thinking—the discipline of explicit checkpoints that prevent problems from cascading through the lifecycle.
+
+Safety Note​
+
+As you plan LLMOps projects, remember that each stage has safety implications. Data curation determines what the model can learn (including biases). Training amplifies patterns in data (including harmful ones). Evaluation must explicitly test for safety failures. Deployment exposes the model to adversarial inputs. Monitoring must detect safety violations before harm occurs. We'll address safety systematically in Chapter 98, but the foundation starts with recognizing that safety is a lifecycle concern, not a single stage.

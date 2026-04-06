@@ -1,0 +1,554 @@
+Zod for Schema Validation
+
+You've built HTTP clients and parsed JSON responses. But here's the uncomfortable truth about fetch and response.json(): TypeScript has no idea what shape that data actually has. You might type it as ChatResponse, but at runtime, the API could return anything. A changed field name. A new required property. A null where you expected a string.
+
+These mismatches cause crashes in production, not at compile time. And they're notoriously hard to debug because the type system says everything is fine while your application explodes.
+
+Zod solves this by validating data at runtime and generating TypeScript types from the same source. You define a schema once, and you get both compile-time safety (through type inference) and runtime protection (through validation). When an API changes unexpectedly, Zod catches it immediately with a clear error message instead of letting corrupted data propagate through your system.
+
+In this lesson, you'll learn the core Zod patterns that power every type-safe SDK: schema definition, type inference with z.infer, safe parsing with safeParse, and transforms for data conversion.
+
+Why TypeScript Alone Is Not Enough​
+
+Consider what happens when you type an API response:
+
+interface ChatResponse {
+  id: string;
+  choices: Array<{
+    message: {
+      role: "assistant" | "user" | "system";
+      content: string;
+    };
+    finish_reason: "stop" | "length" | "tool_calls";
+  }>;
+}
+
+async function fetchChat(): Promise<ChatResponse> {
+  const response = await fetch("/api/chat", { method: "POST" });
+  const data = await response.json();
+  return data; // TypeScript trusts this blindly
+}
+
+
+Output:
+
+// TypeScript thinks this is safe:
+const response = await fetchChat();
+console.log(response.choices[0].message.content);
+
+// But what if the API returned:
+// { id: "123", choices: [{ msg: { role: "assistant", text: "Hi" } }] }
+//
+// Runtime error: Cannot read 'content' of undefined
+// TypeScript gave no warning
+
+
+TypeScript's type assertion is a lie at runtime. The as ChatResponse pattern (or returning data typed as ChatResponse) tells TypeScript to trust whatever comes back. If the API changes message to msg or content to text, you won't know until users report crashes.
+
+Defining Schemas: The Single Source of Truth​
+
+Zod schemas describe what data should look like, and they validate it at runtime:
+
+import { z } from "zod";
+
+// Define the schema (this is the single source of truth)
+const MessageSchema = z.object({
+  role: z.enum(["assistant", "user", "system"]),
+  content: z.string(),
+});
+
+const ChoiceSchema = z.object({
+  message: MessageSchema,
+  finish_reason: z.enum(["stop", "length", "tool_calls"]),
+});
+
+const ChatResponseSchema = z.object({
+  id: z.string(),
+  choices: z.array(ChoiceSchema),
+});
+
+// Parse validates the data at runtime
+const response = ChatResponseSchema.parse(apiData);
+// If validation fails, parse throws a ZodError
+// If it succeeds, response is guaranteed to match the schema
+
+
+Output:
+
+// When apiData matches:
+response = {
+  id: "chatcmpl-abc123",
+  choices: [
+    {
+      message: { role: "assistant", content: "Hello!" },
+      finish_reason: "stop"
+    }
+  ]
+}
+
+// When apiData has wrong shape, parse throws:
+ZodError: [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": ["choices", 0, "message", "content"],
+    "message": "Required"
+  }
+]
+
+
+The schema serves double duty: it documents the expected API shape AND enforces it at runtime. When the API changes, you know immediately.
+
+Type Inference with z.infer​
+
+Writing TypeScript interfaces AND Zod schemas is redundant. With z.infer, you derive the type from the schema:
+
+import { z } from "zod";
+
+const UserSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  email: z.string().email(),
+  role: z.enum(["admin", "user", "guest"]),
+  createdAt: z.string().datetime(),
+  metadata: z.object({
+    lastLogin: z.string().datetime().optional(),
+    preferences: z.record(z.string(), z.boolean()),
+  }).optional(),
+});
+
+// Extract the TypeScript type from the schema
+type User = z.infer<typeof UserSchema>;
+
+// Now User is equivalent to:
+// {
+//   id: number;
+//   name: string;
+//   email: string;
+//   role: "admin" | "user" | "guest";
+//   createdAt: string;
+//   metadata?: {
+//     lastLogin?: string;
+//     preferences: Record<string, boolean>;
+//   };
+// }
+
+// Use it in function signatures
+function processUser(user: User): void {
+  console.log(`Processing ${user.name} (${user.role})`);
+  if (user.metadata?.lastLogin) {
+    console.log(`Last seen: ${user.metadata.lastLogin}`);
+  }
+}
+
+
+Output:
+
+// TypeScript knows the exact shape:
+const user: User = {
+  id: 1,
+  name: "Alice",
+  email: "alice@example.com",
+  role: "admin",           // autocomplete: "admin" | "user" | "guest"
+  createdAt: "2025-01-01T10:00:00Z",
+  metadata: {
+    lastLogin: "2025-01-15T14:30:00Z",
+    preferences: { darkMode: true, notifications: false },
+  },
+};
+
+processUser(user);
+// Output: Processing Alice (admin)
+// Output: Last seen: 2025-01-15T14:30:00Z
+
+
+This is the core pattern for type-safe SDKs: define schemas once, infer types, and use those types throughout your codebase.
+
+Safe Parsing: Graceful Error Handling​
+
+The .parse() method throws on invalid data. For API responses where you need to handle failures gracefully, use .safeParse():
+
+import { z } from "zod";
+
+const ApiResponseSchema = z.object({
+  success: z.boolean(),
+  data: z.object({
+    items: z.array(z.object({
+      id: z.string(),
+      title: z.string(),
+      price: z.number().positive(),
+    })),
+    total: z.number(),
+  }),
+});
+
+type ApiResponse = z.infer<typeof ApiResponseSchema>;
+
+async function fetchProducts(): Promise<ApiResponse | null> {
+  const response = await fetch("/api/products");
+  const json = await response.json();
+
+  const result = ApiResponseSchema.safeParse(json);
+
+  if (!result.success) {
+    // Log detailed error information
+    console.error("API response validation failed:");
+
+    for (const issue of result.error.issues) {
+      console.error(`  - ${issue.path.join(".")}: ${issue.message}`);
+    }
+
+    return null;
+  }
+
+  // result.data is fully typed as ApiResponse
+  return result.data;
+}
+
+// Usage
+const products = await fetchProducts();
+if (products) {
+  console.log(`Found ${products.data.items.length} products`);
+  console.log(`Total value: $${products.data.total}`);
+}
+
+
+Output:
+
+// When API returns valid data:
+Found 3 products
+Total value: $299.97
+
+// When API returns invalid data (e.g., price is negative):
+API response validation failed:
+  - data.items.0.price: Number must be greater than 0
+
+// When API returns unexpected shape:
+API response validation failed:
+  - data.items: Required
+  - data.total: Required
+
+
+The safeParse result is a discriminated union: either { success: true, data: T } or { success: false, error: ZodError }. TypeScript knows that after checking result.success, result.data is fully typed.
+
+Processing ZodError for User Feedback​
+
+For user-facing applications, you often need to extract specific field errors:
+
+import { z, ZodError } from "zod";
+
+const ContactFormSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  email: z.string().email("Please enter a valid email address"),
+  message: z.string().min(10, "Message must be at least 10 characters"),
+  phone: z.string().regex(/^\+?[0-9]{10,14}$/, "Invalid phone format").optional(),
+});
+
+type ContactForm = z.infer<typeof ContactFormSchema>;
+
+function validateForm(data: unknown):
+  | { valid: true; data: ContactForm }
+  | { valid: false; errors: Record<string, string> } {
+
+  const result = ContactFormSchema.safeParse(data);
+
+  if (result.success) {
+    return { valid: true, data: result.data };
+  }
+
+  // Convert ZodError issues to field-specific error messages
+  const errors: Record<string, string> = {};
+
+  for (const issue of result.error.issues) {
+    const path = issue.path.join(".");
+    // Only keep first error per field
+    if (!errors[path]) {
+      errors[path] = issue.message;
+    }
+  }
+
+  return { valid: false, errors };
+}
+
+// Usage
+const formData = {
+  name: "A",
+  email: "not-an-email",
+  message: "Short",
+};
+
+const validation = validateForm(formData);
+
+if (!validation.valid) {
+  console.log("Validation errors:");
+  for (const [field, message] of Object.entries(validation.errors)) {
+    console.log(`  ${field}: ${message}`);
+  }
+}
+
+
+Output:
+
+Validation errors:
+  name: Name must be at least 2 characters
+  email: Please enter a valid email address
+  message: Message must be at least 10 characters
+
+Transforms: Converting API Data​
+
+APIs often return data in formats that aren't ideal for your application. Dates come as strings, numbers come as strings, snake_case fields need camelCase. Zod transforms handle this in the validation step:
+
+import { z } from "zod";
+
+// API returns dates as ISO strings, but we want Date objects
+const EventSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  // Transform string to Date during parsing
+  startDate: z.string().datetime().transform((str) => new Date(str)),
+  endDate: z.string().datetime().transform((str) => new Date(str)),
+  // Some APIs return numbers as strings
+  attendeeCount: z.string().transform((str) => parseInt(str, 10)),
+});
+
+type Event = z.infer<typeof EventSchema>;
+// Event.startDate is Date, not string
+// Event.attendeeCount is number, not string
+
+const apiResponse = {
+  id: "evt-123",
+  name: "TypeScript Conference",
+  startDate: "2025-06-15T09:00:00Z",
+  endDate: "2025-06-15T17:00:00Z",
+  attendeeCount: "500",
+};
+
+const event = EventSchema.parse(apiResponse);
+console.log(`Event: ${event.name}`);
+console.log(`Starts: ${event.startDate.toLocaleDateString()}`);
+console.log(`Duration: ${(event.endDate.getTime() - event.startDate.getTime()) / 3600000} hours`);
+console.log(`Attendees: ${event.attendeeCount + 50} (with waitlist)`);
+
+
+Output:
+
+Event: TypeScript Conference
+Starts: 6/15/2025
+Duration: 8 hours
+Attendees: 550 (with waitlist)
+
+
+Notice that event.attendeeCount + 50 works because the transform converted the string "500" to the number 500. Without the transform, you'd get "50050" (string concatenation).
+
+Transform vs Preprocess​
+
+Transforms run after validation. Preprocess runs before:
+
+import { z } from "zod";
+
+// Preprocess: coerce before validation
+// Use when input might be wrong type but should be converted
+const QuantitySchema = z.preprocess(
+  (val) => (typeof val === "string" ? parseInt(val, 10) : val),
+  z.number().int().positive()
+);
+
+// Transform: convert after validation
+// Use when you want to change the output type
+const TimestampSchema = z.string().datetime().transform((str) => new Date(str));
+
+// Preprocess handles messy input
+console.log(QuantitySchema.parse("42"));    // 42 (number)
+console.log(QuantitySchema.parse(42));      // 42 (number)
+
+// Transform requires valid input first
+console.log(TimestampSchema.parse("2025-01-15T10:00:00Z")); // Date object
+
+
+Output:
+
+42
+42
+2025-01-15T10:00:00.000Z
+
+
+Use preprocess when the input might be the wrong type but should be coerced (common with form data or query parameters).
+
+Use transform when the input type is correct but you want a different output type (common with dates and computed fields).
+
+Putting It Together: API Response Validation​
+
+Here's a complete pattern for validating AI API responses:
+
+import { z } from "zod";
+
+// Define schemas for a chat completion API
+const UsageSchema = z.object({
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+});
+
+const MessageSchema = z.object({
+  role: z.enum(["assistant", "user", "system", "tool"]),
+  content: z.string().nullable(),
+  tool_calls: z.array(z.object({
+    id: z.string(),
+    type: z.literal("function"),
+    function: z.object({
+      name: z.string(),
+      arguments: z.string(), // JSON string
+    }),
+  })).optional(),
+});
+
+const ChoiceSchema = z.object({
+  index: z.number(),
+  message: MessageSchema,
+  finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter"]),
+});
+
+const ChatCompletionSchema = z.object({
+  id: z.string(),
+  object: z.literal("chat.completion"),
+  created: z.number().transform((ts) => new Date(ts * 1000)),
+  model: z.string(),
+  choices: z.array(ChoiceSchema),
+  usage: UsageSchema,
+});
+
+type ChatCompletion = z.infer<typeof ChatCompletionSchema>;
+
+// Validation wrapper for the SDK
+async function parseApiResponse<T>(
+  schema: z.ZodSchema<T>,
+  response: Response
+): Promise<T> {
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`);
+  }
+
+  const json = await response.json();
+  const result = schema.safeParse(json);
+
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `${i.path.join(".")}: ${i.message}`)
+      .join("; ");
+    throw new Error(`Invalid API response: ${issues}`);
+  }
+
+  return result.data;
+}
+
+// Usage in SDK
+async function createChatCompletion(messages: Array<{role: string; content: string}>): Promise<ChatCompletion> {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model: "gpt-4o" }),
+  });
+
+  return parseApiResponse(ChatCompletionSchema, response);
+}
+
+// The returned data is fully typed and validated
+const completion = await createChatCompletion([
+  { role: "user", content: "Hello!" }
+]);
+
+console.log(`Response ID: ${completion.id}`);
+console.log(`Created: ${completion.created.toISOString()}`); // Date object
+console.log(`Model: ${completion.model}`);
+console.log(`Content: ${completion.choices[0].message.content}`);
+console.log(`Tokens: ${completion.usage.total_tokens}`);
+
+
+Output:
+
+Response ID: chatcmpl-abc123def456
+Created: 2025-01-15T14:30:00.000Z
+Model: gpt-4o
+Content: Hello! How can I assist you today?
+Tokens: 28
+
+
+This pattern forms the foundation of every type-safe SDK:
+
+Schema definition: Describes expected API response shape
+Type inference: z.infer creates TypeScript types from schemas
+Safe parsing: safeParse validates without throwing
+Transform: Converts API formats to application formats
+Error handling: Surfaces clear messages when validation fails
+
+In the next lesson, you'll see how production SDKs like OpenAI and Anthropic use these patterns at scale.
+
+Try With AI​
+Prompt 1: Design a Schema for Your API​
+I have a FastAPI backend that returns this response format for agent executions:
+
+{
+  "execution_id": "exec-abc123",
+  "status": "completed",
+  "started_at": "2025-01-15T10:00:00Z",
+  "finished_at": "2025-01-15T10:00:05Z",
+  "steps": [
+    {
+      "step_number": 1,
+      "action": "tool_call",
+      "tool_name": "search",
+      "input": {"query": "TypeScript Zod"},
+      "output": {"results": [...]},
+      "duration_ms": 1200
+    }
+  ],
+  "final_result": "Based on my research...",
+  "token_usage": {"input": 150, "output": 89}
+}
+
+Help me create a Zod schema for this. I want:
+- started_at and finished_at transformed to Date objects
+- A computed field for total_duration_ms
+- Proper typing for the steps array
+- Custom error messages for required fields
+
+Show me the schema and the inferred type.
+
+
+What you're learning: Schema design for real-world API responses, including transforms for date handling and proper modeling of nested arrays with mixed field types.
+
+Prompt 2: Build a Validation Error Formatter​
+I'm building a form validation system using Zod. I need a function that:
+1. Takes a Zod schema and unknown form data
+2. Returns either the validated data or a structured error object
+3. Groups errors by field path
+4. Handles nested objects (like address.city)
+5. Returns the first error per field (not all errors)
+
+Show me the implementation with TypeScript generics so it works
+with any schema. Include an example with a user registration form
+that has nested address fields.
+
+
+What you're learning: Generic validation utilities that work across your application, error message formatting for user-facing forms, and handling nested field paths.
+
+Prompt 3: Schema Versioning Strategy​
+My AI API is evolving. Version 1 returns { result: string }.
+Version 2 returns { result: string, confidence: number }.
+Version 3 returns { result: string, confidence: number, sources: string[] }.
+
+I need to:
+1. Define schemas for all three versions
+2. Create a function that detects which version and parses accordingly
+3. Transform older versions to match the latest structure (with defaults)
+
+Help me design this schema versioning system. Show me how to
+handle responses where I don't know which version I'll get.
+
+
+What you're learning: Real-world SDK challenges where APIs evolve and you need backward compatibility. This pattern is essential for maintaining SDKs over time.
+
+Safety Note​
+
+Zod validation happens at runtime, which means it has performance cost. For high-throughput applications, validate at API boundaries (when data enters your system) rather than on every function call. Once data is validated, trust it within your application. The goal is catching external data issues, not validating internal data repeatedly.

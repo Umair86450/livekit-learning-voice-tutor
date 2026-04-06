@@ -1,0 +1,504 @@
+Principle 7: Observability
+
+You ask an AI system to refactor a database query. It says it's done. You run the application. It crashes. You check the query,it looks completely different from what you expected. When did it change? What steps did it take? What files did it modify? You have no idea. You're flying blind.
+
+This is the observability problem: if you can't see what the AI is doing, you can't debug problems, build trust, or improve the collaboration.
+
+Observability means seeing into the black box. It's understanding what actions the AI took, in what order, with what results. This principle is about making AI workflows transparent, traceable, and debuggable.
+
+Synergy with Principle 3: Observability and Verification are partners. Verification (Principle 3) is the act of checking; Observability (this principle) provides the evidence that makes checking possible. Without observability, verification is guesswork. Observability gives you the map; Verification tells you if you've arrived at the right destination.
+
+The Black Box Problem: What Happens When You Can't See​
+Without Observability​
+You: "Fix the authentication bug"
+AI: [Works for 30 seconds] "Done!"
+You: "Thanks!"
+
+[Later - Authentication completely broken]
+You: "What did you actually change?"
+AI: "I don't remember—this is a new conversation."
+
+[You spend 2 hours debugging, reading git diff, trying to understand what happened]
+
+With Observability​
+You: "Fix the authentication bug"
+AI:
+  1. Reading src/auth/login.js...
+  2. Found issue: token validation missing
+  3. Adding token validation...
+  4. Running tests...
+  5. Tests passed
+  6. Changes: Modified src/auth/login.js (added 5 lines)
+"Done! Here's what I changed."
+
+[Later - Authentication completely broken]
+You: "What did you actually change?"
+[You check the log]
+You: "I see—you added token validation but the validation function doesn't exist yet. That's the real bug."
+
+
+The difference: Observability lets you understand the full context of what happened, not just the final result.
+
+The Three Pillars of Observability​
+Pillar 1: Action Visibility (What Did It Do?)​
+
+You need to see each action the AI took:
+
+✓ Read package.json
+✓ Read src/auth/login.js
+✓ Modified src/auth/login.js
+  - Added validateToken() call
+  - Added error handling
+✓ Ran npm test
+✓ Tests passed
+✓ Git diff shows 5 lines added
+
+
+Without this, you can't debug. With this, you can trace exactly what happened.
+
+Pillar 2: Rationale Visibility (Why Did It Do It?)​
+
+You need to understand the AI's reasoning:
+
+Reading src/auth/login.js...
+→ Identified issue: Missing token validation
+→ Chose approach: Add validateToken() call
+→ Why: This matches the pattern used in other auth functions
+
+
+Without rationale, you see changes but not the intent. With rationale, you can evaluate whether the approach makes sense.
+
+Warning: AI Rationalization: AI can sound confident even when wrong. It will give plausible-sounding explanations for broken code. Never trust the rationale alone,always verify with actual results (tests, output, behavior). If the rationale says "this will work" but the tests fail, trust the tests.
+
+Pillar 3: Result Visibility (What Was the Outcome?)​
+
+You need to see the result of each action:
+
+Ran npm test...
+→ PASS: src/auth/login.test.js
+→ 12 tests passed
+→ 0 tests failed
+→ Coverage: 85% (unchanged)
+
+Modified files:
+- src/auth/login.js (+5 lines, -1 line)
+
+
+Without results, you can't verify success. With results, you can confirm the AI achieved what it intended.
+
+Reading Activity Logs: A Practical Guide​
+
+Most AI tools provide activity logs. Here's how to read them effectively.
+
+Log Structure​
+
+Typical activity log structure:
+
+[TIME] [ACTION] [DETAIL]
+[2025-01-22 14:32:15] [READ] /Users/project/src/auth/login.js
+[2025-01-22 14:32:16] [ANALYZE] Found missing token validation
+[2025-01-22 14:32:17] [EDIT] /Users/project/src/auth/login.js
+  + Added: validateToken() call
+  + Added: try-catch for validation errors
+[2025-01-22 14:32:18] [COMMAND] npm test
+  → Exit code: 0
+  → Output: 12 passing
+[2025-01-22 14:32:19] [COMPLETE] Task finished successfully
+
+What to Look For​
+
+Success Pattern:
+
+READ → ANALYZE → EDIT → VERIFY → COMPLETE
+
+
+Each step logically follows the previous one. Verification happens after changes.
+
+Warning Pattern:
+
+READ → EDIT → EDIT → EDIT → [NO VERIFICATION] → COMPLETE
+
+
+Multiple edits without verification. No testing. High risk of problems.
+
+Failure Pattern:
+
+READ → EDIT → VERIFY → [TESTS FAIL] → EDIT → [TESTS FAIL AGAIN] → GAVE UP
+
+
+AI tried but couldn't solve the problem. Needs human intervention.
+
+The "Scan for Verbs" Technique​
+
+Feeling overwhelmed by 50-line logs? Here's how to skim effectively:
+
+Ignore the timestamps. Look only for the verbs: READ, EDIT, TEST, FAIL, COMPLETE.
+
+[timestamp] [READ]  ← AI looked at something
+[timestamp] [EDIT]  ← AI changed something
+[timestamp] [TEST]  ← AI verified something
+[timestamp] [FAIL]  ← Something went wrong
+
+
+The red flag: If you see EDIT without TEST after it, that's a problem. The AI changed code but didn't verify it works.
+
+READ → EDIT → EDIT → EDIT → COMPLETE  ← No verification! Danger!
+READ → EDIT → TEST → COMPLETE         ← Good: verified before finishing
+
+
+This 10-second scan catches most issues without reading every line.
+
+Debugging Through Logs​
+
+When something goes wrong, trace through the log:
+
+# Problem: Tests failing after AI work
+# Log shows:
+
+[14:32:15] [EDIT] src/utils/validation.js
+  + Added: stricter email validation
+  - Removed: regex-based validation
+
+[14:32:16] [COMMAND] npm test
+  → FAIL: 15 tests failing
+  → All failures in email validation tests
+
+# Diagnosis: AI changed validation approach but broke existing tests
+# Solution: Revert change, ask AI to run tests first
+
+Walkthrough: Diagnosing a Silent Failure​
+
+Here's a realistic scenario. You asked Claude Code to "add input validation to the signup form." It reported success. But users are still submitting invalid data. Let's trace through what happened.
+
+Step 1: Check what actually changed.
+
+git log --oneline -3
+# a7f2e1d Add input validation to signup form
+# b3c4d5e Update dependencies
+# c6d7e8f Fix header alignment
+
+git diff b3c4d5e..a7f2e1d --stat
+# src/components/SignupForm.tsx | 12 +++++++++---
+# src/utils/validate.ts        | 28 ++++++++++++++++++++++++++++
+
+
+Two files changed. That looks right.
+
+Step 2: Check if tests were run.
+
+Look at the session conversation or activity log. Was there a npm test or similar verification step? If you see the change was made and Claude immediately said "Done!" without running tests,that's the warning pattern: EDIT → COMPLETE with no VERIFY.
+
+Step 3: Read the actual diff.
+
+git diff b3c4d5e..a7f2e1d -- src/components/SignupForm.tsx
+
+
+You discover: Claude added validation to the onSubmit handler but the form uses onChange validation. The validation function exists but is never called in the right place.
+
+Step 4: The root cause. Claude didn't understand the form's validation pattern. It wrote correct validation logic in the wrong location. If it had run the form and tested submission, this would have been caught immediately.
+
+The lesson: The 2-Minute Audit (git diff + test run) would have caught this before you shipped it. Observability isn't extra work,it's the work that prevents rework.
+
+Designing for Observability: Building Transparent Workflows​
+
+When working with AI, design workflows that make actions visible.
+
+Pattern 1: Explain Before Executing​
+You: "Refactor the authentication system"
+
+AI: "Here's my plan:
+1. Extract token logic to TokenService class
+2. Update login.js to use TokenService
+3. Update logout.js to use TokenService
+4. Run tests to verify
+5. If tests pass, commit changes
+
+Shall I proceed?"
+
+You: "Yes, proceed"
+
+AI: [Executes with full logging]
+
+
+The plan makes intentions visible. You can redirect before execution.
+
+Pattern 2: Checkpoint After Major Steps​
+AI: "Step 1 complete: Created TokenService class
+Changes:
+- src/services/TokenService.js (new file, 45 lines)
+
+Status: Ready for step 2
+Shall I continue with updating login.js?"
+
+
+Checkpoints let you verify progress incrementally.
+
+Pattern 3: Summary After Completion​
+AI: "Task complete. Summary:
+
+Files modified: 3
+- src/services/TokenService.js (created)
+- src/auth/login.js (modified: -12 lines, +8 lines)
+- src/auth/logout.js (modified: -8 lines, +6 lines)
+
+Tests: 15 passing, 0 failing
+
+Git status: 3 files staged
+
+Next steps:
+- Review changes with git diff
+- Commit if satisfied
+- Or ask me to adjust anything"
+
+
+The summary provides complete context for review.
+
+Tool-Specific Observability Features​
+
+Different AI tools provide different observability features.
+
+Claude Code​
+
+Activity Logs: .claude/activity-logs/prompts.jsonl
+
+Records all prompts and responses
+Can review past sessions
+Full conversation history
+
+Subagent Logs: .claude/activity-logs/subagent-usage.jsonl
+
+Tracks when Claude delegated to specialized agents
+Shows which subagent handled what task
+Cursor​
+
+History Panel: Shows all AI interactions in current session
+
+Can review each suggestion
+See diffs before accepting
+
+Cmd+K Quick Actions: Contextual suggestions with preview
+
+See what will change before accepting
+GitHub Copilot​
+
+Copilot Workspace: Full AI project work with visible steps
+
+Shows plan before executing
+Displays file changes
+Provides test results
+Observability Anti-Patterns​
+Anti-Pattern 1: Silent Failures​
+AI: "Done!" [but something actually failed]
+
+You only discover hours later when the system breaks.
+
+
+Fix: Require confirmation/visibility for all operations, not just successes.
+
+Anti-Pattern 2: Output Without Context​
+AI: [Shows diff] "I changed this file"
+
+[You can't tell why, or if it's correct]
+
+
+Fix: Require rationale with every change. "I changed X because Y."
+
+Anti-Pattern 3: Missing Intermediate Steps​
+AI: [Works for 2 minutes] "Done!"
+
+[You have no idea what happened in those 2 minutes]
+
+
+Fix: Require progress updates for long-running tasks.
+
+Real-Time vs Post-Mortem: Two Types of Observability​
+
+There are two ways to observe AI work:
+
+Real-Time Observation (Watching It Happen)​
+
+You see actions as they occur. This is your chance to intervene before damage.
+
+Key insight: If you see the AI reading the wrong directory or about to delete the wrong file, don't wait for it to finish. Hit Ctrl+C immediately.
+
+AI: Reading /Users/wrong-project/src/...  ← STOP! Wrong directory!
+You: [Ctrl+C]
+You: "Wait, you're in the wrong directory. We're working on /Users/correct-project/"
+
+
+Real-time observation is your first line of defense. Use it.
+
+Post-Mortem Observation (Reviewing Logs)​
+
+You review logs after the task completes. This is how you debug problems and learn patterns.
+
+# After something goes wrong:
+cat .claude/activity-logs/prompts.jsonl | jq
+git log --oneline -5
+git diff HEAD~1
+
+
+Post-mortem tells you what happened. Real-time lets you prevent it from happening.
+
+Use both: Watch in real-time during the task. Review logs afterward to catch anything you missed.
+
+Building Your Observability Toolkit​
+Essential Observability Tools​
+
+1. Git History
+
+# See what changed
+git log --oneline -10
+
+# See the exact changes
+git diff HEAD~1 HEAD
+
+# See who changed what (including AI if attributed)
+git blame file.js
+
+
+2. Activity Log Review
+
+# Claude Code logs
+cat .claude/activity-logs/prompts.jsonl | jq
+
+# Filter by time
+cat .claude/activity-logs/prompts.jsonl | jq 'select(.timestamp > "2025-01-22")'
+
+# Show only errors (copy-paste this one!)
+cat .claude/activity-logs/prompts.jsonl | jq 'select(.error != null)'
+
+# Show only tool calls that failed
+cat .claude/activity-logs/prompts.jsonl | jq 'select(.tool_result.success == false)'
+
+
+Log Query Cheat Sheet: The error filter above is your superpower. When something goes wrong, run that one command first,it cuts through hundreds of log lines to show you exactly what failed.
+
+3. Test Results
+
+# Run tests and save output
+npm test 2>&1 | tee test-results.log
+
+# Compare before/after
+git diff HEAD~1:test-results.log
+
+Custom Logging Patterns​
+
+Add logging to your AI workflows:
+
+// Log AI actions for later review
+function logAIAction(action, details) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    action: action,
+    details: details,
+    user: process.env.USER,
+    workingDirectory: process.cwd(),
+  };
+
+  fs.appendFileSync(".ai-activity.log", JSON.stringify(logEntry) + "\n");
+}
+
+// Use in workflow
+logAIAction("READ", { file: "src/auth/login.js" });
+logAIAction("EDIT", { file: "src/auth/login.js", changes: "+5 -1" });
+
+Why Observability Enables Trust​
+
+Trust isn't given,it's earned through transparency. When you can see what AI is doing:
+
+You understand its decisions
+You can correct mistakes early
+You learn its patterns
+You feel confident giving it more autonomy
+
+Without observability, you're always second-guessing. With it, you can build genuine trust based on evidence.
+
+The 2-Minute Audit: A Habit That Catches Silent Failures​
+
+After every AI task, spend exactly 2 minutes on this checklist:
+
+Check	Command	What You're Looking For
+1. Git diff	git diff	Do the changes match what AI claimed it did?
+2. AI summary	(review AI's final message)	Does its summary match the diff?
+3. Quick test	npm test or equivalent	Do tests still pass?
+
+The catch: If the git diff doesn't match the AI's summary, you've found a "silent failure",the AI said it did X but actually did Y. These are the dangerous bugs.
+
+Time investment: 2 minutes per task. Payoff: Catches problems before they compound into hours of debugging.
+
+Make this automatic. Every task ends with this audit. No exceptions.
+
+This Principle in Both Interfaces​
+
+"If you can't see what the agent is doing, you can't fix it when it goes wrong."
+
+Both interfaces provide observability through different mechanisms. Claude Code's advantage is raw terminal transparency,you see every command and every output. Cowork's advantage is the three-panel layout (chat, progress, artifacts) designed for simultaneous visibility.
+
+The principle is the same: Regardless of interface, you need visibility into what the agent is doing. Without it, agents are black boxes. With it, they're debuggable systems you can trust and improve.
+
+For a detailed comparison of how all seven principles map across both interfaces, see Lesson 9: Putting It All Together.
+
+Try With AI​
+Prompt 1: Log Analysis Practice​
+I want to practice reading and understanding AI activity logs.
+
+Here's an activity log from an AI session:
+[Paste a real or hypothetical activity log showing a sequence of actions]
+
+Help me analyze:
+1. What actions did the AI take? (List them in order)
+2. What was the AI trying to accomplish?
+3. Did it succeed? How do you know?
+4. Are there any warning signs or potential issues?
+5. What would I check to verify the work is correct?
+
+Then, help me understand: What patterns should I look for in logs to identify successful vs problematic AI sessions?
+
+
+What you're learning: How to read and interpret AI activity logs. You're developing the skill of understanding agent behavior through observation,essential for debugging and building trust.
+
+Prompt 2: Designing Observable Workflows​
+I want to design more observable AI workflows.
+
+I'm going to have you help me with [describe a task]. But first, let's design how you'll make your work visible:
+
+For this task, I want you to:
+1. Show me your plan before executing
+2. Check in with me after each major step
+3. Provide a summary when complete
+4. Explain the rationale for significant changes
+
+Let's execute this task with full observability. After we're done, help me reflect:
+- What was most useful to see?
+- What was missing?
+- How would I modify this approach for future tasks?
+
+
+What you're learning: How to design workflows that are transparent and observable. You're learning to structure AI collaboration so that actions are visible, traceable, and understandable.
+
+Prompt 3: Debugging Through Logs​
+I want to practice debugging AI work using logs.
+
+Scenario: I had an AI help me with a task, but something isn't working right.
+
+Here's what I know:
+- [Describe the problem—tests failing, unexpected behavior, etc.]
+- [Share the activity log if available, or describe what the AI did]
+
+Help me debug this by:
+1. Reconstructing what likely happened based on the information
+2. Identifying the most likely cause of the problem
+3. Suggesting what to check or verify
+4. Proposing a fix
+
+Then, help me understand: What observability would have made this easier to debug? What should I track next time?
+
+
+What you're learning: How to use observability to debug problems effectively. You're learning to trace issues through logs, understand agent behavior, and identify what additional visibility would help.
+
+Safety Note​
+
+Observability is your defense against unexpected behavior. Always review activity logs when something seems wrong. The more you understand what the AI is doing, the better you can direct it and catch problems early.
+
+Flashcards Study Aid​

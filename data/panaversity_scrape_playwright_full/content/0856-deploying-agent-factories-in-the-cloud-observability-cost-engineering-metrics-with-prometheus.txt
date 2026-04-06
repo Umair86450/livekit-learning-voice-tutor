@@ -1,0 +1,443 @@
+Metrics with Prometheus
+
+Your Task API is running in production. Users are creating tasks, completing them, and occasionally hitting errors. But when the CEO asks "How's the system performing?" you have no answer. Your logs show individual requests, but you cannot answer basic questions: How many requests per second? What's the average response time? What percentage of requests fail?
+
+This is the gap metrics fill. Where logs tell you what happened to individual requests, metrics tell you how your system behaves over time. Prometheus has become the standard for Kubernetes metrics because it was designed for exactly this environment: dynamic, containerized, ephemeral workloads.
+
+In this lesson, you will deploy Prometheus to your cluster, learn to query it using PromQL, and instrument your Task API to expose custom metrics. By the end, you will have answers to those performance questions.
+
+Prometheus Architecture: How Metrics Flow​
+
+Before deploying anything, you need to understand how Prometheus works. Unlike traditional monitoring where applications push data to a central server, Prometheus pulls metrics from applications at regular intervals.
+
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Task API      │     │   Prometheus     │     │    Grafana      │
+│   /metrics      │◄────│   (scrape)       │────►│   (visualize)   │
+│   endpoint      │     │                  │     │                 │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+        │                       │
+        │                       │
+        ▼                       ▼
+  ServiceMonitor          PrometheusRule
+  (what to scrape)        (when to alert)
+
+
+Key components:
+
+Component	Purpose
+Scraper	Pulls metrics from /metrics endpoints every N seconds (default: 30s)
+Time Series DB	Stores metric samples with timestamps; optimized for time-range queries
+PromQL Engine	Query language for aggregating and transforming metric data
+Alertmanager	Evaluates PrometheusRules and routes alerts to Slack, PagerDuty, etc.
+ServiceMonitor	Kubernetes CRD that tells Prometheus which Services to scrape
+
+The pull model means your applications do not need to know where Prometheus lives. They expose metrics; Prometheus discovers and scrapes them through ServiceMonitors.
+
+Installing kube-prometheus-stack​
+
+The kube-prometheus-stack Helm chart bundles Prometheus, Grafana, Alertmanager, and pre-configured dashboards for Kubernetes monitoring. This is the standard way to deploy Prometheus in production Kubernetes environments.
+
+Add the Helm repository:
+
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+
+Output:
+
+"prometheus-community" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "prometheus-community" chart repository
+Update Complete. ⎈Happy Helming!⎈
+
+
+Create the monitoring namespace and install:
+
+kubectl create namespace monitoring
+
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+  --set grafana.adminPassword=admin
+
+
+Output:
+
+NAME: prometheus
+LAST DEPLOYED: Mon Dec 30 10:00:00 2025
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+NOTES:
+kube-prometheus-stack has been installed. Check its status by running:
+  kubectl --namespace monitoring get pods -l "release=prometheus"
+
+
+The critical flags:
+
+serviceMonitorSelectorNilUsesHelmValues=false - Prometheus discovers ALL ServiceMonitors across namespaces, not just those created by this Helm chart
+podMonitorSelectorNilUsesHelmValues=false - Same for PodMonitors
+
+Without these flags, your custom ServiceMonitors would be ignored.
+
+Verify the installation:
+
+kubectl get pods -n monitoring
+
+
+Output:
+
+NAME                                                     READY   STATUS    RESTARTS   AGE
+alertmanager-prometheus-kube-prometheus-alertmanager-0   2/2     Running   0          2m
+prometheus-grafana-7d8f5b4f95-xk2lj                      3/3     Running   0          2m
+prometheus-kube-prometheus-operator-7f9b5d4f95-abc12     1/1     Running   0          2m
+prometheus-kube-state-metrics-5d6c7b8f9-def34            1/1     Running   0          2m
+prometheus-prometheus-kube-prometheus-prometheus-0       2/2     Running   0          2m
+prometheus-prometheus-node-exporter-ghi56                1/1     Running   0          2m
+
+
+Access Prometheus UI via port-forward:
+
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+
+
+Open http://localhost:9090 in your browser. You now have a working Prometheus instance scraping Kubernetes cluster metrics.
+
+PromQL Fundamentals: The Query Language​
+
+PromQL is how you extract meaning from metric data. Every query starts with a metric name and optionally filters by labels.
+
+Selectors: Finding Metrics​
+# All HTTP requests across all services
+http_requests_total
+
+# Filter by specific label value
+http_requests_total{status="200"}
+
+# Regex match (2xx status codes)
+http_requests_total{status=~"2.."}
+
+# Negative match (exclude 500 errors)
+http_requests_total{status!="500"}
+
+Rate: Calculating Request Rates​
+
+Raw counters always increase. To see the request rate, use rate() over a time window:
+
+# Requests per second over last 5 minutes
+rate(http_requests_total[5m])
+
+
+Output (example):
+
+{method="GET", endpoint="/tasks", status="200"}  12.5
+{method="POST", endpoint="/tasks", status="201"} 3.2
+{method="GET", endpoint="/tasks", status="500"}  0.1
+
+Aggregation: Summing Across Labels​
+# Total request rate by service
+sum(rate(http_requests_total[5m])) by (service)
+
+# Average across all instances
+avg(rate(http_requests_total[5m])) by (service)
+
+Histogram Quantiles: Latency Percentiles​
+
+Histograms store request durations in buckets. Use histogram_quantile() to calculate percentiles:
+
+# P50 (median) latency
+histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# P95 latency - the value below which 95% of requests complete
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# P99 latency - important for SLOs
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+
+The le label ("less than or equal") is the histogram bucket boundary. The by (le) preserves these boundaries for percentile calculation.
+
+The 4 Golden Signals in PromQL​
+
+Google's SRE book defines the 4 golden signals every service should monitor. Here's how to query each:
+
+Signal	What It Measures	PromQL Query
+Latency	How long requests take	histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+Traffic	Requests per second	sum(rate(http_requests_total[5m]))
+Errors	Failed request percentage	sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) * 100
+Saturation	Resource utilization	sum(rate(container_cpu_usage_seconds_total{namespace="default"}[5m])) by (pod)
+Instrumenting Task API with prometheus_client​
+
+Prometheus can only scrape metrics your application exposes. The prometheus_client library makes this straightforward in Python.
+
+Install the library:
+
+pip install prometheus_client
+
+
+Add metrics to your FastAPI application:
+
+# metrics.py
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from fastapi import FastAPI, Request, Response
+import time
+
+app = FastAPI()
+
+# Define metrics
+REQUEST_COUNT = Counter(
+    "task_api_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"]
+)
+
+REQUEST_LATENCY = Histogram(
+    "task_api_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["method", "endpoint"],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    latency = time.time() - start_time
+
+    # Record metrics
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+    ).inc()
+
+    REQUEST_LATENCY.labels(
+        method=request.method,
+        endpoint=request.url.path
+    ).observe(latency)
+
+    return response
+
+@app.get("/metrics")
+def metrics():
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
+
+@app.get("/tasks")
+def list_tasks():
+    return {"tasks": []}
+
+@app.post("/tasks")
+def create_task():
+    return {"id": 1, "title": "New task"}
+
+
+Test the metrics endpoint:
+
+curl http://localhost:8000/metrics
+
+
+Output:
+
+# HELP task_api_requests_total Total HTTP requests
+# TYPE task_api_requests_total counter
+task_api_requests_total{method="GET",endpoint="/tasks",status="200"} 5.0
+task_api_requests_total{method="POST",endpoint="/tasks",status="201"} 2.0
+
+# HELP task_api_request_duration_seconds HTTP request latency in seconds
+# TYPE task_api_request_duration_seconds histogram
+task_api_request_duration_seconds_bucket{method="GET",endpoint="/tasks",le="0.01"} 3.0
+task_api_request_duration_seconds_bucket{method="GET",endpoint="/tasks",le="0.025"} 5.0
+task_api_request_duration_seconds_bucket{method="GET",endpoint="/tasks",le="+Inf"} 5.0
+task_api_request_duration_seconds_count{method="GET",endpoint="/tasks"} 5.0
+task_api_request_duration_seconds_sum{method="GET",endpoint="/tasks"} 0.042
+
+
+Key points:
+
+Counter names end with _total - Prometheus convention
+Histogram creates multiple time series - _bucket, _count, _sum
+Labels should have low cardinality - Don't use user IDs as labels (creates unbounded series)
+Creating a ServiceMonitor​
+
+With your Task API exposing metrics, Prometheus needs to know to scrape it. ServiceMonitors are Kubernetes CRDs that configure this discovery.
+
+First, ensure your Task API has a Service:
+
+# task-api-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  namespace: default
+  labels:
+    app: task-api
+spec:
+  selector:
+    app: task-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+
+
+Create the ServiceMonitor:
+
+# task-api-servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: task-api
+  namespace: monitoring
+  labels:
+    release: prometheus  # Important: matches Prometheus Helm release
+spec:
+  selector:
+    matchLabels:
+      app: task-api
+  namespaceSelector:
+    matchNames:
+      - default
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+
+
+Apply the ServiceMonitor:
+
+kubectl apply -f task-api-servicemonitor.yaml
+
+
+Output:
+
+servicemonitor.monitoring.coreos.com/task-api created
+
+
+Verify Prometheus discovered the target:
+
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+
+
+Navigate to http://localhost:9090/targets. You should see serviceMonitor/monitoring/task-api with status UP.
+
+Recording Rules for Efficient Queries​
+
+Complex PromQL queries can be slow to execute repeatedly. Recording rules pre-compute results and store them as new time series.
+
+# task-api-recording-rules.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: task-api-recording-rules
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: task-api
+    interval: 30s
+    rules:
+    # Pre-compute request rate
+    - record: task_api:requests:rate5m
+      expr: sum(rate(task_api_requests_total[5m])) by (endpoint)
+
+    # Pre-compute error rate percentage
+    - record: task_api:errors:rate5m
+      expr: |
+        sum(rate(task_api_requests_total{status=~"5.."}[5m])) by (endpoint)
+        /
+        sum(rate(task_api_requests_total[5m])) by (endpoint)
+        * 100
+
+    # Pre-compute P95 latency
+    - record: task_api:latency_p95:5m
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(task_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
+        )
+
+
+Apply the recording rules:
+
+kubectl apply -f task-api-recording-rules.yaml
+
+
+Output:
+
+prometheusrule.monitoring.coreos.com/task-api-recording-rules created
+
+
+Now instead of computing complex aggregations on every dashboard refresh, you query the pre-computed task_api:requests:rate5m series directly. This becomes critical at scale when dashboards are loaded frequently.
+
+Reflect on Your Skill​
+
+Now that you understand Prometheus fundamentals, test your observability skill:
+
+Ask your skill to generate PromQL for the 4 golden signals for your specific application:
+
+Generate PromQL queries for monitoring my Task API's 4 golden signals.
+The metrics are:
+- task_api_requests_total with labels: method, endpoint, status
+- task_api_request_duration_seconds histogram with labels: method, endpoint
+
+I need queries for: latency (P95), traffic (total RPS), errors (5xx percentage),
+and saturation (if I add container metrics).
+
+
+Verify your skill produces queries similar to what you learned in this lesson. If the queries use different functions or patterns, compare them—your skill may suggest optimizations you haven't learned yet, or it may need correction based on your specific label names.
+
+Try With AI​
+Part 1: Query Builder​
+
+Ask AI to help you build a complex PromQL query:
+
+I need to calculate the error budget consumption rate for my Task API.
+We have a 99.9% availability SLO (0.1% error budget).
+My metric is task_api_requests_total with status labels.
+
+Help me write a PromQL query that shows:
+1. Current error rate as a percentage
+2. How fast we're burning our error budget (burn rate)
+3. Estimated time until budget exhaustion at current burn rate
+
+
+What you're learning: PromQL query composition. AI can suggest functions like increase() vs rate() and explain when each is appropriate. You will likely need to refine the query based on your specific time windows and SLO targets.
+
+Part 2: Metric Design Review​
+
+Share your instrumentation plan with AI:
+
+I'm adding metrics to my Task API. Here's my current plan:
+
+Counter: task_api_requests_total (method, endpoint, status, user_id)
+Histogram: task_api_request_duration_seconds (method, endpoint)
+Gauge: task_api_active_connections
+
+Review this design. Are there any problems? What metrics am I missing
+for comprehensive observability?
+
+
+What you're learning: Metric design principles. AI will likely flag the user_id label as high cardinality (creating too many time series). You provide domain context about what matters; AI suggests patterns from observability best practices.
+
+Part 3: Troubleshooting​
+
+Simulate a problem scenario:
+
+My ServiceMonitor is created but Prometheus shows my target as "unknown"
+in the targets page. Help me troubleshoot.
+
+ServiceMonitor is in namespace: monitoring
+My Service is in namespace: default
+Service has labels: app=task-api
+ServiceMonitor selector: matchLabels: app=task-api
+
+
+What you're learning: Kubernetes troubleshooting methodology. Work through the issue together - AI might suggest checking namespaceSelector configuration (a common mistake), while you verify the actual resources in your cluster.
+
+Safety Note​
+
+When instrumenting production applications, start with low-cardinality labels (method, endpoint, status code). Adding labels like user_id or request_id creates a new time series for each unique value, which can exhaust Prometheus memory and cause outages. Always review metric cardinality before deploying to production.

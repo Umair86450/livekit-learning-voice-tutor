@@ -1,0 +1,961 @@
+Traffic Splitting Patterns
+
+You've deployed version 2 of your Task API. It passed all tests in staging. But staging is not production. Real users behave differently than test suites. Network conditions vary. Edge cases appear that no one anticipated. Shipping a new version directly to 100% of users is gambling—if something breaks, everyone breaks.
+
+Traffic splitting lets you deploy with confidence. Send 5% of traffic to the new version. Watch the error rates. If errors spike, roll back instantly. If metrics look good, increase to 25%, then 50%, then 100%. This is progressive delivery—reducing risk by validating in production with real traffic, while keeping most users safe on the proven version.
+
+This lesson teaches three deployment patterns: canary (gradual rollout), blue-green (instant switch), and A/B testing (feature experiments). You'll implement each using HTTPRoute traffic weights and header-based routing. By the end, you'll deploy new versions without the 3 AM panic of a full cutover gone wrong.
+
+Understanding Traffic Splitting​
+
+Traffic splitting divides incoming requests between multiple backend services. Gateway API implements this through HTTPRoute backendRefs with weight fields.
+
+How Weights Work​
+backendRefs:
+  - name: service-v1
+    port: 8000
+    weight: 90
+  - name: service-v2
+    port: 8000
+    weight: 10
+
+
+Weights are relative. In this example:
+
+Total weight: 90 + 10 = 100
+service-v1 receives: 90/100 = 90%
+service-v2 receives: 10/100 = 10%
+
+Weights don't need to sum to 100:
+
+backendRefs:
+  - name: service-v1
+    weight: 9
+  - name: service-v2
+    weight: 1
+
+
+This produces the same 90/10 split (9/10 = 90%, 1/10 = 10%).
+
+Three Deployment Patterns​
+Pattern	Description	Use When
+Canary	Gradual rollout with increasing traffic	New features, risky changes
+Blue-Green	Instant switch between environments	Database migrations, breaking changes
+A/B Testing	Route specific users to test version	Feature experiments, beta programs
+Canary Deployment​
+
+Canary deployment releases changes to a small subset of users first. If the canary version fails, only that subset is affected. The name comes from coal mining—canaries detected toxic gases before miners were harmed.
+
+Initial Canary Setup (5%)​
+
+Deploy version 2 alongside version 1:
+
+# Deploy canary version
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api-canary
+  namespace: task-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: task-api
+      version: canary
+  template:
+    metadata:
+      labels:
+        app: task-api
+        version: canary
+    spec:
+      containers:
+        - name: task-api
+          image: task-api:v2
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-canary
+  namespace: task-api
+spec:
+  selector:
+    app: task-api
+    version: canary
+  ports:
+    - port: 8000
+EOF
+
+
+Output:
+
+deployment.apps/task-api-canary created
+service/task-api-canary created
+
+
+Create HTTPRoute with 5% canary traffic:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-canary
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+          weight: 95
+        - name: task-api-canary
+          port: 8000
+          weight: 5
+
+
+Apply:
+
+kubectl apply -f task-api-canary-route.yaml
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-canary created
+
+Verify Traffic Split​
+
+Send requests and check distribution:
+
+for i in {1..100}; do
+  curl -s http://localhost:8080/api/version | jq -r '.version'
+done | sort | uniq -c
+
+
+Output:
+
+     95 v1
+      5 v2
+
+
+Approximately 5% of requests reach the canary.
+
+Progressive Rollout Stages​
+
+As confidence grows, increase canary traffic:
+
+Stage 1: 5% (initial validation)
+
+backendRefs:
+  - name: task-api-stable
+    weight: 95
+  - name: task-api-canary
+    weight: 5
+
+
+Stage 2: 25% (broader validation)
+
+backendRefs:
+  - name: task-api-stable
+    weight: 75
+  - name: task-api-canary
+    weight: 25
+
+
+Stage 3: 50% (confidence building)
+
+backendRefs:
+  - name: task-api-stable
+    weight: 50
+  - name: task-api-canary
+    weight: 50
+
+
+Stage 4: 100% (full rollout)
+
+backendRefs:
+  - name: task-api-canary
+    weight: 100
+
+
+After full rollout, rename canary to stable and remove the old deployment.
+
+Monitoring During Canary​
+
+Watch error rates between versions:
+
+# Compare error rates
+kubectl logs -l version=stable -n task-api --tail=100 | grep -c ERROR
+kubectl logs -l version=canary -n task-api --tail=100 | grep -c ERROR
+
+
+Output:
+
+3   # stable errors
+12  # canary errors - 4x higher!
+
+
+If canary shows significantly higher errors, rollback immediately.
+
+Canary Rollback​
+
+When canary metrics look bad, rollback is one YAML change away.
+
+Immediate Rollback​
+
+Shift all traffic back to stable:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-canary
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+          weight: 100
+        - name: task-api-canary
+          port: 8000
+          weight: 0
+
+
+Apply:
+
+kubectl apply -f task-api-canary-route.yaml
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-canary configured
+
+
+Traffic instantly stops going to canary. Requests in flight complete, but no new requests reach the problematic version.
+
+Verify Rollback​
+for i in {1..20}; do
+  curl -s http://localhost:8080/api/version | jq -r '.version'
+done | sort | uniq -c
+
+
+Output:
+
+     20 v1
+
+
+All traffic now goes to stable.
+
+Cleanup Failed Canary​
+
+After rollback, clean up the failed deployment:
+
+kubectl delete deployment task-api-canary -n task-api
+kubectl delete service task-api-canary -n task-api
+
+
+Output:
+
+deployment.apps "task-api-canary" deleted
+service "task-api-canary" deleted
+
+Blue-Green Deployment​
+
+Blue-green deployment maintains two identical environments. One serves production traffic (blue), the other sits idle with the new version (green). When ready, you switch all traffic instantly.
+
+When to Use Blue-Green​
+Scenario	Pattern
+Database schema changes	Blue-green (clean cutover)
+Breaking API changes	Blue-green (all-or-nothing)
+Regulatory compliance	Blue-green (auditable switch)
+Gradual feature rollout	Canary (progressive)
+Performance testing	Canary (compare metrics)
+Setting Up Blue-Green​
+
+Deploy both environments:
+
+# Blue environment (current production)
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api-blue
+  namespace: task-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+      environment: blue
+  template:
+    metadata:
+      labels:
+        app: task-api
+        environment: blue
+    spec:
+      containers:
+        - name: task-api
+          image: task-api:v1
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-blue
+  namespace: task-api
+spec:
+  selector:
+    app: task-api
+    environment: blue
+  ports:
+    - port: 8000
+EOF
+
+# Green environment (new version, idle)
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api-green
+  namespace: task-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+      environment: green
+  template:
+    metadata:
+      labels:
+        app: task-api
+        environment: green
+    spec:
+      containers:
+        - name: task-api
+          image: task-api:v2
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-green
+  namespace: task-api
+spec:
+  selector:
+    app: task-api
+    environment: green
+  ports:
+    - port: 8000
+EOF
+
+
+Output:
+
+deployment.apps/task-api-blue created
+service/task-api-blue created
+deployment.apps/task-api-green created
+service/task-api-green created
+
+Initial State: Blue Active​
+
+Route all traffic to blue:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-bluegreen
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-blue
+          port: 8000
+          weight: 100
+        - name: task-api-green
+          port: 8000
+          weight: 0
+
+Switch to Green​
+
+When green is validated and ready:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-bluegreen
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-blue
+          port: 8000
+          weight: 0
+        - name: task-api-green
+          port: 8000
+          weight: 100
+
+
+Apply:
+
+kubectl apply -f task-api-bluegreen-route.yaml
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-bluegreen configured
+
+
+Traffic instantly switches to green. To rollback, swap weights back.
+
+Blue-Green Rollback​
+
+If green has issues, instant rollback:
+
+backendRefs:
+  - name: task-api-blue
+    weight: 100
+  - name: task-api-green
+    weight: 0
+
+
+The old environment is still running—just flip the switch.
+
+A/B Testing with Headers​
+
+A/B testing routes specific users to different versions. Unlike canary (random percentage), A/B testing is deterministic—users with certain attributes always see the test version.
+
+Header-Based Routing​
+
+Route beta users to the experimental version:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-ab
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    # Beta users see experimental version
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+          headers:
+            - name: x-beta-user
+              value: "true"
+      backendRefs:
+        - name: task-api-experimental
+          port: 8000
+
+    # Everyone else sees stable version
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+
+
+Apply:
+
+kubectl apply -f task-api-ab-route.yaml
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/task-api-ab created
+
+Test A/B Routing​
+# Regular user sees stable
+curl http://localhost:8080/api/version
+
+
+Output:
+
+{"version": "stable", "features": ["core"]}
+
+# Beta user sees experimental
+curl -H "x-beta-user: true" http://localhost:8080/api/version
+
+
+Output:
+
+{"version": "experimental", "features": ["core", "ai-suggestions", "smart-tags"]}
+
+Premium Tier Routing​
+
+Route premium users to dedicated infrastructure:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-premium
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    # Premium API keys get dedicated backend
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+          headers:
+            - name: x-api-tier
+              value: "premium"
+      backendRefs:
+        - name: task-api-premium
+          port: 8000
+
+    # Standard users share the main backend
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-standard
+          port: 8000
+
+
+Premium users get:
+
+Dedicated pods (no noisy neighbors)
+Higher rate limits
+Priority during high load
+Combining Patterns​
+
+Real deployments often combine patterns. Canary the new version to 10% of standard users while all premium users stay on stable.
+
+Canary with Premium Protection​
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: task-api-combined
+  namespace: task-api
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    # Premium users ALWAYS get stable (no experiments)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+          headers:
+            - name: x-api-tier
+              value: "premium"
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+          weight: 100
+
+    # Standard users get canary rollout
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+          weight: 90
+        - name: task-api-canary
+          port: 8000
+          weight: 10
+
+
+Premium users are protected—they never see the canary. Standard users get the gradual rollout.
+
+Monitoring Traffic Split Results​
+
+Traffic splitting without monitoring is flying blind. You need to see error rates, latency, and throughput per version.
+
+Prometheus Queries​
+
+Error rate by version:
+
+sum(rate(http_requests_total{status=~"5.."}[5m])) by (version)
+/
+sum(rate(http_requests_total[5m])) by (version)
+
+
+Latency by version (p99):
+
+histogram_quantile(0.99,
+  sum(rate(http_request_duration_seconds_bucket[5m])) by (version, le)
+)
+
+
+Requests per second by version:
+
+sum(rate(http_requests_total[5m])) by (version)
+
+Quick Health Check Script​
+#!/bin/bash
+# compare-versions.sh
+
+echo "Comparing stable vs canary..."
+
+# Error rates
+STABLE_ERRORS=$(kubectl logs -l version=stable -n task-api --tail=1000 | grep -c ERROR)
+CANARY_ERRORS=$(kubectl logs -l version=canary -n task-api --tail=1000 | grep -c ERROR)
+
+echo "Stable errors: $STABLE_ERRORS"
+echo "Canary errors: $CANARY_ERRORS"
+
+if [ "$CANARY_ERRORS" -gt $((STABLE_ERRORS * 2)) ]; then
+  echo "WARNING: Canary error rate is more than 2x stable!"
+  echo "Consider rollback."
+fi
+
+
+Run:
+
+chmod +x compare-versions.sh
+./compare-versions.sh
+
+
+Output:
+
+Comparing stable vs canary...
+Stable errors: 3
+Canary errors: 2
+
+
+Canary looks healthy—proceed with rollout.
+
+Exercises​
+Exercise 1: Create a Canary Deployment​
+
+Set up 10% canary traffic:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: exercise-canary
+  namespace: default
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+          weight: 90
+        - name: task-api-canary
+          port: 8000
+          weight: 10
+EOF
+
+
+Verify:
+
+kubectl get httproute exercise-canary -o yaml | grep -A6 backendRefs
+
+
+Expected Output:
+
+      backendRefs:
+      - name: task-api-stable
+        port: 8000
+        weight: 90
+      - name: task-api-canary
+        port: 8000
+        weight: 10
+
+Exercise 2: Configure A/B Testing​
+
+Route beta users to a test version:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: exercise-ab
+  namespace: default
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+          headers:
+            - name: x-beta-user
+              value: "true"
+      backendRefs:
+        - name: task-api-beta
+          port: 8000
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-stable
+          port: 8000
+EOF
+
+
+Test (if services exist):
+
+# Beta user
+curl -H "x-beta-user: true" http://localhost:8080/api/version
+
+# Regular user
+curl http://localhost:8080/api/version
+
+Exercise 3: Blue-Green Switch​
+
+Create blue-green configuration and switch environments:
+
+# Initial: blue active
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: exercise-bluegreen
+  namespace: default
+spec:
+  parentRefs:
+    - name: task-api-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: task-api-blue
+          port: 8000
+          weight: 100
+        - name: task-api-green
+          port: 8000
+          weight: 0
+EOF
+
+
+Switch to green (modify and reapply):
+
+kubectl patch httproute exercise-bluegreen -n default --type=merge -p '
+{
+  "spec": {
+    "rules": [{
+      "matches": [{"path": {"type": "PathPrefix", "value": "/api/"}}],
+      "backendRefs": [
+        {"name": "task-api-blue", "port": 8000, "weight": 0},
+        {"name": "task-api-green", "port": 8000, "weight": 100}
+      ]
+    }]
+  }
+}'
+
+
+Expected Output:
+
+httproute.gateway.networking.k8s.io/exercise-bluegreen patched
+
+Exercise 4: Rollback Canary​
+
+Practice rollback by setting canary weight to 0:
+
+kubectl patch httproute exercise-canary -n default --type=merge -p '
+{
+  "spec": {
+    "rules": [{
+      "matches": [{"path": {"type": "PathPrefix", "value": "/api/"}}],
+      "backendRefs": [
+        {"name": "task-api-stable", "port": 8000, "weight": 100},
+        {"name": "task-api-canary", "port": 8000, "weight": 0}
+      ]
+    }]
+  }
+}'
+
+
+Verify:
+
+kubectl get httproute exercise-canary -o yaml | grep -A6 backendRefs
+
+
+Expected Output:
+
+      backendRefs:
+      - name: task-api-stable
+        port: 8000
+        weight: 100
+      - name: task-api-canary
+        port: 8000
+        weight: 0
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about traffic splitting:
+
+Add Deployment Pattern Templates​
+
+Your skill should generate configuration for each pattern:
+
+Canary template:
+
+# Template: canary-deployment
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ service }}-canary
+  namespace: {{ namespace }}
+spec:
+  parentRefs:
+    - name: {{ gateway }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ path_prefix }}
+      backendRefs:
+        - name: {{ stable_service }}
+          port: {{ port }}
+          weight: {{ stable_weight }}
+        - name: {{ canary_service }}
+          port: {{ port }}
+          weight: {{ canary_weight }}
+
+
+Blue-green template:
+
+# Template: blue-green
+backendRefs:
+  - name: {{ service }}-blue
+    port: {{ port }}
+    weight: {{ blue_weight }}
+  - name: {{ service }}-green
+    port: {{ port }}
+    weight: {{ green_weight }}
+
+
+A/B testing template:
+
+# Template: ab-testing
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: {{ path_prefix }}
+        headers:
+          - name: {{ header_name }}
+            value: {{ header_value }}
+    backendRefs:
+      - name: {{ test_service }}
+        port: {{ port }}
+  - matches:
+      - path:
+          type: PathPrefix
+          value: {{ path_prefix }}
+    backendRefs:
+      - name: {{ stable_service }}
+        port: {{ port }}
+
+Decision Framework for Your Skill​
+Question	If Yes	If No
+Need instant switch?	Blue-green	Canary
+Testing specific users?	A/B testing	Canary
+Database migration?	Blue-green	Canary
+Gradual risk reduction?	Canary	Blue-green
+Rollback Guidance​
+
+Your skill should include rollback commands:
+
+# Canary rollback: set canary weight to 0
+kubectl patch httproute {{ route }} --type=merge -p '{"spec":...}'
+
+# Blue-green rollback: swap weights
+# From green (100) back to blue (100)
+
+Try With AI​
+Generate Canary Configuration​
+
+Ask your traffic-engineer skill:
+
+Using my traffic-engineer skill, generate a canary deployment configuration
+for my Task API:
+
+- Stable service: task-api-stable (port 8000)
+- Canary service: task-api-canary (port 8000)
+- Initial split: 95% stable, 5% canary
+- Namespace: task-api
+- Gateway: task-api-gateway
+- Path prefix: /api/
+
+
+What you're learning: AI generates traffic splitting configurations. Review the output—are weights correct? Is the path matching appropriate? Do the service names match your request?
+
+Evaluate and Extend​
+
+Check AI's output:
+
+Do weights sum correctly for the intended split?
+Is the HTTPRoute in the correct namespace?
+Are parentRefs pointing to your gateway?
+
+If you need progressive stages, ask:
+
+Now generate the HTTPRoute for stage 2: 75% stable, 25% canary.
+
+
+What you're learning: AI adapts configurations through iteration. Compare the stage 1 and stage 2 outputs—only weights should change.
+
+Add A/B Testing Layer​
+
+Extend for premium user protection:
+
+Add a rule BEFORE the canary split that routes x-api-tier: premium
+users to task-api-stable with 100% weight. Premium users should
+never see the canary.
+
+
+What you're learning: Rule ordering matters. AI should place the premium rule first so it matches before the general canary rule.
+
+Generate Rollback Command​
+
+Ask for operational commands:
+
+Generate the kubectl patch command to rollback this canary to 0% traffic
+while keeping 100% on stable.
+
+
+What you're learning: AI generates operational commands, not just YAML. Review the patch syntax—is it correct for your HTTPRoute?
+
+Safety Note​
+
+Traffic splitting affects real users in production. Always test configurations with kubectl apply --dry-run=client first. Start canary deployments with small percentages (1-5%) and monitor error rates before increasing. Keep rollback commands ready—you may need them at 3 AM.

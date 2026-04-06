@@ -1,0 +1,595 @@
+Sessions and Conversation Memory
+
+Your Customer Support Digital FTE handles a user's billing question. They ask about an invoice discrepancy. The agent investigates, asks clarifying questions, and resolves the issue. The next day, the same user returns: "What was that invoice number we discussed yesterday?"
+
+Without session memory, the agent has no idea what happened yesterday. Every conversation starts from scratch---no context, no history, no continuity. For a Digital FTE to truly replace a human employee, it needs to remember.
+
+In the previous lessons, you built agents with tools and handoffs. But those agents had amnesia---each Runner.run_sync() call started fresh. Now you'll give your agents persistent memory. By the end of this lesson, your TaskManager Digital FTE will remember tasks across sessions, track conversation history for context, and support multiple users with isolated session data.
+
+Why Sessions Matter for Digital FTEs​
+
+Consider the difference between an agent with and without memory:
+
+Capability	Without Sessions	With Sessions
+Multi-turn conversations	Manual history passing	Automatic context loading
+User continuity	Every conversation restarts	Remembers previous interactions
+State persistence	Lost on process restart	Survives server restarts
+Cost tracking	No visibility	Token usage per conversation
+Error recovery	Start over	Undo and retry from any point
+
+For a Digital FTE priced as a workforce replacement, session memory transforms a stateless chatbot into a persistent team member that builds context over time.
+
+Understanding Sessions​
+
+The OpenAI Agents SDK provides session memory that automatically handles conversation history. Instead of manually passing messages between agent runs, sessions:
+
+Load automatically: Before each run, previous conversation history loads from storage
+Store automatically: After each run, new items (user input, agent responses, tool calls) persist
+Isolate by user: Each session_id maintains independent history
+
+The SDK offers several session backends:
+
+Backend	Use Case
+SQLiteSession (in-memory)	Development, testing
+SQLiteSession (file)	Single-server production
+AdvancedSQLiteSession	Branching, usage tracking
+Custom implementation	Redis, PostgreSQL, etc.
+In-Memory Sessions with SQLiteSession​
+
+The simplest session configuration uses in-memory storage---perfect for development:
+
+from agents import Agent, Runner
+from agents import SQLiteSession
+
+# Create a session (in-memory by default)
+session = SQLiteSession("user_123")
+
+agent = Agent(
+    name="TaskManager",
+    instructions="""You manage a user's task list.
+
+    Available commands:
+    - add [task]: Add a new task
+    - list: Show all tasks
+    - done [number]: Mark task as complete
+
+    Remember context from previous messages in this conversation."""
+)
+
+# First interaction
+result = Runner.run_sync(
+    agent,
+    "Add 'Review PR #42' to my tasks",
+    session=session
+)
+print(result.final_output)
+
+# Second interaction - agent remembers the first
+result = Runner.run_sync(
+    agent,
+    "What tasks do I have?",
+    session=session
+)
+print(result.final_output)
+
+
+Output:
+
+I've added "Review PR #42" to your task list. You now have 1 task.
+
+You have 1 task:
+1. Review PR #42
+
+Would you like to add more tasks or mark this one as complete?
+
+
+Notice we passed the same session object to both calls. The agent remembered that we added a task in the first interaction and retrieved it in the second.
+
+IN-MEMORY LIMITATIONS
+
+In-memory sessions are lost when the Python process ends. Use file-based persistence for anything beyond development testing.
+
+File-Based Persistence​
+
+For production systems, pass a file path to SQLiteSession:
+
+from agents import Agent, Runner
+from agents import SQLiteSession
+
+# Create persistent session
+session = SQLiteSession("user_123", "tasks.db")
+
+agent = Agent(
+    name="TaskManager",
+    instructions="""You manage tasks. Remember all tasks across conversations.
+    When listing tasks, show their status (pending/done)."""
+)
+
+# Add a task
+result = Runner.run_sync(
+    agent,
+    "Add 'Deploy to production' as a task",
+    session=session
+)
+print(result.final_output)
+
+
+Output:
+
+Added "Deploy to production" to your task list. This task is now pending.
+
+
+Now restart your Python process entirely, then run:
+
+from agents import Agent, Runner
+from agents import SQLiteSession
+
+# Reconnect to the same session
+session = SQLiteSession("user_123", "tasks.db")
+
+agent = Agent(
+    name="TaskManager",
+    instructions="""You manage tasks. Remember all tasks across conversations.
+    When listing tasks, show their status (pending/done)."""
+)
+
+# The session remembers!
+result = Runner.run_sync(
+    agent,
+    "What are my tasks?",
+    session=session
+)
+print(result.final_output)
+
+
+Output:
+
+You have the following tasks:
+
+1. Deploy to production (pending)
+
+Would you like to mark it as done or add more tasks?
+
+
+The conversation history survived the process restart because it's stored in tasks.db.
+
+Session Operations​
+
+Sessions provide four core operations for managing conversation history:
+
+Method	Purpose
+get_items()	Retrieve all conversation items
+add_items(items)	Manually add items to history
+pop_item()	Remove and return the most recent item
+clear_session()	Delete all items for this session
+Retrieving History with get_items()​
+
+Inspect what's in a session:
+
+from agents import Agent, Runner
+from agents import SQLiteSession
+
+session = SQLiteSession("user_123", "tasks.db")
+
+# Run a conversation
+agent = Agent(name="Assistant", instructions="Be helpful.")
+Runner.run_sync(agent, "Hello!", session=session)
+Runner.run_sync(agent, "What's 2+2?", session=session)
+
+# Inspect the history
+items = session.get_items()
+print(f"Session contains {len(items)} items:")
+for i, item in enumerate(items):
+    print(f"  {i+1}. {type(item).__name__}")
+
+
+Output:
+
+Session contains 4 items:
+  1. MessageInputItem
+  2. MessageOutputItem
+  3. MessageInputItem
+  4. MessageOutputItem
+
+
+Each user message and agent response is stored as a separate item.
+
+Limiting Retrieved History​
+
+For long conversations, you can limit how much history to load:
+
+# Get only the last 5 items
+recent_items = session.get_items(limit=5)
+print(f"Retrieved {len(recent_items)} recent items")
+
+
+Output:
+
+Retrieved 5 recent items
+
+
+This is useful when you want to reduce token usage by loading only recent context.
+
+Correcting Mistakes with pop_item()​
+
+The pop_item() method enables "undo" functionality---useful when the user wants to correct their input:
+
+from agents import Agent, Runner
+from agents import SQLiteSession
+
+session = SQLiteSession("correction_demo")
+
+agent = Agent(
+    name="TaskManager",
+    instructions="Manage tasks. Add tasks when asked."
+)
+
+# User makes a typo
+result = Runner.run_sync(
+    agent,
+    "Add 'Reivew documentation' to tasks",  # typo: Reivew
+    session=session
+)
+print(f"Agent response: {result.final_output}")
+
+# Remove the response and the typo'd input
+session.pop_item()  # Remove agent response
+session.pop_item()  # Remove user input with typo
+
+# Re-submit with correction
+result = Runner.run_sync(
+    agent,
+    "Add 'Review documentation' to tasks",  # corrected
+    session=session
+)
+print(f"Corrected response: {result.final_output}")
+
+
+Output:
+
+Agent response: I've added "Reivew documentation" to your tasks.
+Corrected response: I've added "Review documentation" to your tasks.
+
+Clearing Sessions​
+
+When a user wants to start fresh:
+
+# Clear all conversation history
+session.clear_session()
+
+# Verify it's empty
+items = session.get_items()
+print(f"Session now has {len(items)} items")
+
+
+Output:
+
+Session now has 0 items
+
+Multi-User Sessions​
+
+For a Digital FTE serving multiple customers, each user needs isolated conversation history. The session_id parameter provides this isolation:
+
+from agents import Agent, Runner
+from agents import SQLiteSession
+
+# Shared database, isolated sessions
+alice_session = SQLiteSession("alice@example.com", "support.db")
+bob_session = SQLiteSession("bob@example.com", "support.db")
+
+support_agent = Agent(
+    name="SupportAgent",
+    instructions="""You're a customer support agent.
+    Remember each customer's issues and previous interactions."""
+)
+
+# Alice's conversation
+Runner.run_sync(
+    support_agent,
+    "I'm having trouble with my subscription billing.",
+    session=alice_session
+)
+
+# Bob's conversation (completely separate)
+Runner.run_sync(
+    support_agent,
+    "How do I reset my password?",
+    session=bob_session
+)
+
+# Alice continues her conversation - doesn't see Bob's
+result = Runner.run_sync(
+    support_agent,
+    "What was I asking about?",
+    session=alice_session
+)
+print(result.final_output)
+
+
+Output:
+
+You were asking about trouble with your subscription billing. Would you like me to help investigate the billing issue? I can look up your recent charges or help you understand your subscription status.
+
+
+Alice's session only contains her billing inquiry. Bob's password question is isolated in his own session.
+
+Session ID Strategies​
+
+Choose session IDs based on your use case:
+
+Strategy	Session ID Pattern	Use Case
+Per-user	user_email or user_id	Continuous user relationship
+Per-conversation	user_id:conversation_uuid	Separate topics per user
+Per-ticket	ticket_number	Support ticket tracking
+Per-device	user_id:device_id	Multi-device continuity
+import uuid
+
+# Per-conversation pattern
+def create_conversation_session(user_id: str, db_path: str) -> SQLiteSession:
+    """Create a new conversation with unique ID."""
+    conversation_id = f"{user_id}:{uuid.uuid4()}"
+    return SQLiteSession(conversation_id, db_path)
+
+# Per-user pattern (single continuous conversation)
+def get_user_session(user_email: str, db_path: str) -> SQLiteSession:
+    """Get or create user's continuous session."""
+    return SQLiteSession(user_email, db_path)
+
+Advanced Session Patterns with AdvancedSQLiteSession​
+
+For production Digital FTEs, AdvancedSQLiteSession adds critical capabilities:
+
+Usage tracking: Monitor token consumption per conversation
+Conversation branching: Create alternative conversation paths
+Structured queries: Search and analyze conversation history
+Tracking Token Usage​
+
+Understanding costs is essential for Digital FTE pricing:
+
+from agents import Agent, Runner
+from agents.extensions.memory import AdvancedSQLiteSession
+
+session = AdvancedSQLiteSession(
+    session_id="tracked_conversation",
+    db_path="tracked.db",
+    create_tables=True
+)
+
+agent = Agent(
+    name="CostTracker",
+    instructions="Answer questions concisely."
+)
+
+# Run a conversation
+result = Runner.run_sync(
+    agent,
+    "Explain what a Digital FTE is in one paragraph.",
+    session=session
+)
+
+# Store usage data from the result
+session.store_run_usage(result)
+
+# Retrieve usage statistics
+usage = session.get_session_usage()
+print(f"Total requests: {usage.requests}")
+print(f"Input tokens: {usage.input_tokens}")
+print(f"Output tokens: {usage.output_tokens}")
+print(f"Total tokens: {usage.total_tokens}")
+
+
+Output:
+
+Total requests: 1
+Input tokens: 47
+Output tokens: 89
+Total tokens: 136
+
+
+For a Digital FTE billing model, this data enables accurate cost attribution per customer or conversation.
+
+Conversation Branching​
+
+Sometimes you want to explore "what if" scenarios without losing the original conversation:
+
+from agents.extensions.memory import AdvancedSQLiteSession
+
+session = AdvancedSQLiteSession("strategy_planning", "planning.db", create_tables=True)
+
+agent = Agent(
+    name="StrategyAdvisor",
+    instructions="Help with business strategy decisions."
+)
+
+# Original conversation
+Runner.run_sync(agent, "We're deciding between expanding to Asia or Europe.", session=session)
+Runner.run_sync(agent, "What factors should we consider for Asia?", session=session)
+
+# Create a branch to explore Europe option
+europe_branch = session.create_branch_from_turn(turn_number=1)
+print(f"Created branch: {europe_branch}")
+
+# Switch to the new branch
+session.switch_to_branch(europe_branch)
+
+# Continue with Europe exploration (doesn't affect Asia branch)
+Runner.run_sync(agent, "Actually, let's focus on Europe instead. What factors?", session=session)
+
+# List all branches
+branches = session.list_branches()
+for branch in branches:
+    print(f"Branch {branch.id}: {branch.turn_count} turns")
+
+
+Output:
+
+Created branch: branch_abc123
+Branch main: 2 turns
+Branch branch_abc123: 2 turns
+
+
+This pattern is powerful for:
+
+A/B testing different agent responses
+Exploring alternative solutions
+Allowing users to "rewind" decisions
+Progressive Project: Support Desk Assistant​
+
+Your Support Desk handles customers across multiple sessions. "I called yesterday about order #12345..." In Lesson 5, you added guardrails. Now you'll add persistent session memory so customers can continue conversations across days.
+
+What You're Building​
+
+Add session persistence so the Support Desk remembers:
+
+Memory Type	Purpose
+Conversation history	Customer continues where they left off
+Ticket context	Agent recalls open issues
+Customer preferences	Remembers tier, past interactions
+Adding Persistent Memory​
+
+Now it's your turn to extend the Support Desk from Lesson 5. Using the patterns you learned above, add session persistence that lets customers continue conversations across days.
+
+Step 1: Enhance your context model for session tracking
+
+Update your SupportContext class to include session-related fields:
+
+class SupportContext(BaseModel):
+    customer_id: str = ""
+    customer_name: str = ""
+    account_tier: str = "standard"
+    tickets: list[dict] = []
+    session_history: list[str] = []  # Track actions in this session
+
+
+Step 2: Create a ticket management tool
+
+Using the @function_tool decorator from Lesson 2, create a create_ticket tool that:
+
+Generates a ticket ID (e.g., TKT-1001)
+Records the subject, description, priority, and status
+Appends the ticket to ctx.context.tickets
+Logs the action in ctx.context.session_history
+
+Step 3: Create a list_tickets tool
+
+Create a tool that retrieves all tickets for the customer and displays them with their status.
+
+Step 4: Create a get_conversation_summary tool
+
+Create a tool that summarizes the session including:
+
+Customer name and tier
+Number of actions taken
+Count of open tickets
+Recent session history
+
+Step 5: Create a SupportSession manager class
+
+Using the File-Based Persistence section as reference, create a class that:
+
+Initializes with a database path (default: support_sessions.db)
+Has a get_session(customer_id) method that returns a SQLiteSession
+Has a run_turn(customer_id, customer_name, tier, message) method that:
+Gets the session for the customer
+Checks if they're returning (using get_items())
+Prints whether it's a new or returning customer
+Runs the agent with the session
+Has a get_session_length(customer_id) method for statistics
+Has a clear_session(customer_id) method for fresh starts
+
+Step 6: Update your agent to use sessions
+
+Update your support_desk agent's instructions to:
+
+Reference conversation history
+Acknowledge returning customers
+Check for existing tickets before creating duplicates
+
+Step 7: Create a demo scenario
+
+Write a demo_persistent_sessions() function that simulates:
+
+Day 1: Alice reports an issue and requests a ticket
+Day 2: Alice returns and asks about her ticket (session persists!)
+New Customer: Bob starts a separate conversation (isolated session)
+Statistics: Show turn counts proving isolation
+
+When you run your demo, you should see the agent remember Alice's ticket from Day 1 and keep Bob's conversation completely separate.
+
+Extension Challenge​
+
+Add undo functionality using the pop_item() pattern:
+
+def undo_last_turn(self, customer_id: str) -> str:
+    """Remove the last agent response and user message."""
+    # Your implementation using pop_item()
+
+
+This lets customers say "wait, I made a mistake" and correct their input.
+
+What's Next​
+
+Your Support Desk remembers customers, but how do you debug issues? "Why did the agent give the wrong answer yesterday?" In Lesson 7, you'll add tracing and observability to see exactly what your agents think and do.
+
+Try With AI​
+
+Use Claude Code, Gemini CLI, or ChatGPT to explore session patterns:
+
+Prompt 1: Design a Session Architecture​
+I'm building a customer support Digital FTE that needs to:
+1. Remember each customer's conversation history
+2. Track total tokens used per customer for billing
+3. Allow supervisors to review any conversation
+4. Support "rewind" to any point in a conversation
+
+Design the session architecture including:
+- What session backend to use
+- How to structure session IDs
+- How to implement supervisor access
+- Code examples for each capability
+
+
+What you're learning: How to design session architectures for production Digital FTEs with multi-stakeholder access requirements. You're practicing the system design thinking needed for enterprise deployments.
+
+Prompt 2: Implement Custom Session Backend​
+I need to implement a Redis-based session backend for distributed deployment.
+The OpenAI Agents SDK expects sessions to implement:
+- get_items() -> list of conversation items
+- add_items(items) -> store new items
+- pop_item() -> remove most recent item
+- clear_session() -> delete all items
+
+Help me implement a RedisSession class that:
+1. Uses Redis sorted sets for ordering
+2. Serializes items as JSON
+3. Supports TTL for automatic cleanup
+4. Works with the Runner.run_sync() pattern
+
+
+What you're learning: How to implement custom session backends for specialized infrastructure requirements, preparing you for enterprise deployments where SQLite isn't sufficient.
+
+Prompt 3: Apply Sessions to Your Domain​
+I'm building a Digital FTE for [YOUR DOMAIN: legal research, medical intake,
+financial advising, etc.].
+
+Help me design the session strategy:
+1. What should the session ID represent (user, case, matter)?
+2. What information needs to persist across sessions?
+3. How long should session data be retained (compliance)?
+4. When should conversations branch vs. start fresh?
+
+Provide a complete implementation with session initialization,
+multi-turn conversation handling, and cleanup logic.
+
+
+What you're learning: Translating session patterns to domain-specific requirements, considering compliance, data retention, and user experience for your specific Digital FTE use case.
+
+Safety Note​
+
+Session data may contain sensitive user information. When implementing persistent sessions:
+
+Encrypt at rest: Use encrypted storage for conversation databases
+Retention policies: Implement automatic cleanup for old sessions (GDPR, HIPAA)
+Access controls: Limit who can access conversation history
+PII handling: Consider what data should be stored vs. processed transiently
+Audit logging: Track who accesses session data and when

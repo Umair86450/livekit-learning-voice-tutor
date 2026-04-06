@@ -1,0 +1,434 @@
+Custom Skills with Frontmatter
+
+Your team has a code review checklist. It lives in a wiki page that nobody reads. Every pull request, someone asks "did you check for SQL injection?" and someone else says "I forgot." The checklist exists, but it is not where the work happens.
+
+What if your review checklist were a slash command? Type /review in Claude Code, and Claude runs through every item: security checks, naming conventions, test coverage, error handling. The checklist does not live in a wiki anymore. It lives in the tool your team already uses. Every developer gets it when they clone the repo. Nobody forgets.
+
+That is what custom skills and commands do. They turn team knowledge into executable actions that live inside Claude Code, version-controlled alongside your source code.
+
+Commands and Skills: The Same System​
+
+Claude Code has two ways to create custom slash commands, and they are closer than you might think.
+
+Commands are markdown files in .claude/commands/. Drop a file called review.md in that directory, and every team member gets /review when they clone the repo.
+
+Skills are directories in .claude/skills/ with a SKILL.md file inside. They do everything commands do, plus they support YAML frontmatter for configuration and a directory structure for supporting files (templates, scripts, examples).
+
+The key insight: commands have been merged into skills. A file at .claude/commands/deploy.md and a skill at .claude/skills/deploy/SKILL.md both create /deploy and work the same way. Your existing command files keep working. Skills add optional features on top.
+
+Feature	Command (.claude/commands/)	Skill (.claude/skills/)
+Creates a /slash-command	Yes	Yes
+Shared via version control	Yes (project-scoped)	Yes (project-scoped)
+YAML frontmatter	Supported	Supported
+Supporting files	No (single file only)	Yes (directory with templates, scripts)
+Auto-invocation by Claude	Yes (by default)	Yes (by default)
+$ARGUMENTS substitution	Yes	Yes
+
+When to use which: Start with commands for simple, single-file instructions. Move to skills when you need supporting files, or when the directory structure helps organize complex instructions. For this lesson, we will build both.
+
+Where Commands and Skills Live​
+
+Where you store a skill determines who can use it:
+
+Scope	Path	Who gets it
+Enterprise	Managed settings (admin-configured)	All users in the organization
+Personal	~/.claude/skills/<name>/SKILL.md	You, across all your projects
+Project	.claude/skills/<name>/SKILL.md	Everyone who clones this repo
+Project	.claude/commands/<name>.md	Everyone who clones this repo
+
+When skills share the same name across levels, higher-priority locations win: enterprise > personal > project. If a skill and a command share the same name, the skill takes precedence.
+
+EXAM CONNECTION
+
+Exam Q4 tests exactly this: "Where should a team-shared /review command be placed?" The answer is .claude/commands/ in the project repository (or .claude/skills/), because project-scoped locations are shared via version control. Personal locations (~/.claude/) are private to one developer.
+
+Hands-On: Your First Team Command​
+
+Let's create a /review command that your entire team gets when they clone the repository.
+
+Step 1: Create the Command File​
+
+Create .claude/commands/review.md in your project:
+
+Review the code changes in this pull request for our team standards:
+
+1. **Security**: Check for SQL injection, XSS, command injection, and hardcoded secrets
+2. **Naming**: Verify functions use snake_case, classes use PascalCase, constants use UPPER_SNAKE_CASE
+3. **Tests**: Confirm every new public function has at least one test
+4. **Error handling**: Verify no bare except clauses; all errors are specific and logged
+5. **Types**: Check that function signatures have type annotations
+
+For each issue found, cite the file and line number.
+Severity levels: CRITICAL (blocks merge), WARNING (should fix), INFO (nice to have).
+
+$ARGUMENTS
+
+
+The $ARGUMENTS placeholder at the end means anything typed after /review gets appended. Running /review focus on the auth module tells Claude to prioritize the authentication code.
+
+Step 2: Test It​
+
+Open Claude Code in your project and type:
+
+/review
+
+
+Claude runs through the five-point checklist against your current changes. Every developer who clones this repo gets the same /review command automatically.
+
+What Just Happened​
+
+You created a team-wide code review standard that is:
+
+Executable: not a wiki page, but a command that runs in the tool
+Version-controlled: changes to the checklist go through the same PR process as code
+Parameterizable: $ARGUMENTS lets developers focus the review on specific areas
+Skill Frontmatter: Three Power Features​
+
+Commands are great for simple instructions. But what happens when your skill produces pages of output that floods your conversation? Or when you want a skill that can read files but never modify them? Or when developers need a hint about what arguments to provide?
+
+That is where YAML frontmatter comes in. Three fields solve these problems:
+
+1. context: fork (Isolated Execution)​
+
+When a skill produces verbose output (scanning hundreds of files, generating long reports), that output consumes your conversation context. Next time you ask Claude a question, it has less room to think because the skill's output is taking up space.
+
+context: fork solves this. It runs the skill in a separate subagent. The subagent does all the work, then returns a summary to your main conversation. Your context stays clean.
+
+---
+name: codebase-audit
+description: Audit the codebase for common issues
+context: fork
+---
+
+Scan every file in the project for:
+1. TODO comments older than 30 days
+2. Functions longer than 50 lines
+3. Files with no test coverage
+4. Unused imports
+
+Summarize findings as a table with file, line, and issue type.
+
+
+When to use context: fork:
+
+Skills that scan many files and produce long output
+Exploratory skills where you want Claude to investigate freely without cluttering your session
+Skills that brainstorm alternatives (you want the summary, not the full exploration)
+
+When NOT to use it:
+
+Skills that provide reference knowledge ("use these API conventions") because the subagent cannot see your current conversation
+Skills where you need back-and-forth interaction
+2. allowed-tools (Restricted Tool Access)​
+
+By default, Claude can use all its tools (Read, Write, Edit, Bash, Grep, Glob, etc.) when running a skill. allowed-tools restricts which tools are available during skill execution.
+
+This is powerful for creating read-only skills. An analysis skill that should never modify files:
+
+---
+name: dependency-check
+description: Analyze project dependencies for security issues and outdated packages
+allowed-tools: Read, Grep, Glob, Bash(npm audit*), Bash(pip audit*)
+---
+
+Analyze this project's dependencies:
+1. Read package.json or requirements.txt
+2. Check for known security vulnerabilities
+3. Identify outdated packages
+4. Report findings without making any changes
+
+$ARGUMENTS
+
+
+Notice the tool specification syntax: Read allows the Read tool entirely, while Bash(npm audit*) allows Bash but only for commands starting with npm audit. This gives you precise control.
+
+Common allowed-tools patterns:
+
+Pattern	What it allows
+Read, Grep, Glob	Read-only file access
+Bash(git log*), Bash(git diff*)	Git history inspection only
+Read, Grep, Glob, Bash(npm test*)	Read files and run tests, nothing else
+3. argument-hint (Parameter Prompting)​
+
+When a developer types /fix-issue and hits tab, what arguments does the skill expect? argument-hint provides the autocomplete hint:
+
+---
+name: fix-issue
+description: Fix a GitHub issue by number
+argument-hint: "[issue-number]"
+disable-model-invocation: true
+---
+
+Fix GitHub issue $ARGUMENTS following our coding standards.
+
+1. Read the issue description using gh issue view $ARGUMENTS
+2. Understand the requirements
+3. Implement the fix
+4. Write tests
+5. Create a commit with message "fix: resolve #$ARGUMENTS"
+
+
+When a developer types /fix-issue, the autocomplete shows [issue-number] as a hint. They know to type /fix-issue 423 rather than guessing what the skill expects.
+
+You can also access individual arguments by position. $ARGUMENTS[0] (or shorthand $0) gets the first argument, $ARGUMENTS[1] (or $1) gets the second:
+
+---
+name: migrate-component
+description: Migrate a component between frameworks
+argument-hint: "[component-name] [from-framework] [to-framework]"
+---
+Migrate the $0 component from $1 to $2.
+Preserve all existing behavior and tests.
+
+
+Running /migrate-component SearchBar React Vue replaces $0 with SearchBar, $1 with React, and $2 with Vue.
+
+Hands-On: Three Skills with Frontmatter​
+
+Let's build three skills, each demonstrating a different frontmatter capability.
+
+Skill 1: Architecture Explorer (context: fork)​
+
+This skill scans your codebase structure and returns a summary. It produces verbose output, so we fork it.
+
+Create .claude/skills/architecture-explorer/SKILL.md:
+
+---
+name: architecture-explorer
+description: Explore and document the architecture of this codebase
+context: fork
+agent: Explore
+---
+
+Analyze the architecture of this codebase:
+
+1. Map the directory structure (top 3 levels)
+2. Identify the main entry points
+3. List external dependencies and their purposes
+4. Identify the primary design patterns used
+5. Document the data flow from input to output
+
+Present findings as a structured report with sections for each area.
+Focus on: $ARGUMENTS
+
+
+Test it:
+
+/architecture-explorer the authentication flow
+
+
+Claude spawns an Explore subagent that reads through your codebase without polluting your main conversation. You get back a clean summary of the auth architecture.
+
+Skill 2: Safe Reviewer (allowed-tools)​
+
+This skill reviews code but cannot modify anything. It is read-only by design.
+
+Create .claude/skills/safe-reviewer/SKILL.md:
+
+---
+name: safe-reviewer
+description: Review code for bugs and style issues without making changes
+allowed-tools: Read, Grep, Glob
+---
+
+Review the following code for:
+1. Logic errors and potential bugs
+2. Style violations against our team conventions
+3. Missing error handling
+4. Performance concerns
+
+Report each finding with:
+- File and line number
+- Severity (CRITICAL / WARNING / INFO)
+- Description of the issue
+- Suggested fix (describe it, do not apply it)
+
+$ARGUMENTS
+
+
+Test it:
+
+/safe-reviewer src/api/
+
+
+Claude reads and analyzes files but cannot write, edit, or run bash commands. Even if Claude wanted to "just quickly fix" something, the tool restriction prevents it.
+
+Skill 3: Test Generator (argument-hint)​
+
+This skill generates tests for a specific file. The argument hint tells developers what to provide.
+
+Create .claude/skills/test-generator/SKILL.md:
+
+---
+name: test-generator
+description: Generate comprehensive tests for a source file
+argument-hint: "[source-file] [test-framework?]"
+disable-model-invocation: true
+---
+
+Generate tests for the file: $0
+
+Test framework: $1 (default to the framework already used in this project)
+
+Requirements:
+1. Cover every public function and method
+2. Include happy path, edge cases, and error conditions
+3. Follow existing test patterns in this project
+4. Name tests descriptively: test_<function>_<scenario>_<expected>
+
+Place the test file next to the source file or in the existing test directory,
+matching this project's conventions.
+
+
+Test it:
+
+/test-generator src/api/auth.py pytest
+
+
+The disable-model-invocation: true field means Claude will never run this skill automatically. You must type /test-generator to trigger it. This is important for skills with side effects (this one creates files).
+
+Personal Skills: Your Private Toolkit​
+
+Project skills in .claude/skills/ are shared with the team. But sometimes you want a skill that is just for you: a personal code review style, a specific workflow you prefer, a shortcut for your own conventions.
+
+Personal skills live in ~/.claude/skills/. They are available across all your projects but invisible to your teammates.
+
+Creating a Personal Skill​
+mkdir -p ~/.claude/skills/my-review
+
+
+Create ~/.claude/skills/my-review/SKILL.md:
+
+---
+name: my-review
+description: My personal code review checklist with extra security focus
+---
+
+Review the current changes with extra attention to:
+
+1. All standard team review items
+2. ADDITIONALLY check for:
+   - Race conditions in concurrent code
+   - Memory leaks in resource handling
+   - Timing attacks in authentication
+   - Information leakage in error messages
+
+I care most about security. Flag anything suspicious even if it seems minor.
+
+$ARGUMENTS
+
+
+This extends the team's /review with your personal security focus. Your teammates still use /review; you use /my-review for your enhanced version.
+
+Priority when names collide: If you create a personal skill with the same name as a project skill, your personal version wins (personal > project). This lets you override team defaults without affecting anyone else.
+
+The Skills vs CLAUDE.md Decision Framework​
+
+You now have two systems for configuring Claude's behavior: skills (on-demand) and CLAUDE.md (always-loaded). When does configuration belong in each?
+
+Configuration Type	Where It Belongs	Why
+Code style conventions	CLAUDE.md	Applies to every task, every time
+Commit message format	CLAUDE.md	Should be consistent across all commits
+Code review checklist	Skill	Only needed during reviews, not every interaction
+Test generation workflow	Skill	On-demand action with specific parameters
+API naming conventions	CLAUDE.md	Universal standard that always applies
+Dependency audit	Skill	Periodic task, not needed during normal coding
+Error handling patterns	CLAUDE.md	Should be applied in every file Claude writes
+Architecture exploration	Skill	Exploratory task that produces verbose output
+
+The decision rule:
+
+Always applies to every task? Put it in CLAUDE.md (or .claude/rules/).
+On-demand action with specific trigger? Make it a skill.
+Produces verbose output? Skill with context: fork.
+Needs restricted tool access? Skill with allowed-tools.
+
+Think of CLAUDE.md as the constitution (always in effect) and skills as the laws (invoked when applicable).
+
+Controlling Skill Invocation​
+
+Two frontmatter fields control who can trigger a skill:
+
+Field	You can invoke	Claude can invoke	Use for
+(default)	Yes	Yes	General-purpose skills
+disable-model-invocation: true	Yes	No	Side-effect skills (deploy, commit, delete)
+user-invocable: false	No	Yes	Background knowledge (legacy system docs)
+
+disable-model-invocation: true is for skills with consequences. You do not want Claude deciding to deploy because your tests pass. You want to type /deploy deliberately.
+
+user-invocable: false is for background knowledge. A skill that explains how your legacy billing system works is useful for Claude to know, but /legacy-billing-context is not a meaningful action for a developer to take.
+
+Summary​
+
+You now have the complete toolkit for team-wide skill sharing:
+
+Commands (.claude/commands/): simple slash commands, version-controlled, shared with the team
+Skills (.claude/skills/): commands plus frontmatter, supporting files, and directory structure
+context: fork: isolate verbose skills in a subagent to keep your conversation clean
+allowed-tools: restrict what Claude can do during skill execution (read-only analysis, limited bash access)
+argument-hint: tell developers what parameters a skill expects
+Personal skills (~/.claude/skills/): your private toolkit, invisible to teammates
+Skills vs CLAUDE.md: on-demand actions are skills; universal standards are CLAUDE.md
+
+The next lesson covers when to let Claude plan before acting versus executing directly, and how the Explore subagent prevents context exhaustion during investigation.
+
+Try With AI​
+
+Exercise 1: Build a Team Review Command (Create + Verify)
+
+Create a /review command file at .claude/commands/review.md in any project. Include at least 5 checklist items relevant to your team's technology stack (for example: React prop validation, Python type hints, SQL parameterization). Add $ARGUMENTS so developers can focus the review.
+
+After creating it, start a new Claude Code session in the same project and type /review. Verify it appears in the autocomplete menu. Then run it against your most recent changes:
+
+/review focus on error handling
+
+
+Compare the output to what Claude would produce without the command (just typing "review my code for error handling"). Is the structured checklist more thorough?
+
+What you're learning: Project-scoped commands are shared through version control. Every developer who clones the repo gets /review automatically. The $ARGUMENTS pattern lets developers customize the invocation without editing the command file. This is exam Task 3.2 in action: creating team-shared commands in .claude/commands/.
+
+Exercise 2: Fork vs Inline Comparison (Observe + Analyze)
+
+Create a skill called file-census that counts every file type in the project and reports statistics. Create it twice: once without context: fork, and once with it.
+
+First, create .claude/skills/file-census/SKILL.md WITHOUT fork:
+
+---
+name: file-census
+description: Count all file types in the project
+---
+
+Count every file in this project grouped by extension.
+Report: total files, top 10 extensions by count, largest files, and empty directories.
+Show the raw data, not just summaries.
+
+
+Run /file-census and note how much output appears in your conversation.
+
+Now add context: fork to the frontmatter and run it again. Compare: How much output do you see in your main conversation? What happened to all the detailed file listings?
+
+What you're learning: context: fork runs the skill in an isolated subagent. The subagent does all the verbose work (scanning every file), then returns a concise summary to your main conversation. Without fork, all that output stays in your context window, reducing how much room Claude has for your next question. This is critical for skills that produce large outputs.
+
+Exercise 3: Skills vs CLAUDE.md Decision Tree (Analyze + Classify)
+
+Paste this prompt into Claude Code:
+
+I have 8 configuration items for my team. For each one, tell me whether
+it should go in CLAUDE.md (always-loaded) or a custom skill (on-demand),
+and explain why:
+
+1. "All API responses must use our standard envelope format: {data, error, meta}"
+2. "A command to generate database migration files from schema changes"
+3. "TypeScript strict mode must always be enabled in tsconfig"
+4. "A tool to scan for hardcoded secrets before committing"
+5. "Import order: stdlib first, then third-party, then local modules"
+6. "A workflow to set up a new microservice with boilerplate files"
+7. "Never use any/unknown types without a comment explaining why"
+8. "A command to compare this branch's performance benchmarks against main"
+
+
+Review Claude's answers. Do you agree with each classification? For items 4 and 6, would you add context: fork? For item 4, would you use allowed-tools to prevent the scanning tool from accidentally modifying files?
+
+What you're learning: The skills vs CLAUDE.md decision framework. Universal conventions that apply to every file Claude touches (items 1, 3, 5, 7) belong in CLAUDE.md. On-demand workflows with specific triggers (items 2, 4, 6, 8) belong in skills. This framework appears throughout the exam: knowing where to put configuration is the core skill tested in Task Statement 3.2.
+
+Flashcards Study Aid​

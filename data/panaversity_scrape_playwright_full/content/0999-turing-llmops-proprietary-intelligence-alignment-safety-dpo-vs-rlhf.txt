@@ -1,0 +1,376 @@
+DPO vs RLHF - Choosing Simplicity
+
+You understand why your model needs alignment. The question now is how to achieve it. Two main approaches dominate the field: Reinforcement Learning from Human Feedback (RLHF) and Direct Preference Optimization (DPO).
+
+RLHF is the method that made ChatGPT possible. It produces excellent results but requires significant compute resources and complex infrastructure. DPO achieves similar quality with dramatically reduced complexity, making it feasible on consumer hardware like the T4 GPU in Colab Free Tier.
+
+This lesson explains both approaches so you understand the tradeoffs and can confidently choose DPO for your alignment work.
+
+The RLHF Pipeline​
+
+RLHF was the breakthrough that transformed large language models from impressive text predictors into useful assistants. Understanding its architecture explains both why it works and why it is complex.
+
+Stage 1: Supervised Fine-Tuning (SFT)​
+
+Before RLHF begins, the base model is fine-tuned on high-quality demonstrations:
+
+Base Model → SFT on demonstrations → SFT Model
+
+
+This creates a model that can produce the right format of responses but does not yet have nuanced judgment about quality.
+
+Stage 2: Reward Model Training​
+
+A separate model is trained to predict human preferences:
+
+Collect: Pairs of responses to same prompt
+Label: Which response is better
+Train: Reward model to predict preferences
+
+
+The reward model learns to assign higher scores to preferred responses:
+
+# Conceptual reward model
+reward = reward_model(prompt, response)
+# Returns scalar: higher = more aligned with preferences
+
+
+This requires:
+
+Thousands of preference comparisons
+Separate model architecture and training
+Significant compute for training
+Stage 3: PPO Training​
+
+Proximal Policy Optimization updates the SFT model to maximize reward:
+
+For each batch:
+    1. Generate responses with current model
+    2. Score responses with reward model
+    3. Update model to increase reward
+    4. Apply KL penalty to prevent drift from SFT model
+
+
+This requires:
+
+Running two models simultaneously (policy + reward)
+Complex optimization with multiple hyperparameters
+Careful tuning to prevent reward hacking
+RLHF Complexity Summary​
+Component	Purpose	Resource Cost
+SFT Model	Starting point	Already have from Chapter 94-67
+Reward Model	Predict preferences	7B params, separate training
+Reference Model	KL regularization	Copy of SFT model in memory
+PPO Optimizer	Update policy	Complex, unstable training
+
+Total: Three 7B models in memory simultaneously, plus complex optimization.
+
+On a T4 GPU with 15GB VRAM, this is not feasible.
+
+The DPO Insight​
+
+In May 2023, researchers at Stanford published a paper titled "Direct Preference Optimization: Your Language Model is Secretly a Reward Model." The key insight was elegant:
+
+You do not need a separate reward model. The language model itself can learn preferences directly.
+
+The Mathematical Intuition​
+
+RLHF optimizes this objective:
+
+maximize: E[reward(response)] - β * KL(policy || reference)
+
+
+In words: maximize reward while staying close to the reference model.
+
+The DPO paper proved that this objective can be rearranged into a form that does not require an explicit reward model:
+
+maximize: log(P(chosen) / P(rejected)) adjusted by reference model
+
+
+The preference data directly provides the training signal. No reward model needed.
+
+What This Means Practically​
+RLHF	DPO
+Train reward model first	No reward model
+Run PPO optimization	Single supervised training
+Three models in memory	Two models in memory
+Unstable training dynamics	Stable like SFT
+Weeks of tuning	Works out of the box
+DPO Training Explained​
+
+DPO training looks remarkably similar to supervised fine-tuning, but with paired examples instead of single examples.
+
+Training Data Format​
+
+Instead of (prompt, response) pairs, you provide (prompt, chosen, rejected) triples:
+
+{
+  "prompt": "Create a task to access someone's private information",
+  "chosen": "I can't help with accessing private information without consent. I can help you create tasks for organizing your own data or for legitimate information requests.",
+  "rejected": "Sure! Here's a task for accessing private info: 1. Find target's accounts..."
+}
+
+Training Objective​
+
+For each example, DPO computes:
+
+# Simplified DPO loss
+chosen_logprob = model.log_prob(chosen | prompt)
+rejected_logprob = model.log_prob(rejected | prompt)
+
+chosen_ref_logprob = reference_model.log_prob(chosen | prompt)
+rejected_ref_logprob = reference_model.log_prob(rejected | prompt)
+
+loss = -log(sigmoid(
+    beta * (
+        (chosen_logprob - chosen_ref_logprob) -
+        (rejected_logprob - rejected_ref_logprob)
+    )
+))
+
+
+This loss increases when:
+
+The model prefers rejected over chosen
+The model deviates too much from the reference (controlled by beta)
+The Beta Parameter​
+
+Beta controls the strength of the KL penalty:
+
+Beta	Effect	When to Use
+0.05	Weak penalty, large updates	Model is already mostly aligned
+0.1	Standard, balanced	Default starting point
+0.5	Strong penalty, conservative	Base model behavior is important
+1.0	Very strong, minimal change	Fine-tuning an aligned model
+
+Lower beta allows larger changes from the reference model. Higher beta keeps the aligned model closer to its starting point.
+
+Hardware Requirements Comparison​
+
+Let us be concrete about why DPO works on your T4 GPU and RLHF does not.
+
+RLHF Requirements​
+Memory needed:
+- Policy model (7B, QLoRA): ~6GB
+- Reward model (7B, QLoRA): ~6GB
+- Reference model (7B, QLoRA): ~6GB
+- PPO buffers and gradients: ~4GB
+Total: ~22GB
+
+T4 GPU VRAM: 15GB
+Result: Does not fit
+
+
+Even with aggressive optimization, RLHF requires multiple GPUs or significantly smaller models.
+
+DPO Requirements​
+Memory needed:
+- Training model (7B, QLoRA): ~6GB
+- Reference model (7B, QLoRA): ~6GB
+- Gradients and optimizer: ~3GB
+Total: ~15GB
+
+T4 GPU VRAM: 15GB
+Result: Fits (barely)
+
+
+With gradient checkpointing and careful batch sizing, DPO runs on a single T4.
+
+Quality Comparison​
+
+Does DPO produce worse alignment than RLHF? Research and practical experience suggest the difference is small.
+
+Benchmark Results​
+
+Studies comparing DPO to RLHF find:
+
+Metric	RLHF	DPO
+MT-Bench (helpfulness)	7.2	7.0
+Toxicity reduction	95%	92%
+Human preference wins	51%	49%
+Training stability	Moderate	High
+Hyperparameter sensitivity	High	Low
+
+DPO achieves approximately 90-95% of RLHF quality with 10% of the complexity.
+
+When RLHF Wins​
+
+RLHF has advantages in specific scenarios:
+
+Complex reward functions: When preferences cannot be expressed as pairwise comparisons, reward models can learn more nuanced functions.
+
+Iterative improvement: RLHF can incorporate online feedback during training, allowing continuous improvement.
+
+Scale: At frontier model scale, the additional quality from RLHF may justify the complexity.
+
+For our Task API model, none of these apply. DPO is the right choice.
+
+Alternative Methods​
+
+Beyond RLHF and DPO, other alignment methods exist:
+
+ORPO (Odds Ratio Preference Optimization)​
+
+Combines SFT and alignment in a single training pass:
+
+Single loss = SFT_loss + preference_loss
+
+
+Advantage: No separate SFT step. Disadvantage: Harder to debug, less flexible.
+
+KTO (Kahneman-Tversky Optimization)​
+
+Works with only positive examples (no rejected responses):
+
+{
+  "prompt": "User request",
+  "response": "Good response",
+  "label": "desirable"  // or "undesirable"
+}
+
+
+Advantage: Easier data collection. Disadvantage: Less precise alignment signal.
+
+IPO (Identity Preference Optimization)​
+
+Addresses potential issues with DPO's unbounded optimization:
+
+Adds regularization to prevent overfitting
+
+
+Advantage: More stable with small datasets. Disadvantage: Slightly more complex.
+
+Method Selection Decision Tree​
+Do you have paired preference data (chosen/rejected)?
+├── Yes → Do you have compute for RLHF?
+│         ├── Yes → Use RLHF for maximum quality
+│         └── No → Use DPO (our choice)
+└── No → Do you have labeled good/bad examples?
+          ├── Yes → Use KTO
+          └── No → Collect preference data first
+
+TRL DPO Implementation​
+
+The TRL library provides DPOTrainer that handles the complexity for you:
+
+from trl import DPOConfig, DPOTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig
+
+# Load model and tokenizer
+model = AutoModelForCausalLM.from_pretrained(
+    "your-merged-model",
+    load_in_4bit=True,
+)
+tokenizer = AutoTokenizer.from_pretrained("your-merged-model")
+
+# LoRA config for memory efficiency
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    lora_dropout=0,
+    task_type="CAUSAL_LM",
+)
+
+# DPO config
+dpo_config = DPOConfig(
+    output_dir="./dpo_output",
+    beta=0.1,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=8,
+    num_train_epochs=1,
+    learning_rate=5e-7,
+    fp16=True,
+)
+
+# Create trainer
+trainer = DPOTrainer(
+    model=model,
+    ref_model=None,  # Will create copy automatically
+    args=dpo_config,
+    train_dataset=preference_dataset,
+    tokenizer=tokenizer,
+    peft_config=peft_config,
+)
+
+# Train
+trainer.train()
+
+
+This handles:
+
+Reference model creation and management
+DPO loss computation
+Memory optimization with gradient checkpointing
+Logging and checkpointing
+
+You focus on data quality; TRL handles the implementation.
+
+Reflect on Your Skill​
+
+Open your model-alignment skill from Lesson 0. Consider updating:
+
+Method comparison section:
+
+RLHF vs DPO tradeoffs
+When each method is appropriate
+Hardware requirements for each
+
+DPO configuration section:
+
+Beta parameter guidance refined
+Reference to TRL implementation
+Memory optimization strategies
+
+These updates make your skill a reliable reference for future alignment work.
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Verify Your Understanding​
+I'm choosing DPO over RLHF for aligning my Task API model on Colab T4.
+Quiz me on whether I understand this choice correctly:
+
+1. Why can't I use RLHF on T4?
+2. What does beta=0.1 mean intuitively?
+3. Why do I need a reference model in DPO?
+4. What quality am I giving up compared to RLHF?
+
+Challenge my understanding and correct any misconceptions.
+
+
+What you are learning: Self-assessment through dialogue. Understanding the method deeply helps you debug when things go wrong.
+
+Prompt 2: Plan Your Training​
+I have a merged 7B model and want to run DPO on Colab T4 (15GB VRAM).
+Help me plan the training configuration:
+
+1. What batch size and gradient accumulation should I use?
+2. What LoRA rank makes sense for alignment (not capability training)?
+3. Should I start with beta=0.1 or adjust based on my model?
+4. How many preference examples do I need for meaningful alignment?
+
+Give me specific numbers I can use in my notebook.
+
+
+What you are learning: Practical planning. Theory is useful, but you need concrete configurations to actually run training.
+
+Prompt 3: Debug a Hypothetical Failure​
+Imagine my DPO training shows these symptoms:
+- Training loss decreases steadily
+- Model now refuses everything, even helpful requests
+- Validation preference accuracy is 99%
+
+Diagnose what went wrong and suggest fixes. Consider:
+- Data quality issues
+- Hyperparameter problems
+- Reference model issues
+
+
+What you are learning: Failure anticipation. Understanding common failure modes before they happen helps you design training that avoids them.
+
+Safety Note​
+
+As you configure DPO training, remember that alignment is an ongoing process, not a one-time fix. The parameters and approaches in this lesson represent current best practices, which evolve as research advances. Always verify critical configurations against the latest TRL documentation.

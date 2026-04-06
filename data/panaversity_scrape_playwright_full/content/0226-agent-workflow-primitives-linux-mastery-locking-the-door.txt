@@ -1,0 +1,212 @@
+Locking the Door
+
+Ali's agent is unkillable. It survives reboots, restarts after crashes, runs under memory limits. He feels accomplished.
+
+Then Dev checks the server status and goes pale.
+
+"Your agent is running as root," Dev says. "And you still have password SSH enabled."
+
+Ali shrugs. "So?"
+
+Dev pulls up the auth log.
+
+47,000 Reasons to Care​
+
+Marcus ran his agent as root for three weeks. He never checked the server's authentication log. When a friend showed him how, they found this:
+
+What you tell Claude Code: "Show me how many failed login attempts are in the auth log."
+
+What the agent does:
+
+grep "Failed password" /var/log/auth.log | wc -l
+
+
+What you see:
+
+47,291
+
+
+Forty-seven thousand attempts. From IP addresses in six countries. Automated bots scanning the internet for servers with weak passwords, trying common combinations: admin/admin, root/password, user/123456.
+
+None had succeeded. Yet.
+
+Marcus's agent had root access. If even one bot had guessed the password, the attacker would have had complete control over the server. Not just the agent: everything. The database. The other services. The ability to install malware, mine cryptocurrency, or launch attacks on other servers.
+
+"Security isn't a feature. It's a constraint that makes everything else possible."
+
+Ali's server has the same problem. Let's fix it.
+
+Concept 1: Users Are Badges​
+
+Think of a server like a building with restricted areas. Every person who enters gets a badge. The badge determines which doors they can open.
+
+Root is the master key. It opens every door in the building. The server room, the executive offices, the supply closet, the safe. If someone steals the master key, they own the building.
+
+Your agent doesn't need a master key. It needs a badge that opens one office; it's own directory, and nothing else.
+
+What you tell Claude Code: "Create a dedicated user called agentuser for running my competitor-tracker agent. It shouldn't have a password or a home directory; it's only for running the service."
+
+What the agent does:
+
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentuser
+
+
+What this means: --system creates a service account (not a human user). --no-create-home skips creating a home directory (the agent already has /opt/agents/competitor-tracker). --shell /usr/sbin/nologin means nobody can SSH in as this user. It exists only to own and run the agent.
+
+Concept 2: Permissions Are Keycards​
+
+In Lesson 2, you learned to read drwxr-xr-x. Now that reading pays off.
+
+Every file on Linux has three levels of access for three groups of people:
+
+Group	Who	Analogy
+Owner	The user who owns the file	Master keycard holder
+Group	Users in the same group	Department keycard holders
+Others	Everyone else on the system	Visitor badge holders
+
+Each group can have three types of access:
+
+Permission	Letter	Meaning
+Read	r	Can see the contents
+Write	w	Can change the contents
+Execute	x	Can run it as a program
+
+So rwxr-xr-x means: owner can do everything, group can read and execute, others can read and execute. And -rw-r--r-- means: owner can read and write, everyone else can only read.
+
+Now look at Ali's .env file: the one with his database password and API keys:
+
+What you tell Claude Code: "Check the permissions on my .env file."
+
+What the agent does:
+
+ls -la /opt/agents/competitor-tracker/.env
+
+
+What you see:
+
+-rw-r--r-- 1 ali ali 256 Feb 28 02:10 .env
+
+
+Pause.
+
+Read that permission string. -rw-r--r--. Owner can read and write. Group can read. Others can read. Every user on this server can read Ali's database password.
+
+What you tell Claude Code: "Transfer ownership of the entire competitor-tracker directory to agentuser. Then restrict the .env file so only the owner can read it."
+
+What the agent does:
+
+sudo chown -R agentuser:agentuser /opt/agents/competitor-tracker
+sudo chmod 750 /opt/agents/competitor-tracker
+sudo chmod 600 /opt/agents/competitor-tracker/.env
+
+
+What this means:
+
+chown -R agentuser:agentuser: Change ownership of the directory and everything inside it to agentuser. The -R means recursive: every file and subdirectory.
+chmod 750 on the directory: Owner (agentuser) can do everything. Group members can read and enter the directory. Others get nothing.
+chmod 600 on .env: Owner can read and write. Nobody else can do anything. The database password is locked down.
+
+Verify:
+
+ls -la /opt/agents/competitor-tracker/.env
+
+-rw------- 1 agentuser agentuser 256 Feb 28 02:10 .env
+
+
+-rw-------. Only the owner can read it. The door is locked.
+
+Concept 3: Keys Beat Passwords​
+
+Ali connects to Dev's server with a password. Every time he SSHes in, he types it. The problem: passwords can be guessed. That's what those 47,000 bots were doing: guessing passwords.
+
+SSH keys work differently. Instead of a password you remember, you generate a key pair: a private key (stays on your laptop, never shared) and a public key (goes on the server).
+
+Think of it this way. A password is a house key: anyone who sees it can make a copy. An SSH key is a fingerprint scanner, even if someone sees you use it, they can't replicate your fingerprint.
+
+What you tell Claude Code: "Set up SSH key authentication. Generate a key pair on my local machine, copy the public key to the server, and then disable password authentication."
+
+What the agent does on your local machine:
+
+ssh-keygen -t ed25519 -C "ali@laptop"
+
+
+This creates two files:
+
+~/.ssh/id_ed25519. Your private key. Never share this. Never move this.
+~/.ssh/id_ed25519.pub. Your public key. Safe to share. Put it on every server you need access to.
+
+What the agent does to copy the key:
+
+ssh-copy-id ali@devs-server.com
+
+
+Now your public key lives on the server. The next time you SSH in, the server checks your fingerprint instead of asking for a password.
+
+What the agent does to disable passwords:
+
+sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+
+CAUTION
+
+Before disabling password authentication, make SURE your SSH key works. Test by opening a new terminal and connecting with the key. If the key doesn't work and you disable passwords, you'll lock yourself out of the server.
+
+Concept 4: Least Privilege​
+
+Every decision in this lesson follows one principle: give the minimum access needed and nothing more.
+
+Instead of...	Do this	Why
+Running agent as root	Create agentuser	If compromised, attacker gets one directory, not the whole server
+Password SSH	SSH keys only	Eliminates brute-force attacks entirely
+.env readable by everyone	chmod 600	Secrets are visible only to the service that needs them
+Agent can write anywhere	chmod 750 on its directory	Agent can't modify system files even if exploited
+
+This is the principle of least privilege: give the delivery driver a key to the mailbox, not the front door.
+
+Update the Service​
+
+One more step. The systemd unit file from Lesson 4 says User=ali. It should say User=agentuser.
+
+What you tell Claude Code: "Update the competitor-tracker systemd service to run as agentuser instead of ali, then restart it."
+
+What the agent does:
+
+sudo sed -i 's/User=ali/User=agentuser/' /etc/systemd/system/competitor-tracker.service
+sudo systemctl daemon-reload
+sudo systemctl restart competitor-tracker
+systemctl status competitor-tracker
+
+
+The agent now runs as a dedicated, limited user with access only to its own directory and secrets locked down.
+
+Sunday night. Agent deployed. Unkillable. Locked down. Ali checks the dashboard: the latest report is empty. The agent ran on schedule but produced nothing. Something broke. Board meeting at 9 AM.
+
+Try With AI​
+Prompt 1: Audit Your .env​
+Check the permissions on my .env file. Who can read it right now?
+If the permissions show -rw-r--r--, explain why that's a security
+risk. What should the permissions be instead? Fix them.
+
+
+What you're practicing: Reading permissions on real files and identifying security gaps. The most common server vulnerability isn't a sophisticated hack; it's a readable secrets file.
+
+Prompt 2: Read-Only Access for a Colleague​
+I have a colleague who needs to view my agent's logs but should
+NOT be able to modify any files or restart the service. Create
+a new user for them with the minimum permissions needed. What
+group membership and file permissions do they need?
+
+
+What you're practicing: Applying least privilege to a real scenario. Different people need different levels of access. Designing permissions is thinking about who needs what.
+
+Prompt 3: Why Keys Beat Passwords​
+Explain the math behind SSH key security. How many possible
+combinations does a 4096-bit RSA key have compared to an
+8-character password? Why does this make brute-force attacks
+against SSH keys essentially impossible?
+
+
+What you're practicing: Understanding the quantitative security difference. "Keys are better than passwords" is a claim. The math is the proof.
+
+Flashcards Study Aid​

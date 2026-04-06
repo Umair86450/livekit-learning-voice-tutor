@@ -1,0 +1,991 @@
+Context Isolation: Why Clean Slates Beat Dirty States
+
+You've built a sophisticated system. Agent A researches the problem. Agent B analyzes the findings. Agent C writes the final deliverable. Three specialized agents, each doing what it does best.
+
+The first time you run it, Agent A produces excellent research. Agent B delivers sharp analysis. But Agent C? The deliverable is confused,it references research tangents that weren't relevant to the analysis, conflates two similar concepts Agent B carefully distinguished, and misses the core insight entirely.
+
+What went wrong?
+
+Agent C inherited a polluted context. Every token of Agent A's research notes, every exploratory dead-end Agent B considered,all of it accumulated in the context window by the time Agent C started writing. The context was full, but full of the wrong things. Agent C had no room for clear thinking because its attention budget was consumed by its predecessors' work-in-progress.
+
+This is the dirty slate problem. And it's why sophisticated multi-agent systems often produce worse results than a single, well-prompted Digital FTE. Complexity without discipline produces chaos, not value.
+
+The Dirty Slate Problem​
+
+Consider how most people build multi-agent workflows:
+
+Agent A → (context accumulates) → Agent B → (more accumulates) → Agent C
+
+
+This is a linear pipeline. Each agent passes its full context to the next. It feels natural,after all, Agent B needs to know what Agent A discovered, right?
+
+The problem is what else comes along for the ride.
+
+Agent A didn't just produce its final research summary. It also:
+
+Read fifteen documents, most of which turned out to be irrelevant
+Explored three approaches before finding the right one
+Generated intermediate reasoning that was scaffolding, not insight
+Made tool calls whose outputs are still in context
+
+When Agent B starts, all of that research detritus is in the context window. Agent B's attention budget is already 40% consumed before it begins its actual task. It spends attention on Agent A's exploratory dead-ends instead of its own analysis.
+
+By the time Agent C starts, the context is chaos:
+
+Agent A's fifteen document reads
+Agent A's three exploratory approaches
+Agent A's final summary (the only part that matters)
+Agent B's analytical tangents
+Agent B's reasoning scaffolding
+Agent B's final analysis (the only part that matters)
+
+Agent C needs maybe 2,000 tokens of actual input: Agent B's analysis and the original task description. Instead, it has 50,000 tokens of accumulated process. Its attention is diluted across content that isn't relevant to producing the deliverable.
+
+This is why multi-agent systems fail. As LangChain's research concluded:
+
+"The main issue with multi-agent systems is that they are highly failure-prone when agents work from conflicting assumptions or incomplete information. Failure generally boils down to missing context."
+
+The irony: they fail from missing context while drowning in irrelevant context. The signal gets lost in noise.
+
+The Problem Across Domains​
+
+The dirty slate problem isn't unique to any profession. Here's how it manifests across different fields:
+
+Domain	Research Phase Pollution	Analysis Phase Pollution	Final Deliverable Suffers
+Legal	Case searches, irrelevant precedents, statute explorations	Jurisdictional tangents, abandoned arguments	Brief references weak cases, misses strongest argument
+Marketing	Competitor pages, market reports, trend articles	Positioning experiments, messaging drafts	Strategy document lacks focus, contradicts itself
+Research	Source documents, literature searches, data queries	Hypothesis explorations, abandoned frameworks	Synthesis paper wanders, misses central thesis
+Consulting	Client documents, industry benchmarks, interview notes	Framework applications, discarded analyses	Recommendations lack coherence, bury key insight
+Development	API docs, code explorations, dependency research	Architecture experiments, abandoned approaches	Technical spec references wrong approaches
+
+The pattern is universal: exploratory work pollutes the context for synthesis work.
+
+The Clean Context Pattern​
+
+The solution isn't to avoid multi-agent systems. It's to isolate their contexts.
+
+         ┌─────────────────┐
+         │   Orchestrator  │
+         │   (maintains    │
+         │    task state)  │
+         └────────┬────────┘
+                  │ delegates with FRESH context
+      ┌───────────┼───────────┐
+      ▼           ▼           ▼
+┌─────────┐   ┌─────────┐   ┌─────────┐
+│ Agent A │   │ Agent B │   │ Agent C │
+│ (clean) │   │ (clean) │   │ (clean) │
+│ Research│   │ Analyze │   │  Write  │
+└────┬────┘   └────┬────┘   └────┬────┘
+     │             │             │
+     │ summary     │ summary     │ summary
+     └─────────────┼─────────────┘
+                   │
+                   ▼
+         ┌─────────────────┐
+         │   Orchestrator  │
+         │   SYNTHESIZES   │
+         └─────────────────┘
+
+
+In the Clean Context Pattern:
+
+The Orchestrator holds the task definition and coordinates work
+Each subagent receives only what it needs to do its job,fresh context
+Subagents return summaries of their work, not their full process
+The Orchestrator synthesizes the summaries into the final output
+
+Each subagent uses its full attention budget for its specific task. No pollution from other agents' work. No diluted attention. No accumulated noise.
+
+Domain Examples of Clean Context​
+
+Legal: Creating a Case Brief
+
+Orchestrator: "Prepare brief for employment discrimination case"
+
+Agent A (Research): Receives case facts only → Returns:
+  "3 strongest precedents: [case citations with relevance]"
+
+Agent B (Analyze): Receives precedent summary only → Returns:
+  "Recommended argument structure: [analysis]"
+
+Agent C (Write): Receives argument structure only → Returns:
+  "Draft brief focused on strongest theory"
+
+
+Marketing: Creating a Strategy Document
+
+Orchestrator: "Develop positioning strategy for product launch"
+
+Agent A (Research): Receives product brief only → Returns:
+  "Competitive landscape summary: [key findings]"
+
+Agent B (Analyze): Receives competitive summary only → Returns:
+  "Positioning options with tradeoffs: [analysis]"
+
+Agent C (Write): Receives positioning analysis only → Returns:
+  "Strategy document with clear recommendations"
+
+
+Research: Creating a Synthesis Paper
+
+Orchestrator: "Synthesize literature on remote work productivity"
+
+Agent A (Gather): Receives research question only → Returns:
+  "Key sources with main findings: [structured summary]"
+
+Agent B (Synthesize): Receives source summary only → Returns:
+  "Emerging themes and contradictions: [analysis]"
+
+Agent C (Write): Receives theme analysis only → Returns:
+  "Synthesis paper with clear narrative"
+
+
+Consulting: Creating Recommendations
+
+Orchestrator: "Develop operational improvement recommendations"
+
+Agent A (Discover): Receives engagement scope only → Returns:
+  "Current state assessment: [findings]"
+
+Agent B (Analyze): Receives assessment only → Returns:
+  "Gap analysis with prioritization: [analysis]"
+
+Agent C (Recommend): Receives gap analysis only → Returns:
+  "Actionable recommendations with ROI"
+
+Why This Matters​
+Dirty Slate	Clean Context
+Attention diluted across all agents' work	Full attention budget per task
+Context polluted with irrelevant artifacts	Only relevant input per agent
+Debugging nightmare (which agent's pollution caused the failure?)	Clear accountability (which agent produced wrong summary?)
+Sequential execution (A must finish before B starts)	Parallel execution possible (if tasks are independent)
+Degrading quality as pipeline lengthens	Consistent quality regardless of pipeline length
+
+The clean context pattern doesn't just prevent failures,it enables capabilities. When agents have isolated contexts, they can run in parallel. Research, analysis, and even preliminary writing can happen simultaneously if the orchestrator structures the task correctly.
+
+Context Isolation Benefits​
+
+Let's examine each benefit more concretely.
+
+1. Full Attention Budget Per Task​
+
+In Lesson 2, you learned about the attention budget,how context utilization above 70% degrades quality. In a dirty slate pipeline:
+
+Agent A uses 30% of context → quality: good
+Agent B inherits 30%, adds 25% → at 55%, starting to stress
+Agent C inherits 55%, adds 20% → at 75%, quality degrading
+
+With context isolation:
+
+Agent A uses 30% of context → quality: good
+Agent B uses 25% of fresh context → quality: good
+Agent C uses 20% of fresh context → quality: good
+
+Each agent operates in its optimal zone. No agent inherits its predecessors' burden.
+
+2. No Pollution from Irrelevant Work​
+
+Agent A's job is research. Part of research is exploring dead ends. That's not a bug,it's how discovery works. But Agent C doesn't need to know about the five approaches you considered before finding the right one. Agent C needs the winning choice and why it won.
+
+Clean context means each agent only sees what it needs. The orchestrator translates "Agent A explored five options and chose Option 3 because of X, Y, Z" into "Use Option 3. Reasoning: X, Y, Z." The exploration is preserved in Agent A's context; the decision is passed to Agent C.
+
+Examples across domains:
+
+Legal: The brief writer doesn't need to see 47 cases that were searched but rejected,only the 3 cases that support the argument
+Marketing: The strategy writer doesn't need 15 competitor analyses,only the positioning gaps and opportunities identified
+Research: The synthesis writer doesn't need 200 search results,only the 12 sources that inform the narrative
+Consulting: The recommendation writer doesn't need interview transcripts,only the themes and pain points extracted
+3. Easier Debugging​
+
+When a dirty slate pipeline fails, debugging is archaeology. The failure might be:
+
+Agent A found bad information
+Agent A's information was good but Agent B misinterpreted it
+Agent B's analysis was good but got lost in context noise
+Agent C had good inputs but was overwhelmed by accumulated tokens
+
+With clean contexts, debugging is straightforward:
+
+Check Agent A's summary: Was the research correct?
+Check Agent B's summary: Was the analysis sound?
+Check Agent C's output: Given correct inputs, did it produce quality work?
+
+Each agent can be evaluated independently. You can even rerun a single agent with modified inputs without rerunning the entire pipeline.
+
+4. Parallel Execution​
+
+Consider this task: "Create a comprehensive market analysis."
+
+Dirty slate approach (sequential):
+
+Research Industry → Research Competitors → Analyze Trends → Write Report
+          |                |                  |              |
+          └────────────────┴──────────────────┴──────────────┘
+                    Total time: T₁ + T₂ + T₃ + T₄
+
+
+Clean context approach (parallel where possible):
+
+┌─ Research Industry Trends ─────┐
+│                                │
+├─ Research Competitor Positions ┤
+│                                │
+├─ Gather Customer Feedback ─────┤
+│                                │
+└────────────────────────────────┘
+            │ (all summaries)
+            ▼
+    Synthesize → Draft Report → Review
+         |           |           |
+         └───────────┴───────────┘
+              Parallel research phase
+              Sequential synthesis phase
+
+
+The research tasks are independent,they can run simultaneously. Only the synthesis and drafting require sequential execution because they depend on the research results. Clean contexts enable this parallelism because each research agent doesn't need to wait for another to finish.
+
+Subagent Design Patterns​
+
+Not all multi-agent work requires the same pattern. Here are three patterns for different needs:
+
+Pattern 1: Stateless (Subagent)​
+Orchestrator → [fresh context] → Subagent → [summary] → Orchestrator
+
+
+Context handling: Fresh context each call, strong isolation
+
+Key constraint: Subagents cannot spawn other subagents. This is a fundamental architectural limitation,only the orchestrator can delegate work. If you need nested delegation, structure your orchestrator to handle all agent creation directly.
+
+Best for:
+
+Tasks that are truly independent
+Work that shouldn't be influenced by other agents' findings
+Parallel execution scenarios
+When debugging requires clear boundaries
+
+Example use cases by domain:
+
+Domain	Use Case
+Legal	Three independent legal researchers assess the same contract for different risk types
+Marketing	Three analysts evaluate the same campaign from different perspectives (brand, performance, competitive)
+Research	Three reviewers independently assess the same paper for methodology, significance, and clarity
+Consulting	Three experts review the same organization from different lenses (operations, finance, technology)
+
+In Claude Code:
+
+Task for subagent: [specific task]
+Context: [only what's needed]
+Output format: [structured summary]
+Do not reference any previous work or context.
+Return only your findings in the specified format.
+
+Pattern 2: Stateful (Handoff)​
+Agent A → [context transfers] → Agent B → [context transfers] → Agent C
+
+
+Context handling: Context transfers between agents
+
+Best for:
+
+Tasks with genuine dependencies
+When later agents must understand the process, not just the result
+Iterative refinement where Agent B improves Agent A's work
+Debugging scenarios where you need full trace
+
+Example use cases by domain:
+
+Domain	Use Case
+Legal	First draft of brief → Senior review and markup → Final polish (each reviewer sees previous edits)
+Marketing	Creative concept → Brand review → Compliance review (each reviewer needs to see what was changed)
+Research	Data analysis → Peer feedback → Revision (reviser needs to understand the feedback conversation)
+Consulting	Draft recommendations → Partner review → Client-ready version (quality control chain)
+
+Warning: This is the dirty slate pattern. Use only when context transfer is genuinely necessary, and monitor context utilization carefully.
+
+Pattern 3: Shared (Network)​
+         ┌──────────────┐
+         │ Shared State │
+         │   (memory)   │
+         └──────────────┘
+           ▲    ▲    ▲
+           │    │    │
+     ┌─────┴──┐ │ ┌──┴─────┐
+     │Agent A │ │ │Agent C │
+     └────────┘ │ └────────┘
+                │
+          ┌─────┴────┐
+          │ Agent B  │
+          └──────────┘
+
+
+Context handling: Common memory layer, agents read/write
+
+Best for:
+
+Long-running projects with persistent state
+Teams of agents that need to coordinate over time
+When the "source of truth" must persist beyond any single agent
+Workflows where agents may need to re-enter at any point
+
+Example use cases by domain:
+
+Domain	Use Case
+Legal	Multi-week case preparation with different agents handling discovery, depositions, motions,all referencing central case file
+Marketing	Campaign development over months,brand agent, content agent, analytics agent all reference central brand guidelines
+Research	Multi-year study with different agents handling data collection, analysis, writing,all referencing central methodology doc
+Consulting	Long-term engagement with different workstreams,all referencing central findings document that evolves over time
+
+Implementation: The shared state is typically a file (progress file, central document, database) that all agents can read and update. Each agent still operates with relatively clean context,they read the shared state at start, do their work, write updates back.
+
+Choosing a Pattern​
+Question	If Yes →
+Do tasks have genuine sequential dependencies?	Stateful
+Must agents operate without influencing each other?	Stateless
+Does work span multiple sessions or days?	Shared
+Is parallel execution important?	Stateless
+Do you need full execution trace for debugging?	Stateful
+Is there a "source of truth" that must persist?	Shared
+
+Most real workflows combine patterns. An orchestrator might use Stateless subagents for parallel research, collect summaries into a Shared progress file, then use Stateful handoff for sequential refinement.
+
+Agent Teams: The Network Pattern in Practice​
+
+You just saw three subagent design patterns: Stateless, Stateful, and Shared (Network). The Stateless and Stateful patterns are well-established. But the Shared pattern raises a practical question: how do you actually coordinate multiple agents that need to communicate with each other, share state, and self-organize around a problem?
+
+Claude Code's agent teams feature is a native implementation of the Network pattern. The key evolution from subagents: subagents report results back to their caller only. They cannot talk to each other. Agent teams are separate Claude Code instances that can message each other directly, share a task list, and self-coordinate without routing every communication through the orchestrator.
+
+This changes what's possible. With subagents, the orchestrator is a bottleneck for all communication. Agent A discovers something relevant to Agent C, but must report it to the orchestrator, which must then relay it to Agent C. With agent teams, Agent A messages Agent C directly. The lead coordinates the overall mission, but teammates handle tactical communication on their own.
+
+Subagents vs Agent Teams​
+Dimension	Subagents	Agent Teams
+Context	Own context window; results return to caller	Own context window; fully independent
+Communication	Report results back to main agent only	Teammates message each other directly
+Coordination	Main agent manages all work	Shared task list with self-coordination
+Best for	Focused tasks where only the result matters	Complex work requiring discussion and collaboration
+Token cost	Lower: results summarized back to main context	Higher: each teammate is a separate Claude instance
+
+Use subagents when you need quick, focused workers that report back. Use agent teams when teammates need to share findings, challenge each other, and coordinate on their own.
+
+When Agent Teams Add Value​
+
+Agent teams shine in specific scenarios where inter-agent communication produces better results than isolated reports:
+
+Research and review: Multiple teammates investigate different aspects of a problem simultaneously, then share and challenge each other's findings. A security reviewer, a performance analyst, and a test coverage auditor working the same codebase produce richer results when they can question each other's conclusions than when they report independently to the orchestrator.
+
+New modules or features: Teammates each own a separate piece without stepping on each other. A frontend specialist, a backend specialist, and a test writer can coordinate directly about interface contracts instead of routing every question through a lead.
+
+Debugging with competing hypotheses: Teammates test different theories in parallel and converge faster. When the root cause is unclear, sequential investigation anchors on the first plausible explanation. Multiple independent investigators actively trying to disprove each other's theories surface the actual root cause more reliably.
+
+Cross-layer coordination: Changes that span frontend, backend, and tests, each owned by a different teammate, benefit from direct communication about shared interfaces and dependencies.
+
+Agent teams add coordination overhead and use significantly more tokens than a single session. They work best when teammates can operate independently on separate files or concerns. For sequential tasks, same-file edits, or work with many dependencies, subagents are more effective. The pattern selection table from earlier still applies -- agent teams are the practical implementation of "Shared (Network)" for cases where inter-agent dialogue matters.
+
+When to Use Which​
+
+The original pattern selection table covered Stateless, Stateful, and Shared. Here is how agent teams fit alongside subagents within the Stateless and Shared categories:
+
+Your situation	Use subagents	Use agent teams
+Three independent research tasks that produce separate reports	Yes -- each reports back to orchestrator, no inter-agent dialogue needed	Overkill -- coordination overhead adds cost without benefit
+Code review from security, performance, and testing perspectives where findings inform each other	Possible but limited -- security finding about auth can't reach test reviewer directly	Yes -- reviewers can challenge each other and cross-reference findings
+Multi-day project with persistent shared state	No -- subagents are ephemeral, one-shot workers	Yes -- shared task list persists, teammates can be replaced as work evolves
+Quick fact-check or file lookup	Yes -- single focused task, minimal overhead	No -- spawning a team for a quick lookup wastes tokens
+Parallel implementation of three independent modules	Either works -- if modules have clean interfaces, subagents suffice	Better if modules share interfaces that need negotiation
+
+The decision comes down to one question: do the workers need to talk to each other? If yes, agent teams. If no, subagents.
+
+Practical: Starting Your First Agent Team​
+
+Agent teams are experimental and disabled by default. Enable them in your settings:
+
+// settings.json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+
+
+Then describe the team structure you want in natural language:
+
+Create an agent team to review this project from different angles:
+- One teammate focused on security implications
+- One checking performance impact
+- One validating test coverage
+Have them each review and report findings.
+
+
+Output:
+
+Created team "project-review" with 3 teammates:
+  - security-reviewer: Reviewing for security vulnerabilities
+  - performance-analyst: Checking performance impact
+  - test-validator: Validating test coverage
+
+Task list created with 3 tasks. Teammates are starting work.
+
+
+Here is how agent teams operate in practice:
+
+The lead coordinates work and synthesizes results. The session where you create the team becomes the lead for its lifetime. The lead breaks work into tasks, assigns them, and combines findings when teammates finish.
+
+Teammates work independently in their own context windows. Each teammate loads the same project context (CLAUDE.md, MCP servers, skills) but does not inherit the lead's conversation history. Task-specific details must go in the spawn prompt -- this is why specifying clear, focused prompts for each teammate matters.
+
+A shared task list coordinates who does what. Tasks have three states: pending, in progress, and completed. Tasks can depend on other tasks -- a pending task with unresolved dependencies cannot be claimed until those dependencies complete. Teammates self-claim available work when they finish a task, and file locking prevents two teammates from claiming the same task simultaneously.
+
+Teammates can message each other directly. This is the fundamental difference from subagents. When a security reviewer discovers that the authentication module has no rate limiting, it can message the test coverage teammate directly: "Check whether rate limiting tests exist for the auth module." No routing through the lead required.
+
+Interacting with teammates:
+
+Action	Keyboard shortcut	What it does
+Select teammate	Shift+Up/Down	Cycle through active teammates to message one directly
+View task list	Ctrl+T	Toggle the shared task list showing all pending, in-progress, and completed tasks
+Delegate mode	Shift+Tab	Restrict the lead to coordination-only tools, preventing it from implementing tasks itself
+View teammate session	Enter (on selected teammate)	See full output of a teammate's work in progress
+Interrupt teammate	Escape (while viewing)	Stop a teammate's current turn to redirect their approach
+
+Delegate mode deserves special attention. Without it, the lead sometimes starts implementing tasks itself instead of waiting for teammates. This defeats the purpose of the team -- the lead should be coordinating, not coding. Delegate mode restricts the lead to spawning, messaging, shutting down teammates, and managing tasks. Use it when you want strict separation between orchestration and implementation.
+
+Context Engineering for Agent Teams​
+
+Every best practice for agent teams maps directly to context engineering principles from this chapter.
+
+"Give teammates enough context." Teammates load CLAUDE.md automatically, but they do not inherit the lead's conversation history. If the lead spent ten minutes discussing the authentication architecture with you, none of that context reaches the teammate who reviews the auth module. Task-specific details must go in the spawn prompt:
+
+Spawn a security reviewer teammate with the prompt: "Review the
+authentication module at src/auth/ for security vulnerabilities.
+Focus on token handling, session management, and input validation.
+The app uses JWT tokens stored in httpOnly cookies.
+Report any issues with severity ratings."
+
+
+This is Strategy 3 (Include Critical Context in Delegation Prompt) from the context amnesia section, applied at the team level. The more specific the spawn prompt, the less time the teammate spends orienting and the more time it spends on actual analysis.
+
+"Size tasks appropriately." Too small and coordination overhead exceeds benefit. Too large and teammates work too long without check-ins, increasing the risk of wasted effort. The recommendation is 5-6 tasks per teammate as a starting point. This is the Signal vs Noise principle from Lesson 2 applied to task granularity: each task should be large enough to produce meaningful signal but small enough that the lead can detect problems before they compound.
+
+"Avoid file conflicts." Two teammates editing the same file leads to overwrites. Break the work so each teammate owns a different set of files. This is context isolation applied to file system state, not just token context. The same principle that keeps Agent A's research artifacts out of Agent C's attention budget also keeps Agent A's file edits from colliding with Agent C's file edits.
+
+These are not new principles. They are the same context engineering fundamentals you have been learning throughout this chapter, applied at a different scale. The pattern holds: clean signal in, clean signal out, regardless of whether "in" means a single agent's context window or a team of six coordinating across a codebase.
+
+Case Study: 16 Agents Build a C Compiler​
+
+Anthropic researcher Nicholas Carlini used 16 parallel Claude instances to build a C compiler from scratch. Over nearly 2,000 Claude Code sessions and approximately 2 billion input tokens, the agents produced a 100,000-line Rust-based compiler that can compile Linux 6.9 across x86, ARM, and RISC-V architectures. The compiler achieves a 99% pass rate on standard compiler test suites and can also compile QEMU, FFmpeg, SQLite, PostgreSQL, and Redis. Total cost: approximately $20,000.
+
+The project was not a toy demonstration. It produced a working compiler that handles real-world software. And the engineering challenges Carlini encountered read like a chapter summary of everything you have learned about context engineering.
+
+Test suites as signal. High-quality test suites directed agent behavior without human supervision. But the test harness had to be clean. As Carlini documented, the harness should avoid printing noise that obscures the actual error. Instead, it should log important information to files and keep error output on single lines for automated grep searches. This is Lesson 2 (Signal vs Noise) at compiler scale: the agents spent attention diagnosing real problems, not parsing noisy output.
+
+Documentation for agent onboarding. Agents maintained extensive READMEs and progress files updated frequently with current status. When a new agent session started, these documents helped it orient quickly without human intervention. This is the context amnesia workaround (Strategy 2: Master-Clone) working at production scale: every fresh agent reads the project brief before starting its task.
+
+Randomized test sampling. The harness included a fast mode that runs a 1% or 10% random sample of test cases, deterministic per-agent but random across instances. This enabled parallel debugging: each agent worked on different failure subsets simultaneously. This is decomposition for parallelism, the same principle behind the clean context pattern, applied to the test suite itself.
+
+Clear error messaging. Pre-computed statistics and clear error messages reduced the computational overhead of understanding failures. Agents could immediately see what failed and why, rather than sifting through thousands of lines of output. This is context quality at the infrastructure level: the environment itself was engineered to present clean signal to the agents.
+
+Lesson from Compiler Project	Context Engineering Principle	Where You Learned It
+Clean test harness output	Signal vs Noise	Lesson 2
+READMEs for agent orientation	Master-Clone architecture	This lesson (Strategy 2)
+Randomized test sampling	Decomposition for parallelism	This lesson (Clean Context Pattern)
+Pre-computed error statistics	Context quality	Lesson 4 (structured context)
+
+The takeaway: at 16-agent scale, the differentiator was not the model or the tools. It was context quality. The same model, the same tools, but disciplined context engineering produced a compiler that passes real-world test suites. Sloppy test harnesses, verbose output, or missing documentation would have turned those 2 billion tokens into noise instead of progress.
+
+This principle scales down, too. Whether you are coordinating 16 agents building a compiler or 3 teammates reviewing a contract, the work succeeds or fails based on the quality of context each agent receives. Clean signal in, clean results out.
+
+Context Amnesia Workarounds​
+
+Here's the catch: clean context means subagents don't know your project. They start fresh. They don't know your organization's conventions, your client's preferences, your "we tried that already and it failed" history.
+
+This is context amnesia: the price of isolation.
+
+Three strategies to work around it:
+
+Strategy 1: Preload Skills with Domain Knowledge​
+
+Create Skills (from Chapter 14) that encode domain-specific knowledge:
+
+Legal Professional:
+
+# Skill: Firm Writing Standards
+
+When drafting legal documents for this firm:
+
+- Use active voice in argument sections
+- Citations follow Bluebook 21st edition
+- Never cite cases overturned in the last 5 years
+- Client confidentiality language must appear in all external docs
+- Opposing counsel references use formal style (not nicknames)
+
+
+Marketing Professional:
+
+# Skill: Brand Voice Guidelines
+
+When creating content for this brand:
+
+- Tone is confident but never arrogant
+- Always lead with customer benefit, not product features
+- Avoid jargon: say "easy to use" not "intuitive UX"
+- Never mention competitor names directly
+- All claims require substantiation in footnotes
+
+
+Research Professional:
+
+# Skill: Academic Standards
+
+When writing for this research group:
+
+- Use APA 7th edition formatting
+- Hedging language required for all causal claims
+- Statistical significance threshold is p < 0.01 for this journal
+- Conflict of interest statement required in all submissions
+- Data availability statement follows funder requirements
+
+
+Consulting Professional:
+
+# Skill: Deliverable Standards
+
+When creating client deliverables:
+
+- Executive summary never exceeds one page
+- Recommendations must include implementation timeline
+- All charts use client's brand colors
+- Financial projections require sensitivity analysis
+- Never include internal team discussions in client-facing docs
+
+
+When invoking a subagent, include the relevant skill:
+
+Task: [specific task]
+Use the '[domain]-standards' skill for conventions.
+Return: [output format]
+
+
+The skill provides domain knowledge without polluting context with irrelevant details.
+
+Strategy 2: Master-Clone Architecture​
+
+The subagent reads the full project brief at the start of its task:
+
+Before starting this task:
+1. Read the project brief from [location]
+2. Identify the sections relevant to your task
+3. Apply those guidelines to your work
+
+Task: [specific task]
+Return: [output format]
+
+
+This works well when project briefs are well-organized (under 60 lines of signal, per Lesson 4). The subagent gets full project context at the cost of some token budget, but starts fresh without other agents' pollution.
+
+Strategy 3: Include Critical Context in Delegation Prompt​
+
+The orchestrator extracts only the critical context for each delegation:
+
+Legal example:
+
+Task: Draft the facts section of the brief
+
+Critical context:
+- Client is defendant (use defensive framing)
+- Jurisdiction is 9th Circuit (cite 9th Circuit precedent first)
+- Judge Chen assigned (known for favoring plain language)
+- Opposing counsel filed 42-page brief (we're aiming for 25 pages)
+
+Draft for: Clarity and persuasion
+Return: Facts section with citations
+
+
+Marketing example:
+
+Task: Write the product launch announcement
+
+Critical context:
+- Audience is existing customers (not prospects)
+- Tone should emphasize "you asked, we delivered"
+- Pricing is premium tier only (don't mention basic plan)
+- Embargo lifts Tuesday 9am ET (no social shares before)
+
+Write for: Customer excitement and urgency
+Return: Announcement with suggested subject lines
+
+
+The orchestrator knows what context matters for this specific task. It includes that context explicitly, leaving out everything else.
+
+Best practice: Combine strategies. Use Skills for stable conventions, master-clone for project-wide context, and explicit context for task-specific details.
+
+Tool Access Control by Role​
+
+Context isolation includes controlling what each subagent can do, not just what it knows.
+
+Role	Tools	Why
+Read-only (reviewers)	Read, Grep, Glob	Can explore documents but can't modify them
+Research (analysts)	+ WebFetch, WebSearch	Can gather external information
+Writers	+ Write, Edit	Can create and modify documents
+Full access	All tools	Reserved for orchestrator or trusted agents
+
+In Claude Code, you specify tool access when launching subagents:
+
+Agent definition:
+
+- Role: document-reviewer
+- Tools: Read, Grep, Glob (read-only access)
+- Task: Review contract for liability risks
+
+
+This prevents a research subagent from accidentally modifying files. It prevents a review subagent from "fixing" issues without proper oversight. Tool access control is another form of isolation,capability isolation alongside context isolation.
+
+Lab: Dirty Slate vs Clean Context Comparison​
+
+Objective: See the difference between polluted and isolated context with your own eyes.
+
+Duration: 60 minutes
+
+Deliverable: Evidence documenting which pattern produces better results for a realistic task.
+
+Choose Your Domain​
+
+Select the professional context that matches your work:
+
+Option	Domain	Deliverable
+A	Legal	Case brief recommending litigation strategy
+B	Marketing	Strategy document for product positioning
+C	Research	Synthesis paper on emerging topic
+D	Consulting	Recommendations for client problem
+E	Development	Technical specification for new feature
+
+The three-step process is the same regardless of domain:
+
+Research: Gather relevant information, sources, precedents, or data
+Analyze: Synthesize findings into actionable insights
+Write: Create the professional deliverable
+Implementation A: Dirty Slate (Single Agent)​
+
+Step 1: Start a fresh Claude Code session.
+
+For Legal (Option A):
+
+I'm going to create a case brief about [employment/contract/IP dispute of your choice].
+
+Phase 1 - Research:
+Find the following:
+- What are the key legal issues?
+- What precedents are most relevant?
+- What are the strongest arguments for each side?
+- What procedural considerations apply?
+
+Be thorough. Search for cases, read statutes, explore different theories.
+
+
+For Marketing (Option B):
+
+I'm going to create a positioning strategy for [product/service of your choice].
+
+Phase 1 - Research:
+Find the following:
+- Who are the main competitors?
+- What positioning do they use?
+- What gaps exist in the market?
+- What does the target audience value most?
+
+Be thorough. Research competitors, analyze messaging, explore market reports.
+
+
+For Research (Option C):
+
+I'm going to create a synthesis paper about [emerging topic of your choice].
+
+Phase 1 - Research:
+Find the following:
+- What are the key sources on this topic?
+- What do the leading perspectives argue?
+- Where do experts disagree?
+- What gaps exist in current understanding?
+
+Be thorough. Search literature, read studies, explore different viewpoints.
+
+
+For Consulting (Option D):
+
+I'm going to create recommendations for [business problem of your choice].
+
+Phase 1 - Research:
+Find the following:
+- What are the symptoms of this problem?
+- What approaches have others tried?
+- What best practices exist?
+- What constraints typically apply?
+
+Be thorough. Research solutions, analyze frameworks, explore case studies.
+
+
+For Development (Option E):
+
+I'm going to create a technical specification for [feature of your choice].
+
+Phase 1 - Research:
+Find the following:
+- What problem does this solve?
+- What approaches could work?
+- What are the tradeoffs?
+- What constraints apply?
+
+Be thorough. Read documentation, search for patterns, explore examples.
+
+
+Let Claude research. Note what gets added to context: document reads, search results, exploratory tangents.
+
+Step 2: Continue in the same session.
+
+Phase 2 - Analyze:
+Based on your research, synthesize recommendations:
+- What approach do you recommend?
+- What are the key tradeoffs?
+- What risks should we consider?
+
+Consider the research you just did.
+
+
+Note: Claude now has research context PLUS analysis context.
+
+Step 3: Continue in the same session.
+
+Phase 3 - Write:
+Create the professional deliverable. Include:
+- Executive summary (2 sentences)
+- Problem/situation statement
+- Your recommendation with reasoning
+- Key tradeoffs and considerations
+- Next steps
+
+Make it appropriate for a senior stakeholder.
+
+
+Save the output. Note the quality. Note context utilization.
+
+Implementation B: Clean Context (Orchestrator Pattern)​
+
+Step 1: Start a fresh Claude Code session.
+
+Use the same domain prompt from above, but add this structure:
+
+I'm going to create [deliverable] about [same topic].
+
+I'll use an orchestrator pattern:
+1. You'll research and return a summary
+2. Fresh context: You'll analyze the summary and return recommendations
+3. Fresh context: You'll write based on recommendations
+
+Let's start with Phase 1 - Research:
+[same research questions as above]
+
+Return your findings as a structured summary in this format:
+---
+**Core Issue:** [1-2 sentences]
+**Key Findings:** [bullet list of 3-5 most important discoveries]
+**Options Considered:** [bullet list with brief descriptions]
+**Comparison:** [table comparing top 2-3 options]
+---
+
+
+Save the summary.
+
+Step 2: Start a NEW session (or /clear).
+
+Phase 2 - Analyze:
+
+Here is research about [topic]:
+---
+[paste the summary from Step 1]
+---
+
+Based on this research, provide recommendations:
+- What approach do you recommend?
+- What are the key tradeoffs?
+- What risks should we consider?
+
+Return your analysis as a structured summary:
+---
+**Recommendation:** [Clear statement]
+**Rationale:** [3 key reasons]
+**Risks:** [bullet list with mitigations]
+**Decision Factors:** [what would change this recommendation]
+---
+
+
+Save the analysis.
+
+Step 3: Start a NEW session (or /clear).
+
+Phase 3 - Write:
+
+Here is analysis about [topic]:
+---
+[paste the analysis from Step 2]
+---
+
+Create the professional deliverable. Include:
+- Executive summary (2 sentences)
+- Problem/situation statement
+- Your recommendation with reasoning
+- Key tradeoffs and considerations
+- Next steps
+
+Make it appropriate for a senior stakeholder.
+
+
+Save the output.
+
+Comparison​
+
+Now compare the two deliverables:
+
+Criterion	Dirty Slate (A)	Clean Context (B)
+Clarity: Is the recommendation clear?		
+Focus: Does it avoid irrelevant tangents?		
+Structure: Is it well-organized?		
+Relevance: Does every section serve the purpose?		
+Token efficiency: How much context was used?		
+Stakeholder ready: Which would you share with a client/boss?		
+Reflection Questions​
+
+In the dirty slate version, did Agent C reference details from the research phase that weren't relevant to the final deliverable?
+
+In the clean context version, did the structured summaries lose any important nuance?
+
+How much larger was the dirty slate context by Phase 3 compared to the clean context Phase 3?
+
+Which version was easier to debug if you wanted to improve the output?
+
+If you were building an automated pipeline for this task, which architecture would you choose?
+
+Deliverable​
+
+Create a brief document (1/2 page) with:
+
+Both final deliverables
+Your comparison table
+Your conclusion: which pattern produced better results and why
+When you might choose the losing pattern instead
+Common Failure Modes​
+Failure: Summaries Lose Critical Detail​
+
+Symptom: The final output misses nuances that were in the original research.
+
+Cause: Summaries were too aggressive; important details were compressed away.
+
+Fix: Use structured summary formats that force inclusion of key elements. For complex tasks, use "summary + supporting evidence" format:
+
+**Summary:** [high-level takeaway]
+**Supporting Evidence:**
+- [specific fact that supports summary]
+- [specific fact that supports summary]
+**Caveats:**
+- [important nuance that qualifies the summary]
+
+Failure: Subagent Doesn't Know Domain Context​
+
+Symptom: Subagent produces output that violates professional conventions.
+
+Cause: Clean context means no domain knowledge.
+
+Fix: Use context amnesia workarounds: Skills for professional conventions, master-clone for project-wide context, explicit context in delegation prompt.
+
+Failure: Orchestrator Becomes Bottleneck​
+
+Symptom: The orchestrator is doing all the work; subagents aren't contributing much.
+
+Cause: Tasks are too small or poorly defined; the overhead of delegation exceeds the benefit.
+
+Fix: Increase task granularity. If a subagent task takes less than 5 minutes, it might not be worth isolating. Consolidate into larger, meaningful work units.
+
+Failure: Parallel Results Don't Synthesize​
+
+Symptom: Three subagents ran in parallel, but their outputs contradict each other.
+
+Cause: Parallel subagents didn't share assumptions; they made incompatible decisions.
+
+Fix: Provide shared constraints in each delegation. If certain decisions must be consistent across subagents, make those decisions before delegation, not during.
+
+Try With AI​
+Prompt 1: Diagnose Your Current Workflow​
+Let's analyze a multi-step professional workflow I use.
+
+Here's my workflow:
+[describe your process for creating a deliverable—brief, strategy, report, recommendations, etc.]
+
+Diagnose this for context pollution:
+1. At each step, what information accumulates beyond what's needed for the next step?
+2. By the final step, what percentage of accumulated information is actually relevant?
+3. Where would clean context boundaries improve quality?
+4. What would an orchestrator pattern look like for this workflow?
+
+Be specific about what's polluting vs what's signal.
+
+
+What you're learning: How to analyze existing professional workflows for context pollution. The diagnosis skill helps you see accumulation that you might have normalized as "just how it works."
+
+Prompt 2: Design an Orchestrator for Your Domain​
+I need to accomplish this professional task:
+[describe a deliverable you create regularly—case brief, strategy doc, research paper, client recommendation, etc.]
+
+Design an orchestrator-based architecture:
+1. Break this into subagent responsibilities (research, analyze, write, review)
+2. Specify what context each subagent needs (minimum viable context)
+3. Define the output format each subagent returns
+4. Show how the orchestrator synthesizes results
+
+Include context amnesia workarounds: what domain knowledge do subagents need,
+and how should they get it (Skills for conventions, master-clone for project context, or explicit delegation context)?
+
+
+What you're learning: How to architect multi-agent systems for your specific professional domain. The design process,decomposing into agents, specifying minimum context, defining summaries,builds the instinct for clean context patterns.
+
+Prompt 3: Compare Pattern Tradeoffs for Your Use Case​
+I'm building a system that needs to:
+[describe your multi-agent use case—complex deliverable, multi-phase project, team collaboration]
+
+Compare three implementation approaches:
+1. Stateless subagents with orchestrator
+2. Stateful handoffs between agents
+3. Shared memory layer with independent agents
+
+For each approach, evaluate:
+- Context pollution risk
+- Coordination overhead
+- Debugging complexity
+- Parallelism opportunity
+- Implementation effort
+
+Recommend which pattern (or hybrid) fits best, and explain why.
+
+
+What you're learning: There's no universally correct pattern,the choice depends on your specific needs. This prompt builds judgment about when isolation helps versus when it adds unnecessary overhead.
+
+Prompt 4: Experience Agent Teams for Parallel Review​
+
+Enable agent teams in your settings, then try this:
+
+Create an agent team to analyze [a project or codebase you're working on].
+
+Spawn three teammates:
+- A "Researcher" who investigates the project structure and documents
+  key patterns
+- A "Critic" who identifies potential problems, risks, and improvements
+- A "Architect" who proposes structural improvements based on findings
+
+Have them share findings with each other and debate their conclusions.
+Synthesize a final assessment when they converge.
+
+
+What you're learning: Agent teams demonstrate the network pattern from this lesson in action. Notice how each teammate operates with clean context (they don't inherit the lead's history), how they coordinate through the shared task list, and how inter-agent communication produces richer analysis than isolated subagents reporting back independently. The debate structure -- teammates challenging each other's findings -- is impossible with subagents, which can only report to their caller.
+
+The insight that ties this chapter together: context is attention budget, and attention is finite. Every technique in this chapter,position sensitivity, signal-to-noise auditing, compaction, progress files, and now context isolation,serves the same goal: ensuring the AI's attention is spent on what matters, not on accumulated noise.
+
+In the final lesson, you'll bring all these techniques together into a coherent playbook for building Digital FTEs worth selling.
+
+References​
+Anthropic. (2026). "Orchestrate teams of Claude Code sessions." Claude Code Documentation.
+Anthropic. (2026). "Building a C Compiler with Parallel Claude Agents." Anthropic Engineering Blog.
+Flashcards Study Aid​

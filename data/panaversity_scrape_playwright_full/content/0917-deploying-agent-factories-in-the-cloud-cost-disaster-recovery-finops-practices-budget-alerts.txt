@@ -1,0 +1,557 @@
+FinOps Practices and Budget Alerts
+
+Your cluster runs workloads for three teams. At month-end, the cloud bill arrives: $12,500. Your CFO walks into your office: "Which team should I charge for what portion of this?"
+
+You open OpenCost and run a query by namespace. Production: $8,200. Staging: $2,100. Development: $2,200. But that's not what your CFO asked. The product team owns some workloads in production and some in development. The platform team has resources scattered across all three namespaces. The ML team runs GPU jobs that burst into production during training.
+
+"By namespace" answers the wrong question. Your CFO needs "by team" or "by cost center." And OpenCost can only report on dimensions it knows about. Right now, it knows namespaces and pod names. It doesn't know which team owns what.
+
+This lesson teaches you to label your workloads so OpenCost can answer the questions your CFO actually asks. Then we'll explore how to progress from "here's what things cost" (showback) to "here's your bill" (chargeback) without destroying team trust along the way.
+
+Why Labels Are the Foundation of Cost Visibility​
+
+OpenCost calculates cost per pod. But "pod cost" isn't useful for business decisions. Business decisions require mapping costs to organizational structures: teams, products, cost centers, environments.
+
+The bridge between pod-level data and business-level reporting is labels. When your pods carry labels like team: product-team, OpenCost can aggregate costs by that label. Without the label, OpenCost can't report what it doesn't know.
+
+The cost attribution problem:
+
+┌─────────────────────────────────────────────────────────────┐
+│                     Kubernetes Cluster                       │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │  Namespace:  │  │  Namespace:  │  │  Namespace:  │       │
+│  │  production  │  │  staging     │  │  development │       │
+│  │              │  │              │  │              │       │
+│  │  task-api    │  │  task-api    │  │  task-api    │       │
+│  │  inference   │  │  inference   │  │  ml-training │       │
+│  │  gateway     │  │              │  │              │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│                                                              │
+│  Question: "How much does the product team spend?"           │
+│  Answer: ??? (pods don't have team labels)                   │
+└─────────────────────────────────────────────────────────────┘
+
+
+With proper labels:
+
+┌─────────────────────────────────────────────────────────────┐
+│                     Kubernetes Cluster                       │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ Pod: task-api                                         │   │
+│  │ Labels:                                               │   │
+│  │   team: product-team                                  │   │
+│  │   app: task-api                                       │   │
+│  │   environment: production                             │   │
+│  │   cost-center: engineering                            │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  Query: aggregate=label:team                                 │
+│  Answer: product-team: $4,200, platform-team: $3,100, ...   │
+└─────────────────────────────────────────────────────────────┘
+
+
+Labels transform pod-level data into business-level answers.
+
+The Four Required Cost Allocation Labels​
+
+Based on FinOps Foundation recommendations and production experience, every workload should carry these four labels:
+
+Label	Purpose	Example Values
+team	Which team owns this workload?	product-team, platform-team, ml-team
+app	Which application is this?	task-api, inference-service, user-auth
+environment	What lifecycle stage?	production, staging, development
+cost-center	Which budget pays for this?	engineering, research, operations
+Why These Four?​
+
+team: Enables accountability conversations. "Product team, your costs grew 40% this month. What changed?"
+
+app: Enables application-level optimization. "The inference-service costs more than all other apps combined. Let's investigate."
+
+environment: Enables lifecycle analysis. "We're spending $3,000/month on staging. Is that justified?"
+
+cost-center: Enables finance integration. Maps Kubernetes costs to existing budget structures that finance already tracks.
+
+Where Labels Must Appear​
+
+Labels must appear in both the Deployment metadata AND the pod template:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: production
+  labels:                           # Deployment-level labels
+    team: product-team
+    app: task-api
+    environment: production
+    cost-center: engineering
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:                       # Pod-level labels (these are what OpenCost reads)
+        team: product-team
+        app: task-api
+        environment: production
+        cost-center: engineering
+    spec:
+      containers:
+      - name: task-api
+        image: task-api:v1.2.0
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+
+
+Critical: OpenCost reads labels from pods, not Deployments. If you only add labels to the Deployment metadata (lines 5-9), OpenCost won't see them. You must include labels in spec.template.metadata.labels (lines 18-22).
+
+Adding Labels to Task API​
+
+Let's add cost allocation labels to the Task API Deployment from previous lessons.
+
+Before: No Cost Attribution​
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+    spec:
+      containers:
+      - name: task-api
+        image: task-api:v1.2.0
+
+
+This Deployment works, but OpenCost can only report costs by namespace or by the single app label. It can't answer "Which team owns this?" or "What cost center pays for it?"
+
+After: Full Cost Attribution​
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: production
+  labels:
+    team: product-team
+    app: task-api
+    environment: production
+    cost-center: engineering
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        team: product-team
+        app: task-api
+        environment: production
+        cost-center: engineering
+    spec:
+      containers:
+      - name: task-api
+        image: task-api:v1.2.0
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+
+
+Output: (after applying and waiting for pod creation)
+
+deployment.apps/task-api configured
+
+
+Verify the labels are on the running pods:
+
+kubectl get pods -n production -l app=task-api --show-labels
+
+
+Output:
+
+NAME                        READY   STATUS    LABELS
+task-api-7d8f9c4b5f-abc12   1/1     Running   app=task-api,cost-center=engineering,environment=production,team=product-team
+task-api-7d8f9c4b5f-def34   1/1     Running   app=task-api,cost-center=engineering,environment=production,team=product-team
+task-api-7d8f9c4b5f-ghi56   1/1     Running   app=task-api,cost-center=engineering,environment=production,team=product-team
+
+
+Now OpenCost can aggregate costs by any of these dimensions.
+
+Querying OpenCost with Labels​
+
+With labels in place, you can answer the questions your CFO asks.
+
+Query: Cost by Team​
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=label:team
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "product-team": {
+        "name": "product-team",
+        "cpuCost": 45.67,
+        "ramCost": 23.45,
+        "totalCost": 69.12
+      },
+      "platform-team": {
+        "name": "platform-team",
+        "cpuCost": 34.21,
+        "ramCost": 18.90,
+        "totalCost": 53.11
+      },
+      "ml-team": {
+        "name": "ml-team",
+        "cpuCost": 89.34,
+        "gpuCost": 234.00,
+        "ramCost": 56.78,
+        "totalCost": 380.12
+      }
+    }
+  ]
+}
+
+
+Now you can tell your CFO: "ML team spends $380/week, mostly on GPU. Product team spends $69/week. Platform team spends $53/week."
+
+Query: Cost by Cost Center​
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=30d \
+  -d aggregate=label:cost-center
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "engineering": {
+        "name": "engineering",
+        "totalCost": 1456.78
+      },
+      "research": {
+        "name": "research",
+        "totalCost": 2345.90
+      },
+      "operations": {
+        "name": "operations",
+        "totalCost": 234.56
+      }
+    }
+  ]
+}
+
+
+This maps directly to budget categories that finance already tracks.
+
+Query: Filter by Team, Aggregate by App​
+
+"What applications does the product team run, and what does each cost?"
+
+curl http://localhost:9003/allocation/compute \
+  -G \
+  -d window=7d \
+  -d aggregate=label:app \
+  -d filter=label:team=product-team
+
+
+Output:
+
+{
+  "code": 200,
+  "data": [
+    {
+      "task-api": {
+        "name": "task-api",
+        "totalCost": 34.56
+      },
+      "user-auth": {
+        "name": "user-auth",
+        "totalCost": 23.45
+      },
+      "notification-service": {
+        "name": "notification-service",
+        "totalCost": 11.11
+      }
+    }
+  ]
+}
+
+
+Now you can have a targeted conversation: "Product team, your task-api costs $35/week. Your notification-service costs $11. Are there optimization opportunities?"
+
+The FinOps Maturity Model​
+
+Having cost data is step one. What you do with that data follows a maturity progression. The FinOps Foundation defines three stages:
+
+Stage 1: Showback​
+
+What it is: Report costs to teams without charging them.
+
+Purpose: Build trust in the data. Give teams visibility into what they're consuming. Let them validate that the numbers make sense before you attach financial consequences.
+
+What you do:
+
+Generate weekly cost reports by team
+Share dashboards showing cost trends over time
+Let teams review and question their allocations
+Fix labeling gaps teams identify
+
+Example communication:
+
+"Product team, your Kubernetes costs last week were $69.12. Here's the breakdown: task-api ($34.56), user-auth ($23.45), notification-service ($11.11). Let us know if anything looks wrong."
+
+Why it matters: Teams need to trust the data before they'll change behavior based on it. If your first interaction with cost data is "here's your bill," teams will fight the numbers instead of optimizing them.
+
+Stage 2: Allocation​
+
+What it is: Map costs to business entities and budgets. Connect cost centers to planning processes.
+
+Purpose: Enable cost-informed decisions. Teams see how their choices affect costs. Finance can forecast infrastructure spend based on project plans.
+
+What you do:
+
+Assign cost-center labels to all workloads
+Create reports that match finance's budget structure
+Track costs against planned budgets
+Include cost projections in capacity planning
+
+Example communication:
+
+"Engineering cost center: Q4 cloud spend is tracking at $15,000/month against a $12,000 budget. Primary driver is ML team GPU usage. Do we need to adjust the budget or optimize usage?"
+
+Why it matters: Allocation connects technical decisions to financial outcomes. When teams understand that adding 10 replicas costs $X/month, they make different decisions.
+
+Stage 3: Chargeback​
+
+What it is: Formally bill internal teams for their usage. Real money moves between budgets.
+
+Purpose: Create financial accountability. Teams that over-consume pay for it. Teams that optimize benefit from savings.
+
+What you do:
+
+Monthly invoices to cost centers
+Usage-based internal billing
+Budget holds for teams exceeding allocations
+Savings reinvestment programs
+
+Example communication:
+
+"Engineering cost center: Your December invoice is $16,234.56. This amount will be transferred from your Q1 budget allocation."
+
+Why it matters: Chargeback creates the strongest incentive for cost optimization. But it requires mature processes and trusted data. Implement chargeback too early, and you'll spend more time fighting disputes than saving money.
+
+Why Showback Comes First​
+
+Many organizations want to jump straight to chargeback. "If we bill teams for usage, they'll optimize immediately!" This approach fails.
+
+The trust problem: Cost allocation involves complex calculations. The first time teams see their costs, they'll question the numbers. "That can't be right. We only have 3 pods." If you're billing them based on disputed data, you've created adversaries instead of partners.
+
+The labeling problem: Cost accuracy depends on labels. If 40% of your workloads lack team labels, 40% of costs land in an "unallocated" bucket. Who pays for unallocated costs? Without showback to surface these gaps, chargeback creates unfair allocations.
+
+The gaming problem: If you implement chargeback before teams understand the metrics, they'll optimize for the wrong things. Moving workloads between namespaces to shift costs. Underprovisioning resources to reduce allocation (then suffering performance issues).
+
+The progression:
+
+Month 1-2: Showback
+├── "Here's what your team costs"
+├── Teams validate data accuracy
+├── Fix labeling gaps
+└── Build trust in the numbers
+
+Month 3-4: Allocation
+├── Costs mapped to budgets
+├── Teams see cost trends
+├── Cost included in planning
+└── Optimization conversations start
+
+Month 6+: Chargeback (if needed)
+├── Formal billing in place
+├── Teams accountable for spend
+├── Disputes are rare (data is trusted)
+└── Optimization is incentivized
+
+
+Most organizations find that showback alone changes behavior. When teams see their costs weekly, they naturally optimize. Chargeback adds overhead (invoicing, disputes, budget transfers) that may not be worth the marginal improvement in cost discipline.
+
+Budget Alerts: Early Warning System​
+
+Cost visibility tells you what happened. Budget alerts tell you before you exceed limits.
+
+The Concept​
+
+Budget alerts compare current spending against thresholds and notify you when you're approaching or exceeding limits.
+
+Threshold: $500/week per namespace
+Current: production at $467/week (93% of threshold)
+Alert: "Warning: production namespace approaching budget limit"
+
+Implementation Options​
+
+Budget alerts can be implemented at different layers:
+
+Cloud provider level (AWS Budgets, GCP Billing Alerts, Azure Cost Management):
+
+Alerts on total cloud spend
+Can include all services, not just Kubernetes
+Managed service, no setup required
+
+Kubernetes level (Prometheus Alertmanager + OpenCost metrics):
+
+Alerts on Kubernetes-specific costs
+Granular: namespace, team, app level
+Requires OpenCost + Prometheus setup
+
+Dedicated FinOps tools (Kubecost, CloudHealth, Spot.io):
+
+Multi-cloud support
+Advanced forecasting
+Enterprise pricing
+Designing Alert Thresholds​
+
+Effective thresholds require understanding normal spend patterns:
+
+Baseline: What does this team normally spend per week?
+Buffer: How much variance is acceptable (10%, 20%)?
+Threshold: Baseline + buffer = alert trigger
+
+Example threshold design:
+
+Entity	Baseline (weekly)	Buffer	Alert Threshold
+product-team	$70	20%	$84
+ml-team	$380	30% (GPU jobs are bursty)	$494
+staging namespace	$30	50% (development is variable)	$45
+Prometheus Alertmanager Example​
+
+This rule alerts when namespace costs exceed a threshold. Full implementation is covered in Chapter 85, but here's the concept:
+
+groups:
+- name: cost-alerts
+  rules:
+  - alert: NamespaceCostExceedsBudget
+    expr: |
+      sum by (namespace) (
+        opencost_namespace_cost_total{window="7d"}
+      ) > 500
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: "Namespace {{ $labels.namespace }} exceeds $500/week budget"
+      description: "Current spend: ${{ $value }}. Review recent deployments for cost optimization."
+
+
+Key design decisions:
+
+for: 1h prevents alert spam from temporary spikes
+severity: warning allows time to respond (vs critical which pages immediately)
+description includes actionable guidance
+Try With AI​
+
+These prompts help you apply FinOps concepts to your organization.
+
+Prompt 1: Design Your Labeling Strategy
+
+I'm implementing cost allocation labels for a Kubernetes cluster.
+My organization has:
+- 5 teams (product, platform, data-science, security, devops)
+- 4 environments (dev, staging, production, disaster-recovery)
+- 12 applications
+
+Design a labeling strategy:
+- What labels should every resource have?
+- How do I handle workloads that span teams (shared infrastructure)?
+- What queries will these labels enable?
+
+
+What you're learning: How to design a labeling strategy that maps to your organization's structure. The AI helps you think through edge cases like shared infrastructure that doesn't belong to a single team.
+
+Prompt 2: FinOps Maturity Assessment
+
+My organization wants to implement chargeback for Kubernetes costs.
+Currently:
+- 60% of workloads have team labels
+- We have no cost reports going to teams
+- Finance has never seen Kubernetes cost breakdowns
+
+What's wrong with jumping straight to chargeback?
+Walk me through the showback phase first:
+- What reports should we create?
+- How long should we run showback before allocation?
+- What signals tell us we're ready for the next stage?
+
+
+What you're learning: How to assess FinOps maturity and build the foundation before implementing chargeback. The AI guides you through the progression that builds trust and accuracy.
+
+Prompt 3: Budget Alert Design
+
+I need to set up budget alerts for three teams.
+Historical weekly costs:
+- product-team: $60-80 (consistent)
+- ml-team: $200-600 (GPU training is bursty)
+- platform-team: $40-50 (very stable)
+
+Design alert thresholds for each team.
+Consider: What buffer accounts for normal variation?
+Should all teams have the same alert severity?
+What action should the alert recommend?
+
+
+What you're learning: How to design alert thresholds that are useful (not too noisy, not too late). The AI helps you account for different spending patterns across teams.
+
+Safety note: Cost data reveals business information. Which projects get investment, team sizes, strategic priorities. Implement access controls on cost dashboards and APIs. In multi-tenant clusters, ensure teams only see their own cost data, not competitors' or other business units' spending patterns.
+
+Reflect on Your Skill​
+
+You built an operational-excellence skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my operational-excellence skill, explain the FinOps maturity progression.
+Does my skill describe showback, allocation, and chargeback stages?
+Does it explain why showback should come before chargeback?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the four required cost allocation labels (team, app, environment, cost-center)?
+Did it explain where labels must appear (pod template, not just Deployment metadata)?
+Did it include OpenCost query patterns for team and cost-center aggregation?
+Improve Your Skill​
+
+If you found gaps:
+
+My operational-excellence skill is missing the FinOps maturity progression.
+Update it to include:
+- The four required cost allocation labels with placement guidance
+- OpenCost queries for label-based aggregation
+- The showback -> allocation -> chargeback progression
+- Guidance on why organizations should start with showback

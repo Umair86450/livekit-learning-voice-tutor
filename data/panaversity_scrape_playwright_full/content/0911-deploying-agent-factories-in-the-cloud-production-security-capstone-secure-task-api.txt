@@ -1,0 +1,1127 @@
+Capstone: Secure Task API
+
+You've spent this chapter building security knowledge piece by piece: the 4C model in Lesson 1, RBAC in Lesson 2, NetworkPolicies in Lesson 3, secrets in Lesson 4, PSS in Lesson 5, image scanning in Lesson 6, Dapr security in Lesson 7, and compliance mapping in Lesson 8. Now you apply everything together.
+
+In December 2023, a startup lost their Series A funding when a security audit discovered their "production-ready" Kubernetes deployment was running pods as root, had no network segmentation, and stored database credentials in environment variables visible to any cluster user. The technical fix took two days. The reputation damage took six months to repair.
+
+This capstone produces a Task API deployment that would pass that audit. You'll write a security specification first, compose all security controls into a unified deployment, execute a 10-point audit, run penetration test scenarios to verify controls work, and document your security posture for compliance evidence.
+
+Security Specification (Write This First)​
+
+Before implementing anything, define what "secure" means for your Task API. This specification becomes your acceptance criteria.
+
+Task API Security Specification​
+
+Application: Task API (FastAPI + SQLModel) Target Environment: Production Kubernetes namespace Compliance Context: SOC2 Type II preparation
+
+Security Controls Required:
+
+#	Control	Success Criteria	Verification Method
+1	Dedicated ServiceAccount	Pods run as task-api-sa, not default	kubectl get pod -o jsonpath='{.spec.serviceAccountName}'
+2	Minimal RBAC permissions	SA can only get/list ConfigMaps in own namespace	kubectl auth can-i returns no for secrets, other namespaces
+3	Default-deny NetworkPolicy	All ingress/egress blocked except explicit allowlists	Test pod cannot reach Task API without matching labels
+4	DNS egress allowed	Pods can resolve Kubernetes services	nslookup kubernetes.default succeeds from pod
+5	Secrets via volume mount	No secrets in env vars, mounted at /secrets/	kubectl get pod -o yaml shows no env.valueFrom.secretKeyRef
+6	PSS Restricted compliance	Namespace enforces Restricted profile	kubectl apply --dry-run=server accepts deployment
+7	No CRITICAL vulnerabilities	Trivy scan passes with --exit-code 1 --severity CRITICAL	Exit code 0
+8	Dapr mTLS enabled	Sentry running, certificates valid	dapr status -k shows healthy Sentry
+9	Component scopes configured	Statestore only accessible by task-api	Other app-ids receive ERR_STATE_STORE_NOT_FOUND
+10	Audit logging enabled	Dapr API logging captures all requests	dapr.io/enable-api-logging: "true" annotation present
+
+Non-Goals (explicitly excluded):
+
+TLS termination at ingress (handled by Gateway API in Ch86)
+JWT authentication (handled by SecurityPolicy in Ch86)
+Multi-cluster federation (Chapter 91)
+Compose All Security Components​
+
+Apply the security components you've built throughout this chapter. Each file references patterns from its source lesson.
+
+Step 1: Namespace with PSS Labels (L05)​
+
+Create 01-namespace.yaml:
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: task-api
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+Step 2: RBAC (L02)​
+
+Create 02-rbac.yaml:
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: task-api-sa
+  namespace: task-api
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: task-api-role
+  namespace: task-api
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: task-api-binding
+  namespace: task-api
+subjects:
+- kind: ServiceAccount
+  name: task-api-sa
+  namespace: task-api
+roleRef:
+  kind: Role
+  name: task-api-role
+  apiGroup: rbac.authorization.k8s.io
+
+Step 3: NetworkPolicy (L03)​
+
+Create 03-network-policy.yaml:
+
+---
+# Default deny all traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: task-api
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# Allow DNS egress for service discovery
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: task-api
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+---
+# Allow ingress from gateway
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+    ports:
+    - protocol: TCP
+      port: 8000
+---
+# Allow egress to Redis statestore
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-egress
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+# Allow egress to Dapr sidecar (localhost)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dapr-sidecar
+  namespace: task-api
+spec:
+  podSelector:
+    matchLabels:
+      app: task-api
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: task-api
+    ports:
+    - protocol: TCP
+      port: 3500
+    - protocol: TCP
+      port: 50001
+
+Step 4: Secrets Management (L04)​
+
+Create 04-secrets.yaml:
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: task-api-secrets
+  namespace: task-api
+type: Opaque
+data:
+  database-url: cG9zdGdyZXNxbDovL3VzZXI6cGFzc0BkYi90YXNrcw==  # base64 encoded
+  redis-password: cmVkaXMtc2VjcmV0LXBhc3N3b3Jk  # base64 encoded
+
+Step 5: Dapr Components with Scopes (L07)​
+
+Create 05-dapr-components.yaml:
+
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: task-api
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis:6379
+  - name: redisPassword
+    secretKeyRef:
+      name: task-api-secrets
+      key: redis-password
+  scopes:
+  - task-api  # Only task-api can access this component
+
+Step 6: Task API Deployment (All Layers)​
+
+Create 06-deployment.yaml:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+      annotations:
+        # Dapr sidecar configuration
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "task-api"
+        dapr.io/app-port: "8000"
+        # Security hardening (L07)
+        dapr.io/sidecar-listen-addresses: "127.0.0.1"
+        dapr.io/enable-api-logging: "true"
+    spec:
+      serviceAccountName: task-api-sa
+      automountServiceAccountToken: false
+
+      # Pod-level security context (L05)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+      - name: task-api
+        image: ghcr.io/org/task-api:v1.0.0@sha256:abc123...  # Digest pinned (L06)
+        ports:
+        - containerPort: 8000
+
+        # Container-level security context (L05)
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+
+        # Secrets via volume mount, not env vars (L04)
+        volumeMounts:
+        - name: secrets
+          mountPath: /secrets
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+
+      volumes:
+      - name: secrets
+        secret:
+          secretName: task-api-secrets
+      - name: tmp
+        emptyDir: {}
+
+Apply All Components​
+kubectl apply -f 01-namespace.yaml
+kubectl apply -f 02-rbac.yaml
+kubectl apply -f 03-network-policy.yaml
+kubectl apply -f 04-secrets.yaml
+kubectl apply -f 05-dapr-components.yaml
+kubectl apply -f 06-deployment.yaml
+
+
+Output:
+
+namespace/task-api created
+serviceaccount/task-api-sa created
+role.rbac.authorization.k8s.io/task-api-role created
+rolebinding.rbac.authorization.k8s.io/task-api-binding created
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-gateway-ingress created
+networkpolicy.networking.k8s.io/allow-redis-egress created
+networkpolicy.networking.k8s.io/allow-dapr-sidecar created
+secret/task-api-secrets created
+component.dapr.io/statestore created
+deployment.apps/task-api created
+
+10-Point Security Audit​
+
+Execute each audit check with its verification command. All items must pass before declaring the deployment production-ready.
+
+Audit Check 1: Dedicated ServiceAccount​
+
+Command:
+
+kubectl get pods -n task-api -l app=task-api -o jsonpath='{.items[0].spec.serviceAccountName}'
+
+
+Expected Output:
+
+task-api-sa
+
+
+Pass Criteria: Output is task-api-sa, not default.
+
+Audit Check 2: Minimal RBAC Permissions​
+
+Allowed operations:
+
+kubectl auth can-i get configmaps \
+  --as=system:serviceaccount:task-api:task-api-sa \
+  -n task-api
+
+
+Expected Output:
+
+yes
+
+
+Denied operations:
+
+kubectl auth can-i get secrets \
+  --as=system:serviceaccount:task-api:task-api-sa \
+  -n task-api
+
+
+Expected Output:
+
+no
+
+kubectl auth can-i get configmaps \
+  --as=system:serviceaccount:task-api:task-api-sa \
+  -n default
+
+
+Expected Output:
+
+no
+
+
+Pass Criteria: ConfigMaps allowed in own namespace, secrets denied, other namespaces denied.
+
+Audit Check 3: Default-Deny NetworkPolicy​
+
+Command:
+
+kubectl get networkpolicy -n task-api default-deny-all -o jsonpath='{.spec.policyTypes}'
+
+
+Expected Output:
+
+["Ingress","Egress"]
+
+
+Pass Criteria: Both Ingress and Egress policy types present with empty selectors (default deny).
+
+Audit Check 4: DNS Egress Allowed​
+
+Command (run from within a Task API pod):
+
+kubectl exec -n task-api deploy/task-api -c task-api -- nslookup kubernetes.default
+
+
+Expected Output:
+
+Server:    10.96.0.10
+Address:   10.96.0.10#53
+
+Name:      kubernetes.default.svc.cluster.local
+Address:   10.96.0.1
+
+
+Pass Criteria: DNS resolution succeeds despite default-deny egress.
+
+Audit Check 5: Secrets via Volume Mount​
+
+Command:
+
+kubectl get pods -n task-api -l app=task-api -o yaml | grep -A5 "env:" | grep secretKeyRef || echo "No secretKeyRef in env vars"
+
+
+Expected Output:
+
+No secretKeyRef in env vars
+
+
+Verify volume mount exists:
+
+kubectl get pods -n task-api -l app=task-api -o jsonpath='{.items[0].spec.containers[0].volumeMounts[?(@.name=="secrets")].mountPath}'
+
+
+Expected Output:
+
+/secrets
+
+
+Pass Criteria: No secretKeyRef in environment variables, secrets mounted at /secrets.
+
+Audit Check 6: PSS Restricted Compliance​
+
+Command:
+
+kubectl apply -f 06-deployment.yaml --dry-run=server
+
+
+Expected Output:
+
+deployment.apps/task-api created (server dry run)
+
+
+Pass Criteria: No PSS violations reported, deployment accepted.
+
+Audit Check 7: No CRITICAL Vulnerabilities​
+
+Command:
+
+trivy image ghcr.io/org/task-api:v1.0.0 --severity CRITICAL --exit-code 1
+
+
+Expected Output:
+
+ghcr.io/org/task-api:v1.0.0 (debian 12.5)
+=========================================
+Total: 0 (CRITICAL: 0)
+
+
+Pass Criteria: Exit code 0, zero CRITICAL vulnerabilities.
+
+Audit Check 8: Dapr mTLS Enabled​
+
+Command:
+
+dapr status -k | grep dapr-sentry
+
+
+Expected Output:
+
+dapr-sentry            dapr-system  True     Running  1         1.12.0   7d   2024-01-15 10:23:45
+
+
+Verify certificate validity:
+
+kubectl get pods -n dapr-system -l app=dapr-sentry -o name | head -1 | \
+  xargs -I {} kubectl exec {} -n dapr-system -- \
+  openssl x509 -in /var/run/secrets/dapr.io/tls/ca.crt -noout -enddate
+
+
+Expected Output:
+
+notAfter=Jan 15 10:23:45 2025 GMT
+
+
+Pass Criteria: Sentry healthy, certificate not expired.
+
+Audit Check 9: Component Scopes Configured​
+
+Command (from a pod with different app-id):
+
+# Create test pod with different app-id
+kubectl run test-attacker -n task-api --image=curlimages/curl:latest \
+  --annotations="dapr.io/enabled=true,dapr.io/app-id=attacker" \
+  --command -- sleep 3600
+
+# Attempt to access statestore
+kubectl exec -n task-api test-attacker -c daprd -- \
+  curl -s http://localhost:3500/v1.0/state/statestore
+
+
+Expected Output:
+
+{
+  "errorCode": "ERR_STATE_STORE_NOT_FOUND",
+  "message": "state store statestore is not found"
+}
+
+
+Pass Criteria: Non-scoped app-ids cannot see the statestore.
+
+Cleanup:
+
+kubectl delete pod test-attacker -n task-api
+
+Audit Check 10: Audit Logging Enabled​
+
+Command:
+
+kubectl get pods -n task-api -l app=task-api -o jsonpath='{.items[0].metadata.annotations.dapr\.io/enable-api-logging}'
+
+
+Expected Output:
+
+true
+
+
+Pass Criteria: Annotation present and set to "true".
+
+Audit Summary Script​
+
+Combine all checks into an executable audit script:
+
+#!/bin/bash
+# secure-task-api-audit.sh
+
+echo "=== Task API Security Audit ==="
+echo ""
+
+PASS=0
+FAIL=0
+
+# Check 1: Dedicated ServiceAccount
+SA=$(kubectl get pods -n task-api -l app=task-api -o jsonpath='{.items[0].spec.serviceAccountName}' 2>/dev/null)
+if [ "$SA" = "task-api-sa" ]; then
+  echo "[PASS] 1. Dedicated ServiceAccount: $SA"
+  ((PASS++))
+else
+  echo "[FAIL] 1. Dedicated ServiceAccount: got '$SA', expected 'task-api-sa'"
+  ((FAIL++))
+fi
+
+# Check 2: Minimal RBAC (test denied operation)
+SECRETS=$(kubectl auth can-i get secrets --as=system:serviceaccount:task-api:task-api-sa -n task-api 2>/dev/null)
+if [ "$SECRETS" = "no" ]; then
+  echo "[PASS] 2. Minimal RBAC: secrets access denied"
+  ((PASS++))
+else
+  echo "[FAIL] 2. Minimal RBAC: secrets access should be denied"
+  ((FAIL++))
+fi
+
+# Check 3: Default-deny NetworkPolicy
+NP=$(kubectl get networkpolicy -n task-api default-deny-all -o jsonpath='{.spec.policyTypes}' 2>/dev/null)
+if [[ "$NP" == *"Ingress"* ]] && [[ "$NP" == *"Egress"* ]]; then
+  echo "[PASS] 3. Default-deny NetworkPolicy: both Ingress and Egress"
+  ((PASS++))
+else
+  echo "[FAIL] 3. Default-deny NetworkPolicy: missing policy types"
+  ((FAIL++))
+fi
+
+# Check 4: DNS egress (skip in automated script, requires pod exec)
+echo "[SKIP] 4. DNS egress: requires manual verification with nslookup"
+
+# Check 5: Secrets via volume mount
+SECRETENV=$(kubectl get pods -n task-api -l app=task-api -o yaml 2>/dev/null | grep secretKeyRef || echo "none")
+if [ "$SECRETENV" = "none" ]; then
+  echo "[PASS] 5. Secrets via volume mount: no secretKeyRef in env"
+  ((PASS++))
+else
+  echo "[FAIL] 5. Secrets via volume mount: found secretKeyRef in env vars"
+  ((FAIL++))
+fi
+
+# Check 6: PSS Restricted compliance
+PSS=$(kubectl apply -f 06-deployment.yaml --dry-run=server 2>&1)
+if [[ "$PSS" != *"Forbidden"* ]]; then
+  echo "[PASS] 6. PSS Restricted compliance: deployment accepted"
+  ((PASS++))
+else
+  echo "[FAIL] 6. PSS Restricted compliance: violations detected"
+  ((FAIL++))
+fi
+
+# Check 7: No CRITICAL vulnerabilities (skip in quick audit)
+echo "[SKIP] 7. No CRITICAL vulnerabilities: run 'trivy image' manually"
+
+# Check 8: Dapr mTLS enabled
+SENTRY=$(dapr status -k 2>/dev/null | grep dapr-sentry | grep Running)
+if [ -n "$SENTRY" ]; then
+  echo "[PASS] 8. Dapr mTLS: Sentry running"
+  ((PASS++))
+else
+  echo "[FAIL] 8. Dapr mTLS: Sentry not running"
+  ((FAIL++))
+fi
+
+# Check 9: Component scopes (skip in automated script)
+echo "[SKIP] 9. Component scopes: requires test pod with different app-id"
+
+# Check 10: Audit logging enabled
+LOGGING=$(kubectl get pods -n task-api -l app=task-api -o jsonpath='{.items[0].metadata.annotations.dapr\.io/enable-api-logging}' 2>/dev/null)
+if [ "$LOGGING" = "true" ]; then
+  echo "[PASS] 10. Audit logging: enabled"
+  ((PASS++))
+else
+  echo "[FAIL] 10. Audit logging: not enabled"
+  ((FAIL++))
+fi
+
+echo ""
+echo "=== Audit Results ==="
+echo "PASSED: $PASS"
+echo "FAILED: $FAIL"
+echo "SKIPPED: 4 (manual verification required)"
+
+if [ $FAIL -eq 0 ]; then
+  echo ""
+  echo "Automated checks PASSED. Complete manual checks 4, 7, 9 before production."
+else
+  echo ""
+  echo "AUDIT FAILED. Fix issues before production deployment."
+  exit 1
+fi
+
+Penetration Test Scenarios​
+
+Security controls are only valuable if they actually prevent attacks. These scenarios verify your controls work against realistic attack vectors.
+
+Scenario 1: RBAC Bypass Attempt​
+
+Attack: Compromised pod attempts to read secrets across namespaces.
+
+Setup:
+
+# Deploy attacker pod that tries to access Kubernetes API
+kubectl run attacker -n task-api --image=bitnami/kubectl:latest \
+  --serviceaccount=task-api-sa \
+  --command -- sleep 3600
+
+
+Attack execution:
+
+# Attempt to read secrets
+kubectl exec -n task-api attacker -- kubectl get secrets -n task-api
+
+# Attempt to access other namespace
+kubectl exec -n task-api attacker -- kubectl get pods -n kube-system
+
+
+Expected Result (Control Working):
+
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:task-api:task-api-sa" cannot list resource "secrets" in API group "" in the namespace "task-api"
+Error from server (Forbidden): pods is forbidden: User "system:serviceaccount:task-api:task-api-sa" cannot list resource "pods" in API group "" in the namespace "kube-system"
+
+
+Cleanup:
+
+kubectl delete pod attacker -n task-api
+
+Scenario 2: Network Escape Attempt​
+
+Attack: Compromised pod attempts to reach services outside allowed NetworkPolicies.
+
+Setup:
+
+# Deploy attacker pod
+kubectl run network-attacker -n task-api --image=curlimages/curl:latest \
+  --command -- sleep 3600
+
+
+Attack execution:
+
+# Attempt to reach external internet
+kubectl exec -n task-api network-attacker -- curl -s --max-time 5 https://google.com
+
+# Attempt to reach pods in other namespaces
+kubectl exec -n task-api network-attacker -- curl -s --max-time 5 http://kubernetes-dashboard.kubernetes-dashboard.svc:443
+
+
+Expected Result (Control Working):
+
+curl: (28) Connection timed out after 5001 milliseconds
+
+
+Cleanup:
+
+kubectl delete pod network-attacker -n task-api
+
+Scenario 3: Privilege Escalation Attempt​
+
+Attack: Pod attempts to run privileged container or escape PSS restrictions.
+
+Setup: Create privileged-attacker.yaml:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: priv-attacker
+  namespace: task-api
+spec:
+  containers:
+  - name: attacker
+    image: nginx:latest
+    securityContext:
+      privileged: true
+
+
+Attack execution:
+
+kubectl apply -f privileged-attacker.yaml
+
+
+Expected Result (Control Working):
+
+Error from server (Forbidden): error when creating "privileged-attacker.yaml": pods "priv-attacker" is forbidden: violates PodSecurity "restricted:latest": privileged (container "attacker" must not set securityContext.privileged=true)
+
+Security Posture Documentation​
+
+Create documentation for compliance auditors. This template maps your controls to common compliance frameworks.
+
+Security Posture Document Template​
+# Task API Security Posture
+
+**Application**: Task API v1.0.0
+**Environment**: Production (task-api namespace)
+**Audit Date**: [DATE]
+**Auditor**: [NAME]
+
+## Executive Summary
+
+The Task API deployment implements defense-in-depth security controls aligned with Kubernetes security best practices and [SOC2/HIPAA] compliance requirements.
+
+## Control Inventory
+
+
+|
+ Control Category 
+|
+ Control 
+|
+ Implementation 
+|
+ Evidence Location 
+|
+
+
+|
+-----------------
+|
+---------
+|
+----------------
+|
+-------------------
+|
+
+
+|
+ Identity 
+|
+ Dedicated ServiceAccount 
+|
+ task-api-sa with automount disabled 
+|
+ 02-rbac.yaml 
+|
+
+
+|
+ Authorization 
+|
+ RBAC least privilege 
+|
+ ConfigMap read-only 
+|
+ 02-rbac.yaml, audit check 2 
+|
+
+
+|
+ Network 
+|
+ Default-deny NetworkPolicy 
+|
+ Egress/Ingress blocked 
+|
+ 03-network-policy.yaml 
+|
+
+
+|
+ Network 
+|
+ Explicit allowlists 
+|
+ DNS, Gateway, Redis only 
+|
+ 03-network-policy.yaml 
+|
+
+
+|
+ Secrets 
+|
+ Volume-mounted secrets 
+|
+ No env var exposure 
+|
+ 04-secrets.yaml, 06-deployment.yaml 
+|
+
+
+|
+ Container 
+|
+ PSS Restricted profile 
+|
+ runAsNonRoot, drop ALL caps 
+|
+ 01-namespace.yaml, 06-deployment.yaml 
+|
+
+
+|
+ Supply Chain 
+|
+ Image scanning 
+|
+ Trivy CRITICAL gate 
+|
+ CI/CD workflow 
+|
+
+
+|
+ Supply Chain 
+|
+ Digest pinning 
+|
+ Immutable image references 
+|
+ 06-deployment.yaml 
+|
+
+
+|
+ Encryption 
+|
+ Dapr mTLS 
+|
+ Sidecar-to-sidecar encryption 
+|
+ Dapr installation 
+|
+
+
+|
+ Isolation 
+|
+ Component scopes 
+|
+ Statestore restricted to task-api 
+|
+ 05-dapr-components.yaml 
+|
+
+
+|
+ Audit 
+|
+ API logging 
+|
+ Dapr request logging 
+|
+ 06-deployment.yaml annotation 
+|
+
+
+
+## Compliance Mapping
+
+### SOC2 Criteria Coverage
+
+
+|
+ SOC2 Criteria 
+|
+ Control Implemented 
+|
+ Evidence 
+|
+
+
+|
+---------------
+|
+---------------------
+|
+----------
+|
+
+
+|
+ CC6.1 Logical access 
+|
+ RBAC, ServiceAccount 
+|
+ Audit check 1, 2 
+|
+
+
+|
+ CC6.6 System boundaries 
+|
+ NetworkPolicy default-deny 
+|
+ Audit check 3 
+|
+
+
+|
+ CC6.7 Restrict transmission 
+|
+ Dapr mTLS, TLS 
+|
+ Audit check 8 
+|
+
+
+|
+ CC7.2 Monitor for unauthorized access 
+|
+ API logging 
+|
+ Audit check 10 
+|
+
+
+
+### HIPAA Technical Safeguards
+
+
+|
+ HIPAA Section 
+|
+ Control Implemented 
+|
+ Evidence 
+|
+
+
+|
+---------------
+|
+---------------------
+|
+----------
+|
+
+
+|
+ 164.312(a)(1) Access control 
+|
+ RBAC, PSS 
+|
+ Audit checks 1, 2, 6 
+|
+
+
+|
+ 164.312(e)(1) Transmission security 
+|
+ mTLS, NetworkPolicy 
+|
+ Audit checks 3, 8 
+|
+
+
+|
+ 164.312(b) Audit controls 
+|
+ Dapr API logging 
+|
+ Audit check 10 
+|
+
+
+
+## Penetration Test Results
+
+
+|
+ Scenario 
+|
+ Attack Vector 
+|
+ Result 
+|
+ Control Validated 
+|
+
+
+|
+----------
+|
+---------------
+|
+--------
+|
+-------------------
+|
+
+
+|
+ RBAC Bypass 
+|
+ SA accessing secrets 
+|
+ BLOCKED 
+|
+ RBAC least privilege 
+|
+
+
+|
+ Network Escape 
+|
+ Pod reaching external 
+|
+ BLOCKED 
+|
+ NetworkPolicy default-deny 
+|
+
+
+|
+ Privilege Escalation 
+|
+ Privileged container 
+|
+ BLOCKED 
+|
+ PSS Restricted 
+|
+
+
+
+## Recommendations
+
+1. **Immediate**: None - all controls passing
+2. **Short-term**: Implement OPA Gatekeeper for policy-as-code enforcement
+3. **Long-term**: Add runtime security monitoring (Falco)
+
+## Audit Trail
+
+- 10-point audit script: `secure-task-api-audit.sh`
+- Trivy scan report: `trivy-results.sarif`
+- SBOM: `sbom-spdx.json`
+
+Try With AI​
+
+Test your ability to design, implement, and audit production security configurations.
+
+Prompt 1:
+
+Write a security specification for a payment-processing microservice that:
+- Handles PCI-DSS data
+- Needs database connectivity
+- Uses Dapr for state management
+- Runs in a shared Kubernetes cluster
+
+Define the 10-point audit checklist with specific success criteria.
+
+
+What you're learning: Security specification design requires understanding threat models before implementation. PCI-DSS adds requirements beyond standard production security: encrypted data at rest, stricter network segmentation, key rotation policies. Notice how your specification changes when compliance requirements increase.
+
+Prompt 2:
+
+My Task API passed 9/10 audit checks, but check 7 (Trivy scan) found
+3 HIGH vulnerabilities in the Python base image. The vulnerabilities
+are in packages my application doesn't directly use. Should I:
+A) Switch to Alpine/Distroless base image
+B) Accept the risk and document it
+C) Wait for upstream fixes
+D) Something else?
+
+Walk me through the decision framework.
+
+
+What you're learning: Security is about risk management, not zero vulnerabilities. The decision depends on: Is the vulnerable code reachable? Is there a known exploit? What's the remediation timeline? Distroless images reduce attack surface but may break your application. This requires analyzing tradeoffs, not following rules.
+
+Prompt 3:
+
+Design a penetration test scenario that validates Dapr component scopes
+are working correctly. The scenario should:
+- Create an "attacker" workload in the same namespace
+- Attempt to access multiple Dapr components
+- Produce clear pass/fail evidence
+- Be safe to run in a shared environment
+
+
+What you're learning: Penetration testing validates that security controls actually work. The key insight is that scopes are enforced by app-id, so your test needs a pod with a different Dapr app-id annotation. The test should be non-destructive (read attempts, not writes) and cleanup after itself.
+
+SECURITY REMINDER
+
+A 10-point audit provides evidence that controls are configured correctly at a point in time. Production security requires continuous monitoring: alert on RBAC changes, track NetworkPolicy modifications, scan images on schedule. This capstone establishes your security baseline; operational practices maintain it.

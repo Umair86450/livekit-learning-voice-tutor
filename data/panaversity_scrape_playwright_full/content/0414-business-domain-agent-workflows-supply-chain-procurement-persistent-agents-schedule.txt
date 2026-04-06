@@ -1,0 +1,377 @@
+Persistent Agents & Schedule
+
+In the past nine lessons, every workflow you have run required you to start it. You decided when to classify a vendor. You decided when to check the invoice backlog. You decided when to review carrier performance. The insights you produced were accurate and valuable: but they existed only when you had time to ask for them.
+
+Your procurement portfolio does not stop moving between your review cycles. Your highest-risk vendor's financial position changes on a Tuesday afternoon while you are in a budget meeting. Your largest carrier's OTD has been declining for three weeks: a trend that is obvious in retrospect but invisible without a weekly data pull. A contract notice deadline will pass on Thursday, extending a relationship you intended to exit by another 12 months.
+
+The five persistent agents in the supply chain plugin exist to solve this problem. They run continuously: not when you remember to ask, but on a schedule, triggered by thresholds, producing outputs in the format your CPO actually wants to read. This lesson deploys all five as an integrated supply chain intelligence system.
+
+What the Agents Are: and What They Are Not​
+
+These agents are real, deployable components in Cowork. You configure them once with your vendor portfolio, thresholds, and scheduling preferences, and they run. Each agent automates a monitoring workflow you have already performed manually in an earlier lesson. The shift is from a skill you invoke when you remember to a system that runs whether or not you remember.
+
+Agent	What It Automates	Manual Equivalent
+Vendor Health Monitor	Vendor surveillance, OTD trending, financial news	L04 vendor assessment + manual news scanning
+Invoice Reconciliation Agent	AP inbox → four-stage reconciliation workflow	L05-L06 invoice reconciliation sprint
+Procurement Calendar Agent	Contract deadline and certification tracking	Manual contract calendar maintenance
+Logistics Intelligence Agent	Carrier SLA tracking, disruption monitoring	L08 logistics carrier performance analysis
+Spend Intelligence Agent	Category spend analytics, commodity price triggers	L10 spend analytics and consolidation
+AGENTS SURFACE INFORMATION; HUMANS MAKE DECISIONS
+
+None of the five agents makes a final decision. The Vendor Health Monitor does not decide whether to exit a vendor in financial distress: it ensures the CPO has a brief with scenario analysis within two hours of the news breaking. The Invoice Reconciliation Agent does not approve disputed invoices: it routes genuine exceptions to the right human with the supporting data. The agents remove the latency between an event occurring and the right person knowing about it.
+
+Agent 1: Vendor Health Monitor​
+
+Purpose: Monitor all Strategic (Tier 1) and Bottleneck (Tier 4) vendors continuously. Detect financial distress signals, operational performance decline, geopolitical risk changes, and compliance obligations due. Alert before signals become supply disruptions.
+
+Trigger and cadence:
+
+Daily: Financial news scan for all monitored vendors; operational data update from ERP (7-day OTD, quality rejection rate); Tier 2 signal scan for each Strategic vendor's sub-suppliers
+Weekly (Monday): 13-week trend analysis for each vendor; risk rating recalculation; weekly vendor health digest included in supply chain brief
+
+Hot alert triggers (immediate, any time):
+
+Any Strategic vendor financial distress signal (restructuring, CVA, insolvency, revenue warning)
+Any Bottleneck vendor distress signal where no backup supplier is confirmed
+Vendor OTD below 75% in any single week
+Any Tier 2 disruption that could affect Tier 1 supply within 60 days
+
+Output format:
+
+Hot alerts use this structure:
+
+VENDOR HEALTH ALERT — [Timestamp]
+────────────────────────────────────────────────────
+Vendor:      [Name] | Tier: [1/4] | Category: [Category]
+Alert type:  [Financial / Operational / Compliance / Tier 2]
+Signal:      [Specific description]
+Source:      [URL or data source]
+Risk rating: Before [X] → After [Y]
+Recommended immediate actions:
+  1. [Action — Owner — Deadline]
+  2. [Action — Owner — Deadline]
+────────────────────────────────────────────────────
+
+
+Weekly digests are consolidated into the supply chain brief via /supply-chain-brief.
+
+Configure the agent with:
+
+Vendor list: all Tier 1 (Strategic) and Tier 4 (Bottleneck) vendors from your classification register (built in Lesson 3)
+OTD threshold per vendor tier (typical defaults: Strategic 92%, Bottleneck 88%)
+Quality rejection threshold
+Alert recipients: CPO and relevant category managers
+Agent 2: Invoice Reconciliation Agent​
+
+Purpose: Process all incoming invoices from the AP inbox through the four-stage reconciliation workflow. Achieve >95% straight-through processing for matched invoices. Route only genuine exceptions requiring human judgment.
+
+Trigger: New invoice arrives in AP inbox (MCP connection to email or AP platform). Also available for on-demand batch runs.
+
+Four-stage workflow:
+
+Document Intelligence; Extract structured data, run Stage 1 validation (arithmetic, vendor master match, duplicate detection, late submission, bank detail change check)
+Three-Way Match; Match each invoice line against PO and goods receipt; apply tolerance rules from supply-chain.local.md
+Exception Routing; Auto-approve matched invoices within tolerance; route price and quantity exceptions to category manager or CPO; auto-reject duplicates and bank-detail-change invoices
+Audit and Logging; Log every decision with invoice number, classification, decision, approver, resolution date; draft vendor dispute communication for exceptions
+
+Weekly exception report (Friday): Straight-through rate, exception type breakdown, pattern flags (systematic vendor errors), open items approaching payment terms.
+
+BANK DETAIL CHANGE RULE
+
+Any invoice or email requesting a bank detail change triggers an automatic hold and escalation to the Finance Director: not an auto-reject. This is the highest-risk fraud vector in procurement. The correct response is always to call the vendor on a known, previously established number. Never update payment details based on an emailed instruction alone.
+
+Agent 3: Procurement Calendar Agent​
+
+Purpose: Track all contract renewal dates, notice periods, certification expiry dates, and compliance filing deadlines. Alert category managers with sufficient lead time to act. Ensure no notice deadline is missed.
+
+Alert timeline for contracts:
+
+Lead time before expiry	Alert type	Recipient
+120 days	"Contract strategy review required"	Category manager
+90 days	Confirm RFQ launched (if retender decision)	Category manager + CPO
+60 days	Notice deadline: confirm notice sent	Category manager
+30 days	If no decision: CRITICAL alert	CPO + Finance Director
+Day of expiry	EMERGENCY alert: bridge arrangement	CPO + Finance Director + Operations
+
+Certification tracking (ISO 9001/14001, Modern Slavery, GDPR DPA, sanctions screening):
+
+90 days before expiry: request renewal evidence from vendor
+60 days without confirmation: escalated written request
+30 days without confirmation: CPO review: can we continue trading?
+On expiry: halt new POs requiring this certification
+
+Monthly calendar output: CRITICAL deadlines this month, important items in the next 30-60 days, pipeline for 90-120 days, certifications expiring within 90 days, statutory obligations due.
+
+Agent 4: Logistics Intelligence Agent​
+
+Purpose: Monitor carrier performance continuously against SLAs. Flag degradation immediately. Identify route optimisation opportunities as market conditions change.
+
+Weekly performance tracking (Monday pull):
+
+Per carrier: shipment count, OTD rate vs. SLA, damage/claim rate, invoiced cost vs. contracted rate, track-and-trace completion rate
+Per lane (top 10 by volume): OTD, cost per kg, transit time vs. standard
+
+Trigger-based monitoring:
+
+Fuel price index moves >5% since last carrier rate review → carrier cost re-evaluation brief + alert to Logistics Manager and Procurement
+Logistics disruption news (port strikes, route disruptions, HGV shortages) → immediate alert + alternative routing options for affected lanes
+Carrier insolvency signal → immediate alert to CPO + Logistics Manager + contingency routing plan
+Expedited freight spike (above configured threshold % of total) → root cause analysis + identification of which cost centres generated the expedited volume
+EXPEDITED FREIGHT AS A DIAGNOSTIC
+
+A spike in expedited freight is almost never a logistics problem. It is a supply chain problem: a vendor delivering late, a demand spike the planning team did not anticipate, or a production schedule change that bypassed normal procurement. The Logistics Intelligence Agent flags the spike; the Vendor Health Monitor or Spend Intelligence Agent will often identify the underlying cause.
+
+Agent 5: Spend Intelligence Agent​
+
+Purpose: Continuous spend analytics across all procurement categories. Identify price inconsistency, vendor consolidation opportunities, and market price movements that create renegotiation triggers.
+
+Monthly analytics (first Monday of month):
+
+Category spend by vendor: total, prior month, rolling 12-month
+New vendor alerts: any vendor added to a category already served by an approved preferred vendor (potential maverick spend or consolidation opportunity)
+Price consistency check: where multiple sites or business units buy the same item, flag any price inconsistency and calculate the annual saving if all aligned to the best observed rate
+PO compliance rate: percentage of spend with a prior purchase order
+
+Commodity price monitoring (weekly):
+
+Monitors configured indices (steel LME, packaging FOEX PIX, energy Brent, chemicals ICIS, electronics ECIA) against last contract negotiation baseline
+If index moves >8% since last negotiation: generates a renegotiation brief
+Index down: opportunity to renegotiate lower at next renewal
+Index up: assess whether fixed-price contract is at risk of vendor seeking price increase; consider index-linking at renewal
+
+Monthly spend intelligence report: Total spend, PO compliance, new savings opportunities identified (with annual value and basis), commodity price alerts, maverick spend summary, savings pipeline status.
+
+Scheduling Agents with /schedule​
+
+Each agent runs on a configured cadence. The /schedule command sets up recurring runs directly in Cowork: transforming a one-time manual skill invocation into a scheduled system component.
+
+Scheduling the Vendor Health Monitor for daily news scans:
+
+/schedule agent:"vendor-health-monitor"
+          cadence:"daily"
+          time:"07:00"
+          scope:"tier-1-and-tier-4-vendors"
+          alert-channel:"CPO, category-managers"
+          escalation-threshold:"OTD-below-75 OR financial-distress-signal"
+
+
+Scheduling the Spend Intelligence Agent for monthly category refresh:
+
+/schedule agent:"spend-intelligence-agent"
+          cadence:"monthly"
+          trigger:"first-monday"
+          time:"06:00"
+          scope:"all-active-categories"
+          output:"spend-intelligence-report"
+          alert-recipient:"CPO, Finance Director"
+
+
+Scheduling the Procurement Calendar Agent for weekly deadline sweep:
+
+/schedule agent:"procurement-calendar-agent"
+          cadence:"weekly"
+          trigger:"monday"
+          time:"08:00"
+          lookahead:"120-days"
+          escalation:"30-days-critical, 60-days-notice-deadline"
+          alert-recipients:"category-managers, CPO"
+
+SCHEDULING THE INVOICE RECONCILIATION AGENT
+
+The Invoice Reconciliation Agent is typically event-triggered (new invoice arrives) rather than scheduled. Connect it to your AP inbox via MCP, and it processes invoices on arrival. If you prefer a batch mode, schedule it to run every morning at a fixed time against queued invoices.
+
+Exercise: Build the Supply Chain Intelligence Dashboard (Exercise 7)​
+
+Type: Integration and Reporting Time: 60 minutes Plugin commands: /vendor-communicate, /supply-chain-brief, /schedule Goal: A working weekly supply chain intelligence system with agent configurations, dashboard metrics, first executive brief, and escalation criteria
+
+Step 1; Define the Dashboard Metrics​
+
+Review the following metric table. Adjust the thresholds to match your organisation's context (or keep the defaults for the exercise):
+
+Metric	Owner	Source	Threshold
+Vendor OTD (Tier 1 average)	Procurement	ERP	>92%
+Invoice exception rate	Finance	AP system	<12%
+Invoice processing days	Finance	AP system	<5 days
+Open disputes (£ value)	Finance	AP system	<£50K
+Logistics OTD (carrier average)	Logistics	TMS	>93%
+Cost per kg shipped	Logistics	TMS	vs. prior month
+Expedited freight %	Logistics	TMS	<8% of total
+Active vendor risk alerts	Procurement	Risk agent	Count + severity
+Contract renewals in 90 days	Procurement	Contract register	Count
+Identified savings pipeline	Procurement	Analytics	£ total
+
+For each metric, identify the data source in your organisation and the owner responsible for resolving a red status.
+
+Step 2; Configure the Vendor Health Monitor​
+
+Using your vendor classification register from Exercise 1 (Lesson 3), configure the Vendor Health Monitor:
+
+/schedule agent:"vendor-health-monitor"
+          vendors:"[List your Tier 1 and Tier 4 vendors by name]"
+          otd-threshold-tier1:"[Your threshold, e.g. 92%]"
+          otd-threshold-tier4:"[Your threshold, e.g. 88%]"
+          quality-threshold:"[Your threshold, e.g. 2% rejection rate]"
+          financial-news-scan:"daily"
+          weekly-digest:"monday-07:00"
+          alert-recipients:"CPO, [category manager names]"
+
+
+Note the agent output confirming the vendors loaded and the monitoring parameters active.
+
+Step 3; Configure All Five Agents​
+
+Repeat the configuration process for the remaining four agents:
+
+Invoice Reconciliation Agent:
+
+/schedule agent:"invoice-reconciliation-agent"
+          trigger:"ap-inbox-arrival"
+          tolerance-rules:"from:supply-chain.local.md"
+          exception-routing:"price-variance-to:category-manager
+                             qty-variance-to:warehouse
+                             escalation-threshold:CPO"
+          weekly-report:"friday-17:00"
+          report-recipient:"Finance Manager"
+
+
+Procurement Calendar Agent:
+
+/schedule agent:"procurement-calendar-agent"
+          cadence:"weekly"
+          trigger:"monday-08:00"
+          contract-register:"[Your contract list with expiry dates and notice periods]"
+          certification-register:"[Your vendor certifications with expiry dates]"
+          alert-recipients:"category-managers, CPO"
+
+
+Logistics Intelligence Agent:
+
+/schedule agent:"logistics-intelligence-agent"
+          carriers:"[Your active carriers]"
+          sla-thresholds:"[Per carrier OTD targets]"
+          fuel-index-threshold:"5%"
+          weekly-report:"monday-08:00"
+          alert-recipients:"Logistics Manager, Procurement"
+
+
+Spend Intelligence Agent:
+
+/schedule agent:"spend-intelligence-agent"
+          cadence:"monthly"
+          trigger:"first-monday-06:00"
+          categories:"[Your spend categories]"
+          commodity-indices:"[Relevant indices for your categories]"
+          commodity-threshold:"8%"
+          alert-recipients:"CPO, Finance Director"
+
+Step 4; Generate the First Weekly Executive Brief​
+
+With agents configured, generate the first CPO/COO brief:
+
+/supply-chain-brief type:"weekly-executive"
+                    audience:"CPO, COO"
+                    format:"one page; RAG status per metric; one key risk this week;
+                            one recommended action; savings pipeline total"
+                    include:"vendor-health-digest, invoice-exception-summary,
+                             contract-calendar-critical, logistics-performance"
+
+
+Review the output. Does it contain:
+
+RAG status for each metric in your dashboard?
+A clearly identified single most important issue for CPO attention?
+A single recommended action with owner and deadline?
+Savings pipeline total?
+
+If the format does not match what your CPO would want to read, iterate the prompt with specific format adjustments.
+
+Step 5; Define the Escalation Criteria​
+
+The final and most important configuration step: what single supply chain event warrants interrupting the CPO on a Sunday evening?
+
+Define three specific trigger conditions. This example is from the spec: adjust to match your organisation's risk tolerance:
+
+Configure immediate mobile alert for:
+1. Any Tier 1 Strategic vendor OTD below 75% in any single week
+2. Financial distress news on any Strategic or Bottleneck vendor
+   (no backup supplier exists)
+3. Logistics disruption affecting >20% of weekly shipment volume
+
+
+Discuss: why 75% rather than 80%? Why >20% of volume rather than any disruption? The numbers reflect the point at which the operational impact is severe enough that the CPO needs to act: not just be informed at the next weekly review.
+
+Deliverable: Complete supply chain intelligence dashboard with all five agents configured and scheduled, first weekly executive brief produced and reviewed, escalation alert criteria defined and configured. You now have a procurement operating system that runs continuously.
+
+KEEP THIS CONFIGURATION
+
+The agent configurations you have built here feed directly into the Capstone (Lesson 14). Keep your Cowork session active: the agents will have run at least one cycle before you reach the capstone exercise.
+
+Try With AI​
+TRY WITH AI
+
+Reproduce: Apply what you just learned to a simple case.
+
+I want to configure the Vendor Health Monitor for a manufacturing
+company with the following Tier 1 and Tier 4 vendors:
+
+Tier 1 (Strategic):
+- AlphaSteel Corp — primary structural steel, £2.4M/year
+- PrecisionCast Ltd — custom-cast housings, £180K/year, sole-source
+
+Tier 4 (Bottleneck):
+- KIFTL — M8/M10 fasteners, £30K/year, sole-source, no backup
+
+OTD threshold: 92% for Tier 1, 88% for Tier 4
+Quality rejection threshold: 2% for all tiers
+Weekly digest: Monday 07:00
+Hot alert recipients: CPO and Procurement Manager
+
+Configure the agent and confirm: what will it monitor daily?
+What will it escalate immediately vs. include in the weekly digest?
+
+
+What you are learning: The Vendor Health Monitor's value is the distinction between real-time hot alerts (financial distress, OTD crisis) and weekly digest items (trend analysis, minor movements). Configuring that threshold: not just deploying the agent: is the critical decision.
+
+Adapt: Modify the scenario to match your organisation.
+
+Take the vendor classification register you built in Exercise 1
+(or create a realistic one for your industry). Identify your
+Tier 1 and Tier 4 vendors.
+
+Design the configuration for your Vendor Health Monitor:
+- Which vendors should be monitored?
+- What OTD and quality thresholds are appropriate for each?
+- What financial signals would constitute a hot alert vs. a
+  watch item?
+- Who should receive hot alerts vs. weekly digests?
+
+Explain your threshold decisions — why these numbers rather than
+higher or lower?
+
+
+What you are learning: Threshold design is a judgment call, not a calculation. Too sensitive and you create alert fatigue. Too insensitive and you get the signal too late. Understanding the operational consequences of a false negative (missed signal) versus a false positive (unnecessary alert) is the skill being developed here.
+
+Apply: Extend to a new situation the lesson didn't cover directly.
+
+Your Vendor Health Monitor sends a hot alert at 19:30 on a Friday:
+
+"AlphaSteel Corp (Tier 1, Strategic — £2.4M/year, primary structural
+steel) has been mentioned in a BBC News article reporting that their
+parent company, Meridian Materials Group, has entered administration.
+AlphaSteel Corp itself has not filed for insolvency. No official
+statement from AlphaSteel Corp."
+
+Single source. No corroborating data. The CPO is away for the weekend.
+
+Answer: (1) Should this be classified as a HOT ALERT or a WATCH item?
+(2) What immediate action, if any, should be taken tonight?
+(3) What should the Monday morning brief contain?
+(4) If you were the category manager receiving this alert at 19:30 —
+what do you do next?
+
+
+What you are learning: The Vendor Health Monitor will surface signals that require human judgment to interpret. A parent company entering administration does not automatically mean the subsidiary is affected: but it creates supply risk that must be assessed before Monday's production run begins. The agent's value is surfacing the signal; yours is knowing what to do with it.
+
+Flashcards Study Aid​
+
+Continue to Lesson 13: Vendor Exit Protocol →

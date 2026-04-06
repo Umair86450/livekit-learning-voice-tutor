@@ -1,0 +1,658 @@
+Multi-Stage Builds & Optimization
+
+Container images that work are good. Container images that work AND are small are great. This lesson teaches you why small images matter and how to achieve 70-85% size reduction through iterative optimization.
+
+When you build a Docker image for a Python service, you typically need compilers and development libraries during the build process. But in production, you only need the installed packages themselves. A naive Dockerfile includes everything---build tools, development headers, cache files---adding hundreds of megabytes of unnecessary weight.
+
+Multi-stage builds solve this elegantly. You perform dependency installation in a large build image, then copy only the artifacts you need into a minimal production image. Combined with UV (a Rust-based package manager that's 10-100x faster than pip) and Alpine base images, you can reduce a 1.2GB image to under 120MB.
+
+In this lesson, you'll containerize a Task API service---the same pattern you'll use for your Part 6 FastAPI agent. You'll start with a bloated Dockerfile and progressively optimize it through four iterations, measuring the size reduction at each step.
+
+Setup: Create the Task API Project​
+
+Create a fresh project with UV (30 seconds):
+
+uv init task-api-optimize && cd task-api-optimize
+uv add "fastapi[standard]"
+
+
+Now add your application code. Open main.py and replace its contents with:
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from datetime import datetime
+
+app = FastAPI(title="Task API", version="1.0.0")
+
+# In-memory task storage (production would use database)
+tasks: dict[str, dict] = {}
+
+class TaskCreate(BaseModel):
+    title: str
+    description: str | None = None
+    priority: int = 1
+
+class Task(BaseModel):
+    id: str
+    title: str
+    description: str | None
+    priority: int
+    created_at: datetime
+    completed: bool = False
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "service": "task-api"}
+
+@app.post("/tasks", response_model=Task)
+def create_task(task: TaskCreate):
+    task_id = f"task_{len(tasks) + 1}"
+    new_task = {
+        "id": task_id,
+        "title": task.title,
+        "description": task.description,
+        "priority": task.priority,
+        "created_at": datetime.now(),
+        "completed": False
+    }
+    tasks[task_id] = new_task
+    return new_task
+
+@app.get("/tasks")
+def list_tasks():
+    return list(tasks.values())
+
+@app.get("/tasks/{task_id}", response_model=Task)
+def get_task(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return tasks[task_id]
+
+@app.patch("/tasks/{task_id}/complete")
+def complete_task(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    tasks[task_id]["completed"] = True
+    return tasks[task_id]
+
+
+UV automatically created pyproject.toml with your dependencies. For Docker, we need a requirements.txt. Export it:
+
+uv pip compile pyproject.toml -o requirements.txt
+
+
+Verify your setup works:
+
+uv run fastapi dev main.py
+
+
+Visit http://localhost:8000/health to confirm the API responds. Press Ctrl+C to stop.
+
+Iteration 0: The Naive Dockerfile (~1.2GB)​
+
+Let's start with a Dockerfile that works but doesn't consider image size at all.
+
+Create Dockerfile.naive:
+
+FROM python:3.12
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY main.py .
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+Build this image and check its size:
+
+docker build -t task-api:naive -f Dockerfile.naive .
+
+
+Output:
+
+[+] Building 45.2s (9/9) FINISHED
+ => [internal] load build definition from Dockerfile.naive           0.0s
+ => [internal] load .dockerignore                                    0.0s
+ => [internal] load metadata for docker.io/library/python:3.12       1.2s
+ => [1/4] FROM docker.io/library/python:3.12                        28.3s
+ => [2/4] WORKDIR /app                                               0.1s
+ => [3/4] COPY requirements.txt .                                    0.0s
+ => [4/4] RUN pip install -r requirements.txt                       12.8s
+ => [5/5] COPY main.py .                                             0.0s
+ => exporting to image                                               2.7s
+
+
+Now check the image size:
+
+docker images task-api:naive
+
+
+Output:
+
+REPOSITORY   TAG     IMAGE ID       CREATED          SIZE
+task-api     naive   a1b2c3d4e5f6   15 seconds ago   1.21GB
+
+
+1.21GB for a simple Task API. That bloat comes from:
+
+Component	Approximate Size
+Full Python image (compilers, headers, build tools)	~900MB
+Pip cache (stored in /root/.cache/pip)	~150MB
+Development dependencies	~150MB
+
+None of that is needed to RUN the application. You only need the installed Python packages---maybe 100MB total.
+
+Iteration 1: Slim Base Image (~450MB)​
+
+The python:3.12 image is the full-featured version. Docker provides leaner alternatives:
+
+Base Image	Size	Contents
+python:3.12 (full)	~900MB	Build tools, compilers, development headers
+python:3.12-slim	~150MB	Essential runtime, no build tools
+python:3.12-alpine	~50MB	Minimal Linux, tiny footprint
+distroless/python3	~50MB	Only runtime, no shell or package manager
+
+Let's try slim first---it's the safest improvement with the least risk.
+
+Create Dockerfile.v1-slim:
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY main.py .
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+Note: We added --no-cache-dir to pip to avoid storing the download cache.
+
+Build and measure:
+
+docker build -t task-api:slim -f Dockerfile.v1-slim .
+
+
+Output:
+
+[+] Building 18.4s (9/9) FINISHED
+ => [internal] load metadata for docker.io/library/python:3.12-slim  0.8s
+ => [1/4] FROM docker.io/library/python:3.12-slim                    8.2s
+ => [4/4] RUN pip install --no-cache-dir -r requirements.txt         8.1s
+
+docker images task-api:slim
+
+
+Output:
+
+REPOSITORY   TAG    IMAGE ID       CREATED          SIZE
+task-api     slim   f6e5d4c3b2a1   8 seconds ago    458MB
+
+Version	Size	Reduction
+Naive	1.21GB	---
+Slim	458MB	62% smaller
+
+Progress: 62% reduction from a single change (base image). But we're still carrying pip overhead and could do better.
+
+Iteration 2: Multi-Stage Build with UV (~180MB)​
+
+Multi-stage builds use multiple FROM instructions in a single Dockerfile. Each stage can use a different base image. You build dependencies in a large stage, then copy only what you need into a small stage.
+
+We'll also introduce UV, a Rust-based Python package manager that's 10-100x faster than pip.
+
+Create Dockerfile.v2-multistage:
+
+# Stage 1: Build stage (install dependencies)
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# Install UV package manager (10-100x faster than pip)
+RUN pip install uv
+
+COPY requirements.txt .
+
+# UV installs packages to system Python
+# --system: install to system Python instead of virtual environment
+# --no-cache: don't store package cache
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# Stage 2: Runtime stage (only what's needed to run)
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Copy installed packages from builder stage
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Copy application code
+COPY main.py .
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+Let's understand what's happening:
+
+Stage 1 (builder):
+
+Starts with python:3.12-slim (has pip available)
+Installs UV package manager
+Installs application dependencies with UV
+This stage is used only for building; it's discarded when the build finishes
+
+Stage 2 (runtime):
+
+Starts with a fresh python:3.12-slim (clean slate)
+Copies only the installed packages from builder stage
+Copies application code
+Does NOT include UV, pip cache, or build artifacts
+This is the final image Docker keeps
+
+Build and measure:
+
+docker build -t task-api:multistage -f Dockerfile.v2-multistage .
+
+
+Output:
+
+[+] Building 12.8s (14/14) FINISHED
+ => [builder 1/4] FROM docker.io/library/python:3.12-slim             0.0s
+ => [builder 2/4] RUN pip install uv                                  3.2s
+ => [builder 3/4] COPY requirements.txt .                             0.0s
+ => [builder 4/4] RUN uv pip install --system --no-cache ...          1.8s  <-- Much faster!
+ => [stage-1 1/4] FROM docker.io/library/python:3.12-slim             0.0s
+ => [stage-1 2/4] COPY --from=builder /usr/local/lib/python...        0.4s
+ => [stage-1 3/4] COPY --from=builder /usr/local/bin ...              0.1s
+ => [stage-1 4/4] COPY main.py .                                      0.0s
+
+
+Notice how UV installed dependencies in 1.8 seconds vs pip's 8+ seconds.
+
+docker images task-api:multistage
+
+
+Output:
+
+REPOSITORY   TAG          IMAGE ID       CREATED          SIZE
+task-api     multistage   d3c2b1a0f9e8   5 seconds ago    182MB
+
+Version	Size	Reduction from Naive
+Naive	1.21GB	---
+Slim	458MB	62%
+Multi-stage	182MB	85%
+
+Progress: 85% reduction. The runtime image has no UV, no pip, no build tools---only the installed packages.
+
+Iteration 3: Alpine Base Image + UV (~120MB)​
+
+Alpine Linux is a minimal distribution (~5MB base) designed for containers. Combined with multi-stage builds and UV, we can achieve maximum size reduction.
+
+Create Dockerfile.v3-alpine:
+
+# Stage 1: Build stage with Alpine
+FROM python:3.12-alpine AS builder
+
+WORKDIR /app
+
+# Install UV package manager
+RUN pip install uv
+
+COPY requirements.txt .
+
+# Install dependencies with UV
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# Stage 2: Runtime stage with Alpine
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+ENV PYTHONUNBUFFERED=1
+
+COPY main.py .
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+Build and measure:
+
+docker build -t task-api:alpine -f Dockerfile.v3-alpine .
+
+
+Output:
+
+[+] Building 15.2s (14/14) FINISHED
+ => [builder 1/4] FROM docker.io/library/python:3.12-alpine           2.1s
+ => [builder 2/4] RUN pip install uv                                  4.8s
+ => [builder 3/4] COPY requirements.txt .                             0.0s
+ => [builder 4/4] RUN uv pip install --system --no-cache ...          2.4s
+ => [stage-1 1/4] FROM docker.io/library/python:3.12-alpine           0.0s
+ => [stage-1 2/4] COPY --from=builder /usr/local/lib/python...        0.3s
+ => [stage-1 3/4] COPY --from=builder /usr/local/bin ...              0.1s
+ => [stage-1 4/4] COPY main.py .                                      0.0s
+
+docker images task-api:alpine
+
+
+Output:
+
+REPOSITORY   TAG      IMAGE ID       CREATED          SIZE
+task-api     alpine   e4f5a6b7c8d9   4 seconds ago    118MB
+
+Version	Size	Reduction from Naive
+Naive	1.21GB	---
+Slim	458MB	62%
+Multi-stage	182MB	85%
+Alpine + UV	118MB	90%
+
+Progress: 90% reduction. From 1.21GB to 118MB.
+
+Iteration 4: Layer Optimization (~115MB)​
+
+Docker builds images in layers. Each RUN instruction creates a new layer. By combining commands and cleaning up in the same layer, we can squeeze out a few more megabytes.
+
+Create Dockerfile.v4-optimized:
+
+# Stage 1: Build stage
+FROM python:3.12-alpine AS builder
+
+WORKDIR /app
+
+# Single RUN: install UV + dependencies + cleanup
+RUN pip install uv && \
+    pip cache purge
+
+COPY requirements.txt .
+
+RUN uv pip install --system --no-cache -r requirements.txt && \
+    find /usr/local -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local -type f -name '*.pyc' -delete 2>/dev/null || true
+
+# Stage 2: Runtime stage
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+# Copy only necessary artifacts
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+ENV PYTHONUNBUFFERED=1
+
+COPY main.py .
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+Optimizations applied:
+
+Combined RUN commands to reduce layer count
+Removed __pycache__ directories (bytecode cache)
+Removed .pyc files
+Purged pip cache after installing UV
+
+Build and measure:
+
+docker build -t task-api:optimized -f Dockerfile.v4-optimized .
+
+
+Output:
+
+[+] Building 14.8s (14/14) FINISHED
+ => [builder 4/4] RUN uv pip install --system --no-cache ...          2.6s
+ => exporting to image                                                0.2s
+
+docker images task-api:optimized
+
+
+Output:
+
+REPOSITORY   TAG        IMAGE ID       CREATED          SIZE
+task-api     optimized  f7g8h9i0j1k2   3 seconds ago    115MB
+
+Final Size Comparison​
+
+Let's see all versions side by side:
+
+docker images task-api --format "table {{.Tag}}\t{{.Size}}"
+
+
+Output:
+
+TAG          SIZE
+optimized    115MB
+alpine       118MB
+multistage   182MB
+slim         458MB
+naive        1.21GB
+
+Version	Size	Technique	Reduction
+Naive	1.21GB	Full Python image + pip	Baseline
+Slim	458MB	python:3.12-slim	62%
+Multi-stage	182MB	Separate build/runtime + UV	85%
+Alpine	118MB	Alpine base + UV	90%
+Optimized	115MB	Layer cleanup + cache purge	90.5%
+
+Result: 1.21GB reduced to 115MB (90.5% reduction)
+
+Analyzing Layers with docker history​
+
+The docker history command shows what each layer contains:
+
+docker history task-api:optimized
+
+
+Output:
+
+IMAGE          CREATED         CREATED BY                                      SIZE
+f7g8h9i0j1k2   2 minutes ago   CMD ["uvicorn" "main:app" "--host" "0.0.0...   0B
+<missing>      2 minutes ago   EXPOSE 8000                                     0B
+<missing>      2 minutes ago   COPY main.py . # buildkit                       1.52kB
+<missing>      2 minutes ago   ENV PYTHONUNBUFFERED=1                          0B
+<missing>      2 minutes ago   COPY /usr/local/bin /usr/local/bin # bui...     1.2MB
+<missing>      2 minutes ago   COPY /usr/local/lib/python3.12/site-pack...     58.4MB
+<missing>      2 minutes ago   WORKDIR /app                                    0B
+<missing>      3 weeks ago     CMD ["python3"]                                 0B
+<missing>      3 weeks ago     RUN /bin/sh -c set -eux;   apk add --no-...    1.85MB
+<missing>      3 weeks ago     ENV PYTHON_VERSION=3.12.8                       0B
+...
+
+
+The SIZE column shows the contribution of each layer:
+
+Application code: ~1.5KB
+Installed binaries (uvicorn, etc.): ~1.2MB
+Installed packages (site-packages): ~58MB
+Python Alpine base: ~55MB (shown in earlier layers)
+
+If you see an unexpectedly large layer, that's where to focus optimization efforts.
+
+Base Image Tradeoffs​
+Base Image	Size	Pros	Cons	Use When
+python:3.12-slim	~150MB	Most compatible, safer	Larger than Alpine	Default choice; C extensions work out of box
+python:3.12-alpine	~50MB	Smallest, fast builds	Some packages need compilation	Size-critical deployments, pure Python
+distroless/python3	~50MB	Maximum security, no shell	Can't debug interactively	Production security-critical services
+
+For this chapter: Alpine is excellent for AI services that don't require complex C dependencies. Your Task API (and most FastAPI services) work perfectly with Alpine.
+
+When Alpine fails: If you need numpy, pandas, or other packages with C extensions that aren't available as Alpine wheels, fall back to slim.
+
+Handling Large Model Files​
+
+A critical consideration for AI services: never embed large model files in Docker images.
+
+Wrong approach (image becomes 4GB+):
+
+# DON'T DO THIS
+COPY models/model.bin /app/models/
+
+
+Correct approach (use volume mounts):
+
+# Image stays small, models loaded at runtime
+# No COPY for model files
+
+
+Run with volume mount:
+
+docker run -v $(pwd)/models:/app/models task-api:optimized
+
+
+Output:
+
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+
+
+Your application code loads models from the mounted directory:
+
+from pathlib import Path
+
+models_dir = Path("/app/models")
+model_path = models_dir / "model.bin"
+
+@app.on_event("startup")
+async def load_model():
+    if model_path.exists():
+        print(f"Loading model from {model_path}")
+        # Load your model here
+
+
+Benefits:
+
+Image stays small (~115MB)
+Models can be updated without rebuilding
+Same model can be shared across container instances
+Model storage handled by Kubernetes PersistentVolumes in production
+The Production Pattern​
+
+Here's the pattern to apply to any Python AI service:
+
+# Stage 1: Build
+FROM python:3.12-alpine AS builder
+WORKDIR /app
+
+# Install UV for fast dependency installation
+RUN pip install uv
+
+COPY requirements.txt .
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# Stage 2: Runtime
+FROM python:3.12-alpine
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+ENV PYTHONUNBUFFERED=1
+
+# Copy application code (NOT model files)
+COPY . .
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+When to deviate:
+
+Situation	Adjustment
+C extensions fail on Alpine	Use python:3.12-slim instead
+Need system libraries	Add RUN apk add --no-cache [packages] in builder
+Security-critical production	Consider distroless/python3
+Debugging required	Keep Alpine (has shell) or slim
+Try With AI​
+
+Now apply what you've learned to your own service.
+
+Prompt 1: Analyze Your Current Dockerfile
+
+I have a Dockerfile for a FastAPI service. Analyze it for size optimization opportunities:
+
+[paste your Dockerfile here]
+
+Questions:
+1. What's the estimated image size with current base image?
+2. Would multi-stage builds help? Why or why not?
+3. What specific changes would achieve 70%+ size reduction?
+
+
+What you're learning: How to evaluate an existing Dockerfile against optimization criteria. AI can identify which techniques apply to your specific dependencies.
+
+Prompt 2: Generate Optimized Dockerfile
+
+Create a multi-stage Dockerfile for my Python service with these requirements:
+
+Dependencies: [list your requirements.txt]
+Entry point: uvicorn main:app --host 0.0.0.0 --port 8000
+Target: Under 150MB final image
+Constraints:
+- Use UV package manager (not pip)
+- Use Alpine base image
+- No model files in image (volume mount)
+
+Include comments explaining each optimization.
+
+
+What you're learning: How to specify constraints clearly so AI generates a Dockerfile matching your exact requirements. The constraints prevent AI from defaulting to less optimized patterns.
+
+Prompt 3: Debug Size Issues
+
+My Docker image is larger than expected. Here's my Dockerfile and the output of docker history:
+
+[paste Dockerfile]
+
+docker history output:
+[paste docker history output]
+
+Questions:
+1. Which layer is contributing the most unexpected size?
+2. What's likely included that shouldn't be?
+3. How would you modify the Dockerfile to fix this?
+
+
+What you're learning: How to use docker history output to diagnose size problems. AI can interpret layer contributions and suggest targeted fixes.
+
+Verify your learning by building an optimized image for your Part 6 FastAPI agent and measuring the size reduction. Target: 70%+ reduction from a naive Dockerfile.
+
+Reflect on Your Skill​
+
+You built a docker-deployment skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my docker-deployment skill, generate a multi-stage Dockerfile for image size optimization.
+Does my skill generate separate build and runtime stages with proper COPY --from directives?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include multi-stage build patterns?
+Did it handle UV package manager and Alpine base images?
+Improve Your Skill​
+
+If you found gaps:
+
+My docker-deployment skill is missing image optimization techniques.
+Update it to include multi-stage builds, UV package manager usage, Alpine base images, and layer cache optimization strategies.

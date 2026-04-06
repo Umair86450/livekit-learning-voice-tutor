@@ -1,0 +1,684 @@
+Writing Your First Dockerfile
+
+In Lesson 2, you pulled images from Docker Hub and ran containers. Those images were built by someone else. Now you'll write your own blueprint—a Dockerfile—and build a custom image for your Task API.
+
+By the end of this lesson, you'll understand exactly what happens when Docker reads each line of your Dockerfile, why instruction order matters for build speed, and how to create images that build fast and run reliably.
+
+Setup: Create the Task API Project​
+
+You'll containerize the In-Memory Task API from Chapter 70. Let's create it fresh using UV:
+
+uv init task-api && cd task-api
+
+
+Output:
+
+Initialized project `task-api` at `/Users/you/task-api`
+
+
+Add FastAPI with all standard dependencies:
+
+uv add "fastapi[standard]"
+
+
+Output:
+
+Resolved 23 packages in 156ms
+Prepared 23 packages in 1.2s
+Installed 23 packages in 89ms
+ + annotated-types==0.7.0
+ + anyio==4.7.0
+ + click==8.1.8
+ + fastapi==0.115.6
+ + uvicorn==0.34.0
+ ...
+
+
+Now replace the contents of main.py with the Task API:
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI(title="Task API")
+
+
+class Task(BaseModel):
+    id: int | None = None
+    title: str
+    completed: bool = False
+
+
+tasks: list[Task] = []
+next_id = 1
+
+
+@app.post("/tasks", response_model=Task)
+def create_task(task: Task) -> Task:
+    global next_id
+    task.id = next_id
+    next_id += 1
+    tasks.append(task)
+    return task
+
+
+@app.get("/tasks", response_model=list[Task])
+def list_tasks() -> list[Task]:
+    return tasks
+
+
+@app.get("/tasks/{task_id}", response_model=Task)
+def get_task(task_id: int) -> Task:
+    for task in tasks:
+        if task.id == task_id:
+            return task
+    raise HTTPException(status_code=404, detail="Task not found")
+
+
+@app.get("/health")
+def health_check() -> dict:
+    return {"status": "healthy"}
+
+
+Test that it runs locally:
+
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+
+
+Output:
+
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+
+Open a new terminal and verify:
+
+curl http://localhost:8000/health
+
+
+Output:
+
+{"status":"healthy"}
+
+
+Stop the server with Ctrl+C. Your API works locally—now let's containerize it.
+
+What Is a Dockerfile?​
+
+A Dockerfile is a text file containing instructions that tell Docker how to build an image. Think of it as a recipe:
+
+A recipe lists ingredients and steps to make a dish
+A Dockerfile lists a base environment and steps to create an image
+
+When you run docker build, Docker reads your Dockerfile line by line, executing each instruction to construct an image.
+
+What a Dockerfile Produces​
+Dockerfile (your instructions)
+        ↓
+    docker build
+        ↓
+    Image (frozen environment)
+        ↓
+    docker run
+        ↓
+    Container (running instance)
+
+
+The Dockerfile doesn't run your application. It creates an image—a frozen snapshot containing your code, dependencies, and configuration. When you docker run that image, you get a live container.
+
+How Docker Reads a Dockerfile​
+
+Docker processes your Dockerfile top to bottom, one instruction at a time:
+
+Each instruction creates a layer (a snapshot of the filesystem at that point)
+Layers stack on top of each other
+The final stack of layers = your image
+Docker caches layers—if an instruction hasn't changed, Docker reuses the cached layer
+
+This layered approach is why Docker builds are fast after the first time: unchanged layers don't rebuild.
+
+The Six Essential Instructions​
+Instruction	Purpose
+FROM	Start from a base image (the foundation)
+WORKDIR	Set the working directory inside the container
+COPY	Copy files from your machine into the image
+RUN	Execute a command during build (install packages)
+EXPOSE	Document which port the application uses
+CMD	Define the default command when container starts
+
+You'll use all six in your Dockerfile. Let's write it instruction by instruction.
+
+Writing the Dockerfile: Line by Line​
+
+Create a new file named Dockerfile (no extension):
+
+touch Dockerfile
+
+
+Open it in your editor. We'll build it one instruction at a time.
+
+Instruction 1: FROM​
+
+Every Dockerfile starts with FROM. This specifies your base image—the starting environment.
+
+Add this line:
+
+FROM python:3.12-slim
+
+
+What this does:
+
+FROM tells Docker: "Start with this pre-built image"
+python:3.12-slim is an official Python image with minimal OS (~130 MB)
+The image comes from Docker Hub (where you pulled nginx:alpine in Lesson 2)
+
+Why slim? The slim variant includes only what's needed to run Python. The full python:3.12 image is ~900 MB with build tools you don't need for this application.
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+Instruction 2: Install UV Package Manager​
+
+UV is a modern Python package manager—10-100x faster than pip. We'll copy it from its official image:
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+
+What this does:
+
+COPY --from= is a multi-stage copy—it pulls binaries from another image
+ghcr.io/astral-sh/uv:latest is UV's official image
+/uv and /uvx are the UV binaries
+/bin/ places them in the system PATH
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+Instruction 3: WORKDIR​
+
+Set where your application will live inside the container:
+
+WORKDIR /app
+
+
+What this does:
+
+Creates /app directory if it doesn't exist
+Sets it as the working directory for all subsequent instructions
+All COPY and RUN commands now execute relative to /app
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+Instruction 4: COPY Dependencies​
+
+Copy your dependency file into the image:
+
+COPY pyproject.toml .
+
+
+What this does:
+
+Copies pyproject.toml from your machine (the build context)
+Places it in /app (current WORKDIR)
+The . means "current directory inside the container"
+
+Why copy this first? Layer caching. Dependencies change rarely; code changes often. By copying dependencies first, Docker can cache the installed packages layer and reuse it when only your code changes.
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml .
+
+Instruction 5: RUN (Install Packages)​
+
+Now install the dependencies:
+
+RUN uv sync --no-dev
+
+
+What this does:
+
+RUN executes a command during image build
+uv sync reads pyproject.toml and installs all dependencies
+--no-dev skips development dependencies (pytest, mypy, etc.)
+Creates a layer containing all installed packages
+
+Important distinction:
+
+RUN executes during build (creates a layer in the image)
+CMD executes when container starts (doesn't create a layer)
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN uv sync --no-dev
+
+Instruction 6: COPY Application Code​
+
+Now copy your actual application:
+
+COPY main.py .
+
+
+What this does:
+
+Copies main.py into /app
+This is the code that changes frequently
+
+Why copy this AFTER dependencies? When you edit main.py and rebuild:
+
+Docker sees that pyproject.toml hasn't changed
+Docker reuses the cached layer with installed packages
+Only this COPY main.py layer rebuilds
+Build time: ~1 second instead of 30+ seconds
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN uv sync --no-dev
+
+COPY main.py .
+
+Instruction 7: EXPOSE​
+
+Document which port your application uses:
+
+EXPOSE 8000
+
+
+What this does:
+
+Documents that the container listens on port 8000
+Does NOT actually open the port—that happens with -p at runtime
+Useful as documentation and for orchestrators like Kubernetes
+
+Your Dockerfile so far:
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN uv sync --no-dev
+
+COPY main.py .
+
+EXPOSE 8000
+
+Instruction 8: CMD​
+
+Finally, tell Docker what command to run when the container starts:
+
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+What this does:
+
+CMD specifies the default startup command
+uv run executes in the UV-managed environment
+uvicorn main:app starts the ASGI server with your FastAPI app
+--host 0.0.0.0 binds to all interfaces (required for container networking)
+--port 8000 matches the EXPOSE instruction
+
+Why 0.0.0.0? Inside a container, localhost (127.0.0.1) is isolated. Using 0.0.0.0 makes the service accessible when you map ports with -p.
+
+Complete Dockerfile​
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN uv sync --no-dev
+
+COPY main.py .
+
+EXPOSE 8000
+
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+Save the file.
+
+Building Your Image​
+
+Now build an image from your Dockerfile:
+
+docker build -t task-api:v1 .
+
+
+What the flags mean:
+
+docker build reads the Dockerfile and builds an image
+-t task-api:v1 tags the image with name task-api and version v1
+. specifies the build context (current directory)
+
+Output:
+
+[+] Building 45.2s (10/10) FINISHED
+ => [internal] load build definition from Dockerfile
+ => [internal] load .dockerignore
+ => [1/5] FROM docker.io/library/python:3.12-slim
+ => [2/5] COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ => [3/5] WORKDIR /app
+ => [4/5] COPY pyproject.toml .
+ => [5/5] RUN uv sync --no-dev
+Resolved 23 packages in 89ms
+Installed 23 packages in 156ms
+ + fastapi==0.115.6
+ + uvicorn==0.34.0
+ ...
+ => [6/5] COPY main.py .
+ => exporting to image
+ => => naming to docker.io/library/task-api:v1
+
+
+Notice each step corresponds to an instruction in your Dockerfile. Docker executed them top to bottom, creating layers.
+
+Verify the image exists:
+
+docker images | grep task-api
+
+
+Output:
+
+task-api    v1    a1b2c3d4e5f6    30 seconds ago    195MB
+
+
+Your image is ~195 MB—containing Python, UV, FastAPI, Uvicorn, and your application code.
+
+Running Your Container​
+
+Start a container from your image:
+
+docker run -p 8000:8000 task-api:v1
+
+
+What -p 8000:8000 does:
+
+Maps port 8000 on your machine (left) to port 8000 in the container (right)
+Your machine's port 8000 → container's port 8000
+Now localhost:8000 on your machine reaches the container
+
+Output:
+
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+
+Open a new terminal and test:
+
+curl http://localhost:8000/health
+
+
+Output:
+
+{"status":"healthy"}
+
+
+Create a task:
+
+curl -X POST http://localhost:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Learn Docker"}'
+
+
+Output:
+
+{"id":1,"title":"Learn Docker","completed":false}
+
+
+Your containerized Task API works! Stop it with Ctrl+C.
+
+The .dockerignore File​
+
+When you run docker build ., Docker sends your entire directory to the build context. If you have:
+
+.venv/ (500+ MB virtual environment)
+__pycache__/ (bytecode)
+.git/ (repository history)
+.env (secrets)
+
+Docker wastes time processing these, and worse—secrets could end up in your image.
+
+Create .dockerignore:
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# UV cache
+.uv/
+
+# IDE files
+.idea/
+.vscode/
+
+# Git
+.git/
+.gitignore
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS files
+.DS_Store
+
+
+Rebuild to verify it works:
+
+docker build -t task-api:v2 .
+
+
+The build should be faster since Docker isn't processing excluded files.
+
+Layer Caching in Action​
+
+Edit main.py to add a version endpoint:
+
+@app.get("/version")
+def get_version() -> dict:
+    return {"version": "1.0.0"}
+
+
+Rebuild:
+
+docker build -t task-api:v3 .
+
+
+Output:
+
+[+] Building 1.2s (10/10) FINISHED
+ => CACHED [1/5] FROM docker.io/library/python:3.12-slim
+ => CACHED [2/5] COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ => CACHED [3/5] WORKDIR /app
+ => CACHED [4/5] COPY pyproject.toml .
+ => CACHED [5/5] RUN uv sync --no-dev
+ => [6/5] COPY main.py .
+ => exporting to image
+
+
+Notice CACHED for steps 1-5. Docker reused those layers because pyproject.toml didn't change. Only the COPY main.py step ran.
+
+Build time: ~1 second instead of 45 seconds.
+
+This is why instruction order matters:
+
+Frequent changes (your code) go at the bottom
+Rare changes (dependencies) go near the top
+Running with Options​
+Different Host Port​
+
+Run on port 9000 instead:
+
+docker run -p 9000:8000 task-api:v3
+
+
+Test:
+
+curl http://localhost:9000/health
+
+Environment Variables​
+
+Pass configuration without changing the image:
+
+docker run -p 8000:8000 -e LOG_LEVEL=debug task-api:v3
+
+
+Your application reads os.environ["LOG_LEVEL"] at runtime.
+
+Background Mode​
+
+Run without blocking your terminal:
+
+docker run -d -p 8000:8000 --name my-api task-api:v3
+
+
+Flags:
+
+-d runs detached (background)
+--name my-api gives it a memorable name
+
+Check status:
+
+docker ps
+
+
+Stop and remove:
+
+docker stop my-api && docker rm my-api
+
+Common Build Errors​
+"COPY: source file does not exist"​
+COPY pyproject.toml .
+COPY: source file does not exist
+
+
+Cause: File missing in build context. Fix: Verify the file exists: ls pyproject.toml
+
+"Port already in use"​
+Bind for 0.0.0.0:8000 failed: port is already allocated
+
+
+Cause: Another process using port 8000. Fix: Use different port: docker run -p 9000:8000 task-api:v1
+
+Container Exits Immediately​
+
+Run without -d to see the error:
+
+docker run task-api:v1
+
+
+Or check logs:
+
+docker logs $(docker ps -lq)
+
+Try With AI​
+Prompt 1: Diagnose a Slow Build​
+My Docker builds take 60 seconds every time I change my code. Here's my
+Dockerfile:
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+CMD ["python", "main.py"]
+
+What's wrong with my layer ordering? How would you fix it?
+
+
+What you're learning: Analyzing layer cache invalidation—understanding how instruction order affects build performance.
+
+Prompt 2: Handle Build Dependencies​
+My Dockerfile build fails with:
+
+error: Failed to build `pydantic-core==2.27.2`
+  Caused by: Failed to build wheel
+
+The package needs a Rust compiler. I'm using python:3.12-slim. What are my
+options? Should I use a larger base image or try multi-stage builds?
+
+
+What you're learning: Troubleshooting native compilation failures—a common challenge with Python packages that have binary dependencies.
+
+Prompt 3: Design for Your Own API​
+I'm building a [describe your API]. Based on the Task API Dockerfile pattern,
+help me design my Dockerfile. Ask me:
+1. What dependencies does it need?
+2. Does it require any system packages?
+3. What environment variables does it use?
+4. Does it need to persist data?
+
+Then write a Dockerfile with comments explaining each choice.
+
+
+What you're learning: Applying Dockerfile patterns to your own applications—moving from following instructions to making design decisions.
+
+Safety Note​
+
+Never include secrets (API keys, passwords, database credentials) in your Dockerfile or image. Use environment variables (-e flag) or Docker secrets at runtime. Images may be shared or pushed to registries where secrets would be exposed.
+
+Reflect on Your Skill​
+
+You built a docker-deployment skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my docker-deployment skill, generate a Dockerfile for a FastAPI
+application. Does it:
+1. Use proper instruction ordering for layer caching?
+2. Include UV for fast package installation?
+3. Set WORKDIR and use 0.0.0.0 for the host?
+
+Identify Gaps​
+Did your skill produce valid Dockerfiles?
+Did it handle layer caching correctly?
+Did it include .dockerignore patterns?
+Improve Your Skill​
+
+If you found gaps:
+
+My docker-deployment skill needs better Dockerfile generation. Update it to:
+1. Order instructions for optimal layer caching
+2. Use UV instead of pip
+3. Generate .dockerignore files
+4. Document each instruction with comments

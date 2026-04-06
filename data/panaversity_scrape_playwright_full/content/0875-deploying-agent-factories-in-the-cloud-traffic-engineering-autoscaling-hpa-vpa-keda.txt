@@ -1,0 +1,869 @@
+Autoscaling with HPA, VPA & KEDA
+
+You deployed your Task API with 3 replicas. At 2 AM, all three pods sit idle, consuming resources and costing money. At noon, traffic spikes and 3 replicas cannot keep up—users see latency, requests queue, and eventually fail. Fixed replica counts waste money during quiet periods and fail during busy ones.
+
+Autoscaling matches capacity to demand automatically. Kubernetes provides Horizontal Pod Autoscaler (HPA) for scaling replica counts based on metrics. Vertical Pod Autoscaler (VPA) right-sizes individual pods. For event-driven workloads—like AI agents processing queue messages—KEDA enables scaling based on queue depth, Prometheus metrics, or even scaling to zero when idle.
+
+This lesson teaches you to configure HPA for CPU-based scaling, understand VPA for resource optimization, install KEDA for event-driven autoscaling, and implement scale-to-zero for cost efficiency. By the end, your services will scale up when needed and scale down (or to zero) when idle.
+
+How Autoscaling Works in Kubernetes​
+
+Kubernetes autoscaling operates through a control loop. A controller periodically checks metrics, compares them to targets, and adjusts replicas or resources accordingly.
+
+The Three Autoscaling Approaches​
+Approach	What It Scales	Based On	Best For
+HPA	Replica count	CPU, memory, custom metrics	Request-based workloads
+VPA	Pod resources (CPU/memory)	Historical usage	Right-sizing pods
+KEDA	Replica count (including to zero)	Any metric source	Event-driven, queues, serverless
+When Each Approach Applies​
+                     ┌─────────────────────────────────────────────┐
+                     │              Scaling Decision               │
+                     └─────────────────────────────────────────────┘
+                                          │
+              ┌───────────────────────────┼───────────────────────────┐
+              │                           │                           │
+              ▼                           ▼                           ▼
+    ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+    │       HPA       │         │       VPA       │         │      KEDA       │
+    │  More replicas  │         │  Bigger pods    │         │ Event-driven    │
+    │  Same pod size  │         │  Same replica   │         │ Scale to zero   │
+    └─────────────────┘         └─────────────────┘         └─────────────────┘
+
+Horizontal Pod Autoscaler (HPA)​
+
+HPA scales the number of pod replicas based on observed metrics. When CPU utilization exceeds 80%, HPA adds more pods. When utilization drops, HPA removes pods.
+
+Prerequisites: Metrics Server​
+
+HPA requires metrics-server to provide CPU and memory metrics:
+
+# Check if metrics-server is installed
+kubectl get deployment metrics-server -n kube-system
+
+
+Output (if installed):
+
+NAME             READY   UP-TO-DATE   AVAILABLE   AGE
+metrics-server   1/1     1            1           30d
+
+
+If not installed:
+
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+
+Output:
+
+serviceaccount/metrics-server created
+clusterrole.rbac.authorization.k8s.io/system:aggregated-metrics-reader created
+clusterrole.rbac.authorization.k8s.io/system:metrics-server created
+rolebinding.rbac.authorization.k8s.io/metrics-server-auth-reader created
+clusterrolebinding.rbac.authorization.k8s.io/metrics-server:system:auth-delegator created
+clusterrolebinding.rbac.authorization.k8s.io/system:metrics-server created
+service/metrics-server created
+deployment.apps/metrics-server created
+apiservice.apiregistration.k8s.io/v1beta1.metrics.k8s.io created
+
+Creating an HPA​
+
+Define HPA for the Task API:
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-api-hpa
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+
+Apply and verify:
+
+kubectl apply -f task-api-hpa.yaml
+kubectl get hpa -n task-api
+
+
+Output:
+
+NAME           REFERENCE             TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+task-api-hpa   Deployment/task-api   23%/70%   2         10        2          30s
+
+
+The TARGETS column shows current utilization (23%) versus target (70%).
+
+Understanding HPA Fields​
+Field	Purpose
+scaleTargetRef	The Deployment (or other workload) to scale
+minReplicas	Never scale below this count
+maxReplicas	Never scale above this count
+metrics	What to measure and target values
+averageUtilization	Target percentage of resource limit
+Scaling Based on Multiple Metrics​
+
+Scale on both CPU and memory:
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-api-hpa-multi
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+
+HPA scales based on whichever metric requires more replicas.
+
+Observing HPA Behavior​
+
+Generate load and watch scaling:
+
+# In terminal 1: Watch HPA
+kubectl get hpa -n task-api -w
+
+# In terminal 2: Generate load
+kubectl run -i --tty load-generator --rm --image=busybox:1.28 --restart=Never -- /bin/sh -c "while sleep 0.01; do wget -q -O- http://task-api.task-api.svc.cluster.local:8080/api/tasks; done"
+
+
+Output (terminal 1):
+
+NAME           REFERENCE             TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+task-api-hpa   Deployment/task-api   23%/70%   2         10        2          5m
+task-api-hpa   Deployment/task-api   68%/70%   2         10        2          6m
+task-api-hpa   Deployment/task-api   85%/70%   2         10        3          7m
+task-api-hpa   Deployment/task-api   72%/70%   2         10        4          8m
+
+
+HPA detected CPU exceeding 70% and scaled from 2 to 4 replicas.
+
+HPA Scaling Behavior Configuration​
+
+Control how aggressively HPA scales:
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-api-hpa-tuned
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+
+
+Behavior settings:
+
+Setting	Effect
+scaleUp.stabilizationWindowSeconds	Wait before scaling up again
+scaleUp.policies.type: Percent	Scale up by percentage of current
+scaleDown.stabilizationWindowSeconds	Wait before scaling down (avoid flapping)
+scaleDown.policies	Scale down gradually (50% per minute)
+Vertical Pod Autoscaler (VPA)​
+
+VPA adjusts CPU and memory requests for pods based on historical usage. Instead of adding more pods, VPA makes existing pods bigger (or smaller).
+
+When VPA Helps​
+Scenario	VPA Value
+Pods frequently OOMKilled	VPA recommends higher memory
+Pods use 10% of requested CPU	VPA recommends lower requests
+Initial resource sizing unknown	VPA provides data-driven recommendations
+Installing VPA​
+# Clone VPA repository
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler
+
+# Install VPA components
+./hack/vpa-up.sh
+
+
+Output:
+
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalers.autoscaling.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalercheckpoints.autoscaling.k8s.io created
+deployment.apps/vpa-recommender created
+deployment.apps/vpa-updater created
+deployment.apps/vpa-admission-controller created
+
+Creating a VPA​
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: task-api-vpa
+  namespace: task-api
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  updatePolicy:
+    updateMode: "Off"  # Start with recommendations only
+  resourcePolicy:
+    containerPolicies:
+      - containerName: task-api
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 2
+          memory: 2Gi
+
+
+Update modes:
+
+Mode	Behavior
+Off	Recommendations only (no changes)
+Initial	Set resources on pod creation only
+Auto	Update resources (requires pod restart)
+Viewing VPA Recommendations​
+kubectl get vpa task-api-vpa -n task-api -o yaml
+
+
+Output (recommendations section):
+
+status:
+  recommendation:
+    containerRecommendations:
+      - containerName: task-api
+        lowerBound:
+          cpu: 25m
+          memory: 262144k
+        target:
+          cpu: 50m
+          memory: 524288k
+        upperBound:
+          cpu: 200m
+          memory: 1Gi
+
+
+This tells you the pod currently requests too much (or too little) resources. The target is VPA's recommended setting.
+
+VPA Limitations​
+
+VPA cannot coexist with HPA on CPU/memory. Both try to control the same resources.
+
+Solutions:
+
+Use VPA for recommendations only (updateMode: Off)
+Use HPA for replica scaling + VPA for right-sizing during deployments
+Use KEDA (which can work alongside VPA)
+KEDA: Event-Driven Autoscaling​
+
+KEDA (Kubernetes Event-Driven Autoscaling) extends HPA with support for any metric source and scale-to-zero capability. KEDA is essential for:
+
+Queue-based workers (Kafka, RabbitMQ, SQS)
+Cron-based scaling (scale up at 9 AM, down at 6 PM)
+Prometheus metrics (custom application metrics)
+Cost optimization (scale to zero when idle)
+How KEDA Works​
+┌─────────────────────────────────────────────────────────────────────┐
+│                           KEDA Architecture                         │
+└─────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────────────┐
+  │  Prometheus  │     │    Kafka     │     │   Cloud Queues       │
+  │   Metrics    │     │    Topics    │     │   (SQS, Pub/Sub)     │
+  └──────┬───────┘     └──────┬───────┘     └──────────┬───────────┘
+         │                    │                        │
+         └────────────────────┼────────────────────────┘
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │  KEDA Operator   │
+                    │   (watches       │
+                    │   ScaledObjects) │
+                    └────────┬─────────┘
+                             │
+               ┌─────────────┼─────────────┐
+               │             │             │
+               ▼             ▼             ▼
+         ┌──────────┐  ┌──────────┐  ┌──────────┐
+         │   HPA    │  │   HPA    │  │   HPA    │
+         │ (KEDA-   │  │ (KEDA-   │  │ (KEDA-   │
+         │ managed) │  │ managed) │  │ managed) │
+         └──────────┘  └──────────┘  └──────────┘
+
+
+KEDA creates and manages HPAs automatically based on ScaledObject definitions.
+
+Installing KEDA​
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+helm install keda kedacore/keda --namespace keda --create-namespace
+
+
+Output:
+
+NAME: keda
+NAMESPACE: keda
+STATUS: deployed
+REVISION: 1
+
+
+Verify installation:
+
+kubectl get pods -n keda
+
+
+Output:
+
+NAME                                               READY   STATUS    RESTARTS   AGE
+keda-admission-webhooks-5f4c6d8f7-xxxxx           1/1     Running   0          60s
+keda-operator-7b9c4d6f5-xxxxx                     1/1     Running   0          60s
+keda-operator-metrics-apiserver-6c8f5d4b7-xxxxx   1/1     Running   0          60s
+
+ScaledObject: The Core KEDA Resource​
+
+ScaledObject tells KEDA what to scale and based on which metrics:
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: task-api-scaledobject
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    name: task-api
+  minReplicaCount: 0          # Scale to zero!
+  maxReplicaCount: 10
+  pollingInterval: 15         # Check metrics every 15 seconds
+  cooldownPeriod: 300         # Wait 5 minutes before scaling down
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: http_requests_total
+        query: sum(rate(http_requests_total{service="task-api"}[2m]))
+        threshold: "100"
+
+
+Apply and verify:
+
+kubectl apply -f task-api-scaledobject.yaml
+kubectl get scaledobject -n task-api
+
+
+Output:
+
+NAME                    SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   TRIGGERS     AUTHENTICATION   READY   ACTIVE   AGE
+task-api-scaledobject   apps/v1.Deployment   task-api          0     10    prometheus                    True    True     30s
+
+Understanding ScaledObject Fields​
+Field	Purpose
+scaleTargetRef	Deployment to scale
+minReplicaCount	Minimum pods (0 = scale to zero)
+maxReplicaCount	Maximum pods
+pollingInterval	How often to check metrics (seconds)
+cooldownPeriod	How long to wait before scaling down
+triggers	What metrics drive scaling
+Prometheus Scaler​
+
+The Prometheus scaler queries your Prometheus server for custom metrics—request rate, queue depth, latency percentiles, or any metric your application exposes.
+
+Scaling Based on Request Rate​
+
+Scale based on requests per second:
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: task-api-request-rate
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    name: task-api
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: task_api_requests_per_second
+        query: |
+          sum(rate(http_requests_total{service="task-api"}[1m]))
+        threshold: "50"
+
+
+How it works:
+
+Query calculates requests per second over the last minute
+When requests exceed 50/second, KEDA adds pods
+Each additional pod handles ~50 requests/second
+Scaling Based on Latency​
+
+Scale when response times degrade:
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: task-api-latency
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    name: task-api
+  minReplicaCount: 2
+  maxReplicaCount: 15
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: task_api_p95_latency
+        query: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="task-api"}[5m])) by (le))
+        threshold: "0.5"
+
+
+When p95 latency exceeds 500ms, KEDA adds pods to reduce load per instance.
+
+Testing Prometheus Scaler​
+
+Generate load and observe scaling:
+
+# Watch ScaledObject status
+kubectl get scaledobject task-api-request-rate -n task-api -w
+
+# Generate traffic
+hey -n 10000 -c 100 http://task-api.example.com/api/tasks
+
+
+Output:
+
+NAME                    SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE   REPLICAS
+task-api-request-rate   apps/v1.Deployment   task-api          1     20    True    True     1
+task-api-request-rate   apps/v1.Deployment   task-api          1     20    True    True     3
+task-api-request-rate   apps/v1.Deployment   task-api          1     20    True    True     7
+
+Kafka Scaler for Event-Driven Workloads​
+
+For AI agents processing messages from Kafka, scale based on consumer lag—how many unprocessed messages are waiting.
+
+Kafka Consumer Lag Scaling​
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ai-agent-kafka-scaler
+  namespace: ai-agents
+spec:
+  scaleTargetRef:
+    name: ai-agent-worker
+  minReplicaCount: 0          # Scale to zero when no messages
+  maxReplicaCount: 50
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: ai-agent-consumers
+        topic: ai-tasks
+        lagThreshold: "10"
+
+
+How it works:
+
+KEDA queries Kafka for consumer group lag
+When 10+ messages are waiting per partition, scale up
+When queue is empty, scale to zero
+Kafka Scaler with Authentication​
+
+For production Kafka clusters requiring authentication:
+
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: kafka-auth
+  namespace: ai-agents
+spec:
+  secretTargetRef:
+    - parameter: sasl
+      name: kafka-secrets
+      key: sasl
+    - parameter: username
+      name: kafka-secrets
+      key: username
+    - parameter: password
+      name: kafka-secrets
+      key: password
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ai-agent-kafka-scaler
+  namespace: ai-agents
+spec:
+  scaleTargetRef:
+    name: ai-agent-worker
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  triggers:
+    - type: kafka
+      authenticationRef:
+        name: kafka-auth
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: ai-agent-consumers
+        topic: ai-tasks
+        lagThreshold: "10"
+
+Scale-to-Zero Pattern​
+
+Scale-to-zero is KEDA's defining feature. When no work exists, why pay for idle pods?
+
+Configuring Scale-to-Zero​
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: task-worker-scale-to-zero
+  namespace: task-api
+spec:
+  scaleTargetRef:
+    name: task-worker
+  minReplicaCount: 0          # Key setting
+  maxReplicaCount: 10
+  cooldownPeriod: 300         # Wait 5 minutes before scaling to zero
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: pending_tasks
+        query: sum(task_queue_depth{service="task-worker"})
+        threshold: "1"
+
+Observing Scale-to-Zero​
+# Watch pods
+kubectl get pods -n task-api -w
+
+# After 5 minutes of no activity...
+
+
+Output:
+
+NAME                           READY   STATUS    RESTARTS   AGE
+task-worker-7b9c4d6f5-xxxxx    1/1     Running   0          10m
+task-worker-7b9c4d6f5-xxxxx    1/1     Terminating   0      15m
+
+
+The pod terminates when there's no work. When new tasks arrive, KEDA scales back up.
+
+Cold Start Considerations​
+
+Scale-to-zero introduces cold start latency. The first request waits for:
+
+KEDA to detect the metric change
+Pod scheduling and startup
+Container initialization
+Application readiness
+
+Mitigation strategies:
+
+Strategy	Implementation
+Fast startup	Optimize container startup time
+Readiness probes	Ensure pods are ready before receiving traffic
+Minimum replicas	Keep minReplicaCount: 1 for latency-sensitive services
+Pre-warming	Scale up before expected traffic (cron trigger)
+Choosing the Right Autoscaler​
+Workload Type	Recommended Approach
+Web API (HTTP requests)	HPA on CPU, or KEDA with Prometheus
+Background workers	KEDA with queue scaler
+AI inference endpoints	KEDA with scale-to-zero
+Batch processing	KEDA with Kafka/queue scaler
+Cost optimization needed	KEDA (scale-to-zero capability)
+Resource right-sizing	VPA (recommendations mode)
+Exercises​
+Exercise 1: Configure HPA for CPU Scaling​
+
+Create HPA for your Task API:
+
+kubectl apply -f - <<EOF
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: exercise-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-api
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+EOF
+
+
+Verify:
+
+kubectl get hpa exercise-hpa
+
+
+Expected Output:
+
+NAME           REFERENCE             TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+exercise-hpa   Deployment/task-api   <unknown>/50%   1         5         1          30s
+
+Exercise 2: Install KEDA​
+
+Install KEDA in your cluster:
+
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+helm install keda kedacore/keda --namespace keda --create-namespace
+
+
+Verify:
+
+kubectl get pods -n keda
+
+
+Expected Output:
+
+NAME                                               READY   STATUS    RESTARTS   AGE
+keda-admission-webhooks-xxxxx                      1/1     Running   0          60s
+keda-operator-xxxxx                                1/1     Running   0          60s
+keda-operator-metrics-apiserver-xxxxx              1/1     Running   0          60s
+
+Exercise 3: Create ScaledObject with Prometheus​
+
+Configure KEDA to scale based on request rate:
+
+kubectl apply -f - <<EOF
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: exercise-scaledobject
+  namespace: default
+spec:
+  scaleTargetRef:
+    name: task-api
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: http_requests
+        query: sum(rate(http_requests_total{service="task-api"}[1m]))
+        threshold: "10"
+EOF
+
+
+Verify:
+
+kubectl get scaledobject exercise-scaledobject
+
+
+Expected Output:
+
+NAME                    SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE
+exercise-scaledobject   apps/v1.Deployment   task-api          0     10    True    False
+
+Exercise 4: Observe Scale-to-Zero​
+
+With no traffic, watch the deployment scale to zero:
+
+# Watch pods (wait for cooldownPeriod to pass)
+kubectl get pods -l app=task-api -w
+
+
+Expected Output (after cooldown):
+
+No resources found in default namespace.
+
+
+Generate traffic and watch pods scale up:
+
+curl http://localhost:8080/api/tasks
+kubectl get pods -l app=task-api
+
+
+Expected Output:
+
+NAME                        READY   STATUS    RESTARTS   AGE
+task-api-7b9c4d6f5-xxxxx   1/1     Running   0          10s
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about autoscaling:
+
+Add Autoscaling Decision Logic​
+
+Your skill should ask:
+
+Question	If Yes	If No
+Need scale-to-zero?	Use KEDA	HPA may suffice
+Event-driven workload (queues)?	Use KEDA with queue scaler	Use HPA or KEDA with Prometheus
+Unknown resource requirements?	Add VPA in recommendation mode	Use established limits
+Cost-sensitive environment?	KEDA with aggressive scale-down	Higher minReplicas for stability
+Add ScaledObject Templates​
+
+Prometheus-based ScaledObject:
+
+# Template: prometheus-scaledobject
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ service }}-scaledobject
+  namespace: {{ namespace }}
+spec:
+  scaleTargetRef:
+    name: {{ deployment }}
+  minReplicaCount: {{ min_replicas }}
+  maxReplicaCount: {{ max_replicas }}
+  cooldownPeriod: {{ cooldown_seconds }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ prometheus_url }}
+        metricName: {{ metric_name }}
+        query: {{ query }}
+        threshold: "{{ threshold }}"
+
+
+HPA template:
+
+# Template: cpu-hpa
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ service }}-hpa
+  namespace: {{ namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ deployment }}
+  minReplicas: {{ min_replicas }}
+  maxReplicas: {{ max_replicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ cpu_target }}
+
+Update Troubleshooting Guidance​
+Symptom	Check	Likely Cause
+HPA shows <unknown> targets	metrics-server running?	Install metrics-server
+KEDA not scaling	ScaledObject READY status	Check trigger configuration
+Pods not scaling to zero	cooldownPeriod too long?	Reduce cooldownPeriod
+Cold start too slow	Container startup time	Optimize image, add readiness probe
+Try With AI​
+Generate HPA Configuration​
+
+Ask your traffic-engineer skill:
+
+Using my traffic-engineer skill, generate HPA configuration for my Task API:
+
+- Target 60% CPU utilization
+- Minimum 2 replicas (always available)
+- Maximum 20 replicas
+- Scale up quickly (double every 15 seconds)
+- Scale down slowly (25% reduction per minute)
+
+
+What you're learning: AI generates HPA with behavior configuration. Review the output—did AI include the behavior section with stabilization windows? Are the scaling policies correct for your requirements?
+
+Evaluate and Refine​
+
+Check AI's output:
+
+Does it use autoscaling/v2 (not v1)?
+Is behavior.scaleUp configured for fast scaling?
+Is behavior.scaleDown configured for gradual reduction?
+Are stabilization windows appropriate?
+
+If the scale-down is too aggressive, provide feedback:
+
+The scale-down policy removes pods too quickly. Change to:
+- 300 second stabilization window
+- Maximum 25% reduction per 60 seconds
+
+Add KEDA ScaledObject​
+
+Extend to event-driven scaling:
+
+Now create a KEDA ScaledObject for the same Task API that:
+
+- Scales based on Prometheus metric: sum(rate(http_requests_total{app="task-api"}[2m]))
+- Threshold: 100 requests per second
+- Enable scale-to-zero with 5-minute cooldown
+- Maximum 20 replicas
+
+
+What you're learning: AI generates KEDA configuration. Verify the Prometheus query is correct and the ScaledObject references the right deployment.
+
+Validate Configuration​
+
+Before applying:
+
+# Validate YAML
+kubectl apply --dry-run=client -f hpa.yaml
+kubectl apply --dry-run=client -f scaledobject.yaml
+
+# Check for conflicts (HPA and KEDA shouldn't target same deployment)
+kubectl get hpa -A
+kubectl get scaledobject -A
+
+
+This iteration—requirements, generation, validation, refinement—produces production-ready autoscaling configurations.
+
+Safety Note​
+
+Autoscaling affects resource consumption and costs. Start with conservative settings (higher minReplicaCount, longer cooldownPeriod) and tune based on observed behavior. Monitor your cluster's node autoscaler to ensure it can provision nodes for scaled-up workloads. Test scale-to-zero behavior in staging before production—cold starts may impact user experience.

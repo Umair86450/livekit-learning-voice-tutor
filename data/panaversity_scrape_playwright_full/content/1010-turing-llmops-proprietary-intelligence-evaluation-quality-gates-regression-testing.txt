@@ -1,0 +1,580 @@
+Regression Testing
+
+You fine-tune a new model version with additional training data. Accuracy goes from 87% to 89%. Is that a real improvement, or just noise? Conversely, if accuracy drops from 87% to 85%, is that a true regression or just measurement variance?
+
+Regression testing provides the statistical framework to answer these questions confidently. This lesson teaches you to build robust model comparison pipelines that catch real degradation while avoiding false alarms.
+
+The Regression Testing Problem​
+
+When you update a model, three outcomes are possible:
+
+Outcome	What Happened	Decision
+Improvement	New model genuinely better	Deploy new model
+Equivalent	Difference is noise	Keep old model (simplicity)
+Regression	New model genuinely worse	Block deployment
+
+The challenge: How do you distinguish real changes from random variance?
+
+Why Raw Scores Mislead​
+
+Consider this scenario:
+
+Model A accuracy: 87.2% (on 500 test examples)
+Model B accuracy: 85.8% (on 500 test examples)
+
+
+Is Model B a regression? Not necessarily. With 500 examples, a 1.4% difference could easily be noise.
+
+import numpy as np
+from scipy import stats
+
+def simulate_variance(true_accuracy=0.87, n_samples=500, n_trials=1000):
+    """Simulate measurement variance from sampling."""
+    measured_accuracies = []
+
+    for _ in range(n_trials):
+        # Simulate n_samples coin flips with true_accuracy probability
+        correct = np.random.binomial(n_samples, true_accuracy)
+        measured = correct / n_samples
+        measured_accuracies.append(measured)
+
+    return {
+        'mean': np.mean(measured_accuracies),
+        'std': np.std(measured_accuracies),
+        '95_range': (np.percentile(measured_accuracies, 2.5),
+                     np.percentile(measured_accuracies, 97.5))
+    }
+
+variance = simulate_variance()
+
+
+Output:
+
+{
+    'mean': 0.8701,
+    'std': 0.015,
+    '95_range': (0.842, 0.898)
+}
+
+
+With 500 samples, a model with 87% true accuracy could measure anywhere from 84% to 90% due to sampling variance alone.
+
+Statistical Significance Testing​
+The Binomial Test for Accuracy Comparison​
+
+When comparing two models on the same test set:
+
+from scipy.stats import fisher_exact, chi2_contingency
+import numpy as np
+
+def compare_models_statistical(model_a_correct: int, model_a_total: int,
+                               model_b_correct: int, model_b_total: int) -> dict:
+    """Compare two models with statistical significance testing."""
+
+    acc_a = model_a_correct / model_a_total
+    acc_b = model_b_correct / model_b_total
+
+    # Contingency table for chi-square test
+    # [[A correct, A incorrect], [B correct, B incorrect]]
+    table = [
+        [model_a_correct, model_a_total - model_a_correct],
+        [model_b_correct, model_b_total - model_b_correct]
+    ]
+
+    chi2, p_value, dof, expected = chi2_contingency(table)
+
+    return {
+        'accuracy_a': acc_a,
+        'accuracy_b': acc_b,
+        'difference': acc_b - acc_a,
+        'p_value': p_value,
+        'significant_at_05': p_value < 0.05,
+        'interpretation': interpret_difference(acc_a, acc_b, p_value)
+    }
+
+def interpret_difference(acc_a, acc_b, p_value, threshold=0.05):
+    """Interpret comparison result."""
+    diff = acc_b - acc_a
+
+    if p_value >= threshold:
+        return "NO_SIGNIFICANT_DIFFERENCE"
+    elif diff > 0:
+        return "SIGNIFICANT_IMPROVEMENT"
+    else:
+        return "SIGNIFICANT_REGRESSION"
+
+# Example comparison
+result = compare_models_statistical(
+    model_a_correct=436, model_a_total=500,  # 87.2%
+    model_b_correct=429, model_b_total=500   # 85.8%
+)
+
+
+Output:
+
+{
+    "accuracy_a": 0.872,
+    "accuracy_b": 0.858,
+    "difference": -0.014,
+    "p_value": 0.527,
+    "significant_at_05": false,
+    "interpretation": "NO_SIGNIFICANT_DIFFERENCE"
+}
+
+
+The 1.4% difference is not statistically significant. Model B might not be worse; the difference could be noise.
+
+McNemar's Test for Paired Comparisons​
+
+When both models evaluate the same examples, use McNemar's test for more statistical power:
+
+from scipy.stats import binom
+
+def mcnemar_test(model_a_predictions: list, model_b_predictions: list,
+                 ground_truth: list) -> dict:
+    """McNemar's test for paired model comparison."""
+
+    # Count discordant pairs
+    b = 0  # A correct, B incorrect
+    c = 0  # A incorrect, B correct
+
+    for a_pred, b_pred, truth in zip(model_a_predictions, model_b_predictions, ground_truth):
+        a_correct = (a_pred == truth)
+        b_correct = (b_pred == truth)
+
+        if a_correct and not b_correct:
+            b += 1
+        elif not a_correct and b_correct:
+            c += 1
+
+    # McNemar's test (exact binomial)
+    n = b + c
+    if n == 0:
+        return {'p_value': 1.0, 'interpretation': 'IDENTICAL_PREDICTIONS'}
+
+    # Two-tailed test
+    p_value = 2 * min(
+        binom.cdf(min(b, c), n, 0.5),
+        1 - binom.cdf(max(b, c) - 1, n, 0.5)
+    )
+
+    return {
+        'a_wins': b,
+        'b_wins': c,
+        'tied': len(ground_truth) - n,
+        'p_value': p_value,
+        'significant_at_05': p_value < 0.05,
+        'winner': 'A' if b > c else 'B' if c > b else 'TIE'
+    }
+
+# Example
+result = mcnemar_test(model_a_preds, model_b_preds, ground_truth)
+
+
+Output:
+
+{
+    "a_wins": 45,
+    "b_wins": 32,
+    "tied": 423,
+    "p_value": 0.142,
+    "significant_at_05": false,
+    "winner": "A"
+}
+
+
+Even though Model A "wins" on more examples, the difference is not statistically significant.
+
+Designing Regression Thresholds​
+The Threshold Trade-off​
+Strict Threshold	Lenient Threshold
+Few false positives	Many false positives
+Many real regressions missed	Catches most regressions
+Blocks good updates	Allows bad updates
+Recommended Thresholds​
+REGRESSION_THRESHOLDS = {
+    "safety_critical": {
+        "min_improvement": 0.0,    # Any regression is bad
+        "significance_level": 0.01, # Very strict p-value
+        "sample_size_min": 1000,
+        "description": "Healthcare, finance, autonomous systems"
+    },
+    "production_standard": {
+        "min_improvement": -0.02,   # Allow 2% regression
+        "significance_level": 0.05,
+        "sample_size_min": 500,
+        "description": "Most production applications"
+    },
+    "rapid_iteration": {
+        "min_improvement": -0.05,   # Allow 5% regression
+        "significance_level": 0.10,
+        "sample_size_min": 200,
+        "description": "Early development, experimentation"
+    }
+}
+
+Implementing Regression Gates​
+class RegressionGate:
+    """Gate that blocks deployment on significant regression."""
+
+    def __init__(self, threshold_profile: str = "production_standard"):
+        self.config = REGRESSION_THRESHOLDS[threshold_profile]
+
+    def evaluate(self, baseline_results: dict, new_results: dict) -> dict:
+        """Evaluate if new model passes regression gate."""
+
+        # Statistical comparison
+        comparison = compare_models_statistical(
+            baseline_results['correct'], baseline_results['total'],
+            new_results['correct'], new_results['total']
+        )
+
+        # Apply thresholds
+        passes_significance = (
+            comparison['p_value'] >= self.config['significance_level'] or
+            comparison['difference'] >= 0
+        )
+
+        passes_minimum = comparison['difference'] >= self.config['min_improvement']
+
+        passes_sample_size = (
+            baseline_results['total'] >= self.config['sample_size_min'] and
+            new_results['total'] >= self.config['sample_size_min']
+        )
+
+        gate_passed = passes_significance and passes_minimum and passes_sample_size
+
+        return {
+            'gate_passed': gate_passed,
+            'comparison': comparison,
+            'checks': {
+                'significance': passes_significance,
+                'minimum_improvement': passes_minimum,
+                'sample_size': passes_sample_size
+            },
+            'recommendation': self._recommend(gate_passed, comparison)
+        }
+
+    def _recommend(self, passed: bool, comparison: dict) -> str:
+        if passed:
+            if comparison['difference'] > 0.02:
+                return "DEPLOY: Significant improvement"
+            else:
+                return "DEPLOY: No regression detected"
+        else:
+            if comparison['p_value'] < 0.05:
+                return "BLOCK: Statistically significant regression"
+            else:
+                return "INVESTIGATE: Possible regression, increase sample size"
+
+# Usage
+gate = RegressionGate("production_standard")
+result = gate.evaluate(baseline_results, new_model_results)
+
+
+Output:
+
+{
+    "gate_passed": true,
+    "comparison": {
+        "accuracy_a": 0.872,
+        "accuracy_b": 0.858,
+        "difference": -0.014,
+        "p_value": 0.527
+    },
+    "checks": {
+        "significance": true,
+        "minimum_improvement": true,
+        "sample_size": true
+    },
+    "recommendation": "DEPLOY: No regression detected"
+}
+
+Building Automated Regression Pipelines​
+The Regression Testing Workflow​
+┌─────────────────┐
+│ New Model Push  │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Load Baseline   │
+│ Model & Results │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Run Benchmark   │
+│ on New Model    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Statistical     │
+│ Comparison      │
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌───────┐ ┌────────┐
+│ PASS  │ │ FAIL   │
+│Deploy │ │Block   │
+└───────┘ └────────┘
+
+CI/CD Integration​
+# regression_test.py - Run as part of CI/CD pipeline
+
+import json
+import sys
+from pathlib import Path
+
+def run_regression_test(new_model_path: str, benchmark_path: str,
+                       baseline_results_path: str) -> int:
+    """Run regression test, return exit code."""
+
+    # Load baseline
+    baseline = json.loads(Path(baseline_results_path).read_text())
+
+    # Run benchmark on new model
+    new_results = run_benchmark(new_model_path, benchmark_path)
+
+    # Evaluate regression gate
+    gate = RegressionGate("production_standard")
+    result = gate.evaluate(baseline, new_results)
+
+    # Output results
+    print(f"Baseline: {baseline['correct']}/{baseline['total']} = {baseline['correct']/baseline['total']:.1%}")
+    print(f"New:      {new_results['correct']}/{new_results['total']} = {new_results['correct']/new_results['total']:.1%}")
+    print(f"Difference: {result['comparison']['difference']:+.1%}")
+    print(f"P-value: {result['comparison']['p_value']:.4f}")
+    print(f"Gate: {'PASSED' if result['gate_passed'] else 'FAILED'}")
+    print(f"Recommendation: {result['recommendation']}")
+
+    # Save results for next baseline (if passed)
+    if result['gate_passed']:
+        Path('new_baseline.json').write_text(json.dumps(new_results))
+
+    return 0 if result['gate_passed'] else 1
+
+if __name__ == "__main__":
+    exit_code = run_regression_test(
+        sys.argv[1],  # new model path
+        sys.argv[2],  # benchmark path
+        sys.argv[3]   # baseline results path
+    )
+    sys.exit(exit_code)
+
+
+CI/CD pipeline configuration:
+
+# .github/workflows/model-regression.yml
+name: Model Regression Test
+
+on:
+  push:
+    paths:
+      - 'models/**'
+
+jobs:
+  regression-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run regression test
+        run: |
+          python regression_test.py \
+            models/new_model \
+            benchmarks/task_api.json \
+            baselines/current.json
+
+      - name: Update baseline on success
+        if: success()
+        run: |
+          mv new_baseline.json baselines/current.json
+          git add baselines/
+          git commit -m "Update baseline: ${{ github.sha }}"
+
+Managing Baselines​
+Baseline Versioning Strategy​
+class BaselineManager:
+    """Manage model baselines for regression testing."""
+
+    def __init__(self, storage_path: str):
+        self.storage_path = Path(storage_path)
+        self.storage_path.mkdir(exist_ok=True)
+
+    def save_baseline(self, model_version: str, results: dict):
+        """Save benchmark results as new baseline."""
+        filename = f"baseline_{model_version}_{datetime.now().isoformat()}.json"
+        filepath = self.storage_path / filename
+
+        baseline_data = {
+            'model_version': model_version,
+            'timestamp': datetime.now().isoformat(),
+            'results': results,
+            'benchmark_version': results.get('benchmark_version', '1.0')
+        }
+
+        filepath.write_text(json.dumps(baseline_data, indent=2))
+
+        # Update symlink to current baseline
+        current_link = self.storage_path / 'current.json'
+        if current_link.exists():
+            current_link.unlink()
+        current_link.symlink_to(filename)
+
+    def get_current_baseline(self) -> dict:
+        """Get current baseline for comparison."""
+        current_link = self.storage_path / 'current.json'
+        if not current_link.exists():
+            raise ValueError("No baseline exists. Run initial evaluation first.")
+        return json.loads(current_link.read_text())
+
+    def get_history(self, n: int = 10) -> list[dict]:
+        """Get recent baseline history."""
+        files = sorted(self.storage_path.glob('baseline_*.json'), reverse=True)
+        return [json.loads(f.read_text()) for f in files[:n]]
+
+Update Your Skill​
+
+Add to llmops-evaluator/SKILL.md:
+
+## Regression Testing
+
+### Statistical Significance Required
+
+Never deploy based on raw accuracy differences alone:
+- 500 samples: ±3% variance expected
+- 1000 samples: ±2% variance expected
+- 5000 samples: ±1% variance expected
+
+### Threshold Profiles
+
+
+|
+ Profile 
+|
+ Allowed Regression 
+|
+ P-value 
+|
+ Use Case 
+|
+
+
+|
+---------
+|
+-------------------
+|
+---------
+|
+----------
+|
+
+
+|
+ Safety Critical 
+|
+ 0% 
+|
+ 0.01 
+|
+ Healthcare, finance 
+|
+
+
+|
+ Production 
+|
+ 2% 
+|
+ 0.05 
+|
+ Most applications 
+|
+
+
+|
+ Rapid Iteration 
+|
+ 5% 
+|
+ 0.10 
+|
+ Early development 
+|
+
+
+
+### Regression Gate Checklist
+
+Before deploying updated model:
+- [ ] Run on same benchmark as baseline
+- [ ] Compare with statistical test (not raw difference)
+- [ ] Verify sample size is adequate (500+ for production)
+- [ ] Document comparison results
+- [ ] Update baseline if passed
+
+### When to Reset Baseline
+
+- Major architecture change (new base model)
+- Benchmark update (new test cases added)
+- Production issue revealed benchmark gap
+
+Try With AI​
+Prompt 1: Interpret Ambiguous Results​
+My regression test shows:
+
+Model A (baseline): 87.2% accuracy (500 samples)
+Model B (new): 85.8% accuracy (500 samples)
+P-value: 0.32
+
+My threshold allows 2% regression.
+
+Help me interpret:
+1. Is this a real regression or noise?
+2. Should I block deployment?
+3. What would give me more confidence either way?
+
+
+What you are learning: Statistical interpretation. Numbers do not make decisions; humans do with statistical guidance. Your AI partner helps you reason through ambiguous results.
+
+Prompt 2: Design a Testing Strategy​
+I update my Task API model weekly with new training data.
+
+Current approach: Compare each new version to the original baseline from 3 months ago.
+
+Problems I'm seeing:
+- Gradual drift accumulates undetected
+- Good improvements mask small regressions
+- Baseline is becoming stale
+
+Design a better regression testing strategy that:
+1. Catches gradual degradation
+2. Maintains a reasonable baseline update policy
+3. Tracks long-term quality trends
+
+
+What you are learning: Testing strategy design. Weekly model updates require different approaches than one-time deployments. Your AI partner helps design sustainable testing practices.
+
+Prompt 3: Debug a False Positive​
+My regression gate blocked a deployment with:
+- Accuracy: 86.1% → 85.9%
+- P-value: 0.04
+- Gate result: BLOCK (significant regression)
+
+But when I manually tested, the new model seems better at handling edge cases.
+
+1. What might explain this discrepancy?
+2. How should I investigate further?
+3. Should I override the gate?
+
+
+What you are learning: Debugging evaluation systems. Automated gates can be wrong. Your AI partner helps investigate whether the gate is catching a real problem or needs adjustment.
+
+Safety Note​
+
+Statistical tests protect against random noise, not systematic failures. A model could pass regression testing while developing new failure modes not covered by your benchmark. Always combine automated regression testing with ongoing monitoring and periodic human review.

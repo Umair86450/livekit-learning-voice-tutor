@@ -1,0 +1,575 @@
+Type-Driven Development
+
+Your AI SDK returns different response types based on the operation. A chat completion returns a message. A streaming response returns chunks. A tool call returns structured arguments. How do you ensure your code handles each type correctly? Runtime tests catch bugs after they happen. Type tests catch bugs before your code runs.
+
+TypeScript's compiler is a testing tool hiding in plain sight. When you define that a function accepts only strings and someone passes a number, the compiler rejects it instantly. That is a test. The question is: how do you verify that your types work as intended? How do you test that forbidden patterns actually fail to compile?
+
+This lesson teaches type-driven development patterns for AI applications. You will learn to use @ts-expect-error to verify compile failures, test type narrowing for streaming responses, ensure exhaustive pattern matching with the never type, and use the tsd library for comprehensive type testing of your SDK.
+
+The Compiler as Test Framework​
+
+Traditional tests verify runtime behavior: given input X, function returns Y. Type tests verify compile-time behavior: given code pattern X, compiler produces error Y.
+
+Consider this AI response type:
+
+interface ChatResponse {
+  role: "assistant";
+  content: string;
+}
+
+interface ToolCall {
+  role: "assistant";
+  tool_calls: Array<{ name: string; arguments: string }>;
+}
+
+type AIResponse = ChatResponse | ToolCall;
+
+
+A runtime test verifies that parsing works:
+
+// Runtime test - runs during npm test
+it("parses chat response", () => {
+  const response = parseResponse(rawData);
+  expect(response.content).toBe("Hello");
+});
+
+
+A type test verifies that misuse fails to compile:
+
+// Type test - fails during tsc, not npm test
+function handleResponse(response: AIResponse) {
+  // This should fail - content might not exist
+  // @ts-expect-error
+  console.log(response.content);
+}
+
+
+Output:
+
+// If response.content is allowed without narrowing,
+// @ts-expect-error itself produces an error:
+// "Unused '@ts-expect-error' directive."
+
+// If response.content correctly requires narrowing,
+// the test passes silently.
+
+
+The @ts-expect-error directive tells TypeScript: "The next line should fail. If it does not fail, that is a bug in my types."
+
+Using @ts-expect-error for Type Testing​
+
+The @ts-expect-error comment directive suppresses an error on the next line. But it has a critical feature: if there is no error to suppress, TypeScript reports that the directive is unused. This makes it perfect for type testing.
+
+Testing Required Fields​
+interface CreateChatParams {
+  model: string;
+  messages: Array<{ role: string; content: string }>;
+  temperature?: number;
+}
+
+function createChat(params: CreateChatParams): void {
+  // Implementation
+}
+
+// Type tests - these verify the type constraints work
+function typeTests() {
+  // Valid usage - should compile
+  createChat({
+    model: "gpt-4",
+    messages: [{ role: "user", content: "Hi" }],
+  });
+
+  // Missing required field - should error
+  // @ts-expect-error - model is required
+  createChat({
+    messages: [{ role: "user", content: "Hi" }],
+  });
+
+  // Wrong type - should error
+  // @ts-expect-error - model must be string, not number
+  createChat({
+    model: 123,
+    messages: [],
+  });
+
+  // Invalid message format - should error
+  // @ts-expect-error - messages need role and content
+  createChat({
+    model: "gpt-4",
+    messages: [{ text: "Hi" }],
+  });
+}
+
+
+Output:
+
+$ npx tsc --noEmit
+
+# If all @ts-expect-error directives suppress actual errors:
+# (no output - success)
+
+# If a directive is unused (the "error" actually compiles):
+# error TS2578: Unused '@ts-expect-error' directive.
+
+
+Run tsc --noEmit as part of your CI pipeline. If any @ts-expect-error becomes unused, your types are more permissive than intended.
+
+Testing Readonly Constraints​
+
+AI responses should often be immutable. Test that modification is prevented:
+
+interface ImmutableResponse {
+  readonly id: string;
+  readonly content: string;
+  readonly usage: {
+    readonly prompt_tokens: number;
+    readonly completion_tokens: number;
+  };
+}
+
+function immutabilityTests(response: ImmutableResponse) {
+  // Reading is allowed
+  const id = response.id;
+  const tokens = response.usage.prompt_tokens;
+
+  // Mutation should error
+  // @ts-expect-error - readonly property
+  response.id = "new-id";
+
+  // Nested mutation should also error
+  // @ts-expect-error - nested readonly property
+  response.usage.prompt_tokens = 100;
+}
+
+
+Output:
+
+$ npx tsc --noEmit
+# (no output - all expected errors occurred)
+
+Testing Type Narrowing​
+
+AI streaming responses use discriminated unions. Your type guards must narrow correctly.
+
+Discriminated Union Type Guards​
+// Streaming chunk types
+interface ContentChunk {
+  type: "content";
+  delta: string;
+}
+
+interface ToolCallChunk {
+  type: "tool_call";
+  name: string;
+  arguments: string;
+}
+
+interface DoneChunk {
+  type: "done";
+  usage: { total_tokens: number };
+}
+
+type StreamChunk = ContentChunk | ToolCallChunk | DoneChunk;
+
+// Type guard function
+function isContentChunk(chunk: StreamChunk): chunk is ContentChunk {
+  return chunk.type === "content";
+}
+
+// Test that narrowing works
+function narrowingTests(chunk: StreamChunk) {
+  // Before narrowing - cannot access delta
+  // @ts-expect-error - delta only exists on ContentChunk
+  const beforeDelta = chunk.delta;
+
+  if (isContentChunk(chunk)) {
+    // After narrowing - delta is available
+    const afterDelta: string = chunk.delta;  // Should compile
+
+    // But other properties should not be
+    // @ts-expect-error - name only exists on ToolCallChunk
+    const name = chunk.name;
+  }
+
+  // Direct type check narrowing
+  if (chunk.type === "tool_call") {
+    const name: string = chunk.name;  // Should compile
+    const args: string = chunk.arguments;  // Should compile
+
+    // @ts-expect-error - delta not on ToolCallChunk
+    const delta = chunk.delta;
+  }
+}
+
+
+Output:
+
+$ npx tsc --noEmit
+# (no output - narrowing tests pass)
+
+Testing Exhaustiveness with never​
+
+The never type represents values that should not exist. Use it to verify you handle all union members:
+
+type StreamChunk = ContentChunk | ToolCallChunk | DoneChunk;
+
+function processChunk(chunk: StreamChunk): string {
+  switch (chunk.type) {
+    case "content":
+      return chunk.delta;
+    case "tool_call":
+      return `Tool: ${chunk.name}`;
+    case "done":
+      return `Done: ${chunk.usage.total_tokens} tokens`;
+    default:
+      // If all cases are handled, chunk is never
+      const exhaustiveCheck: never = chunk;
+      return exhaustiveCheck;
+  }
+}
+
+// Test exhaustiveness - add a new type and verify it breaks
+interface ErrorChunk {
+  type: "error";
+  message: string;
+}
+
+type StreamChunkV2 = ContentChunk | ToolCallChunk | DoneChunk | ErrorChunk;
+
+function processChunkV2(chunk: StreamChunkV2): string {
+  switch (chunk.type) {
+    case "content":
+      return chunk.delta;
+    case "tool_call":
+      return `Tool: ${chunk.name}`;
+    case "done":
+      return `Done: ${chunk.usage.total_tokens} tokens`;
+    // Missing: case "error"
+    default:
+      // @ts-expect-error - ErrorChunk is not handled, chunk is not never
+      const exhaustiveCheck: never = chunk;
+      return exhaustiveCheck;
+  }
+}
+
+
+Output:
+
+$ npx tsc --noEmit
+# If you forget to handle ErrorChunk in processChunkV2:
+# The @ts-expect-error passes because chunk is ErrorChunk, not never
+
+# If you add case "error": return chunk.message;
+# error TS2578: Unused '@ts-expect-error' directive.
+# (because now all cases are handled and chunk IS never)
+
+
+This pattern ensures that when you add new response types to your AI SDK, the compiler forces you to handle them everywhere.
+
+Type Testing with tsd​
+
+For library authors building AI SDKs, tsd provides dedicated type testing utilities. It runs as a separate test command and produces clear pass/fail results.
+
+Installing tsd​
+npm install -D tsd
+
+
+Output:
+
+added 1 package, and audited 250 packages in 1s
+
+Basic tsd Tests​
+
+Create a *.test-d.ts file (the -d suffix is conventional for type tests):
+
+// sdk.test-d.ts
+import { expectType, expectError, expectAssignable } from "tsd";
+import { createChat, ChatResponse, StreamChunk } from "./sdk";
+
+// Test return type
+const response = createChat({ model: "gpt-4", messages: [] });
+expectType<Promise<ChatResponse>>(response);
+
+// Test that invalid calls produce errors
+expectError(createChat({ messages: [] }));  // Missing model
+expectError(createChat({ model: 123, messages: [] }));  // Wrong type
+
+// Test type assignability
+const chunk: StreamChunk = { type: "content", delta: "hello" };
+expectAssignable<StreamChunk>(chunk);
+
+
+Output:
+
+$ npx tsd
+
+# Success:
+# (no output)
+
+# Failure example:
+# sdk.test-d.ts:5:0
+# Argument of type 'Promise<ChatResponse>' is not assignable
+# to parameter of type 'Promise<string>'.
+
+Testing Generic Functions​
+
+AI SDKs often use generics for typed tool calls:
+
+// sdk.ts
+interface Tool<TArgs, TResult> {
+  name: string;
+  parameters: TArgs;
+  execute: (args: TArgs) => TResult;
+}
+
+function createTool<TArgs, TResult>(
+  config: Tool<TArgs, TResult>
+): Tool<TArgs, TResult> {
+  return config;
+}
+
+// sdk.test-d.ts
+import { expectType } from "tsd";
+import { createTool, Tool } from "./sdk";
+
+// Test that generics are inferred correctly
+const searchTool = createTool({
+  name: "search",
+  parameters: { query: "" as string },
+  execute: (args) => {
+    expectType<{ query: string }>(args);
+    return { results: [] as string[] };
+  },
+});
+
+expectType<Tool<{ query: string }, { results: string[] }>>(searchTool);
+
+// Test that execute receives correct argument types
+const result = searchTool.execute({ query: "test" });
+expectType<{ results: string[] }>(result);
+
+
+Output:
+
+$ npx tsd
+# (no output - all type assertions pass)
+
+Testing Union Discrimination​
+// sdk.test-d.ts
+import { expectType, expectError } from "tsd";
+
+type StreamChunk =
+  | { type: "content"; delta: string }
+  | { type: "tool_call"; name: string; arguments: string }
+  | { type: "done"; usage: { total_tokens: number } };
+
+function processChunk(chunk: StreamChunk) {
+  if (chunk.type === "content") {
+    // Inside this block, chunk should be narrowed
+    expectType<{ type: "content"; delta: string }>(chunk);
+
+    // delta should be accessible as string
+    expectType<string>(chunk.delta);
+  }
+
+  if (chunk.type === "done") {
+    expectType<{ type: "done"; usage: { total_tokens: number } }>(chunk);
+    expectType<number>(chunk.usage.total_tokens);
+  }
+}
+
+
+Output:
+
+$ npx tsd
+# (no output - narrowing works as expected)
+
+Compile-Time Guarantees for AI Applications​
+
+Type-driven development provides guarantees that runtime tests cannot:
+
+Guarantee	How to Test
+Required fields enforced	@ts-expect-error on missing fields
+Invalid types rejected	@ts-expect-error on wrong types
+Narrowing works correctly	Access properties after type guard
+All union cases handled	never type in default case
+Immutability respected	@ts-expect-error on mutations
+Generic inference correct	tsd expectType on results
+Practical Example: AI Response Handler​
+// Complete type-tested response handler
+
+interface Message {
+  role: "assistant";
+  content: string;
+}
+
+interface ToolResult {
+  role: "assistant";
+  tool_calls: Array<{
+    id: string;
+    function: { name: string; arguments: string };
+  }>;
+}
+
+interface StreamComplete {
+  type: "complete";
+  message: Message | ToolResult;
+  usage: { total_tokens: number };
+}
+
+interface StreamError {
+  type: "error";
+  error: { code: string; message: string };
+}
+
+type StreamResult = StreamComplete | StreamError;
+
+function handleResult(result: StreamResult): string {
+  switch (result.type) {
+    case "complete":
+      const msg = result.message;
+      if ("content" in msg) {
+        return msg.content;
+      } else {
+        return msg.tool_calls.map((t) => t.function.name).join(", ");
+      }
+    case "error":
+      return `Error: ${result.error.message}`;
+    default:
+      const _exhaustive: never = result;
+      return _exhaustive;
+  }
+}
+
+// Type tests
+function typeTests() {
+  const complete: StreamComplete = {
+    type: "complete",
+    message: { role: "assistant", content: "Hello" },
+    usage: { total_tokens: 10 },
+  };
+
+  const error: StreamError = {
+    type: "error",
+    error: { code: "rate_limit", message: "Too many requests" },
+  };
+
+  // Valid usage
+  handleResult(complete);
+  handleResult(error);
+
+  // @ts-expect-error - invalid type field
+  handleResult({ type: "invalid" });
+
+  // @ts-expect-error - missing required fields
+  handleResult({ type: "complete" });
+
+  // @ts-expect-error - wrong error shape
+  handleResult({ type: "error", message: "wrong" });
+}
+
+
+Output:
+
+$ npx tsc --noEmit
+# (no output - all type constraints verified)
+
+Running Type Tests in CI​
+
+Add type checking to your CI pipeline:
+
+{
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:types": "tsd",
+    "test": "vitest run && npm run typecheck && npm run test:types"
+  }
+}
+
+
+Output:
+
+$ npm test
+
+> vitest run
+✓ All runtime tests passed
+
+> tsc --noEmit
+# (no output - no type errors)
+
+> tsd
+# (no output - all type assertions pass)
+
+# All checks passed
+
+
+Now type regressions fail your build just like runtime test failures.
+
+Try With AI​
+Prompt 1: Type Error Boundary​
+I have this AI response type:
+
+type Response =
+  | { status: "success"; data: { content: string } }
+  | { status: "error"; error: { code: number; message: string } }
+  | { status: "pending" };
+
+Write @ts-expect-error tests that verify:
+1. You cannot access .data without checking status === "success"
+2. You cannot access .error without checking status === "error"
+3. A switch statement must handle all three cases
+
+Show me the test file with all assertions.
+
+
+What you're learning: How to systematically verify that union type access is properly guarded. This prevents runtime errors where code assumes a response type without checking.
+
+Prompt 2: Generic Type Testing​
+I'm building a typed tool system for my AI SDK:
+
+interface Tool<TInput, TOutput> {
+  name: string;
+  execute: (input: TInput) => Promise<TOutput>;
+}
+
+function defineTool<TInput, TOutput>(
+  tool: Tool<TInput, TOutput>
+): Tool<TInput, TOutput>;
+
+Write tsd tests that verify:
+1. Input type is correctly inferred from the execute function parameter
+2. Output type is correctly inferred from the execute function return
+3. Calling execute with wrong input type produces an error
+
+How do I ensure my generics preserve type information correctly?
+
+
+What you're learning: How to test generic type inference, which is critical for SDK APIs that need to preserve type information across function boundaries.
+
+Prompt 3: Exhaustiveness Enforcement​
+My AI agent has these action types:
+
+type AgentAction =
+  | { type: "respond"; message: string }
+  | { type: "tool_call"; tool: string; args: object }
+  | { type: "delegate"; to: string }
+  | { type: "complete"; result: unknown };
+
+I want to ensure that when I add a new action type (like "error"),
+the compiler forces me to handle it everywhere.
+
+Show me:
+1. The exhaustiveness pattern using never
+2. Type tests that verify adding a new type breaks compilation
+3. How to catch this in CI before the code is merged
+
+
+What you're learning: How to use the type system to enforce complete handling of all cases, preventing bugs where new features are added but not handled in existing code paths.
+
+Safety note: Type tests verify compile-time behavior, not runtime behavior. Always combine type tests with runtime tests for AI applications. A function that type-checks correctly can still have logic bugs. Use @ts-expect-error for "this should fail" assertions and regular runtime tests for "this should produce correct results" assertions.
+
+Sources:
+
+TypeScript @ts-expect-error
+tsd - Type Testing Library
+TypeScript Narrowing

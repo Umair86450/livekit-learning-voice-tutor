@@ -1,0 +1,216 @@
+Scenarios, Errors, and Model Building
+
+In Lesson 2, you used Claude in Excel to comprehend inherited workbooks: tracing formula dependencies, mapping model logic, and understanding structures you did not build. Now you will use that same general intelligence for three additional capabilities: testing financial scenarios without breaking formulas, diagnosing formula errors from symptom to source, and building complete model structures from plain-language descriptions.
+
+These three skills cover the remaining general workbook capabilities before you move to the Cowork finance plugins in Lessons 4 through 6. Together with model comprehension from Lesson 2, they form the foundation layer of Claude in Excel: the intelligence that works on any workbook, requires no configuration, and is always active.
+
+Testing Scenarios Without Breaking Formulas​
+
+Finance professionals run scenarios constantly. What happens to company value if EBITDA margin drops 2 percentage points? What if the interest rate rises 50 basis points? What if both happen simultaneously?
+
+Before Claude in Excel, you chose between overwriting the base case (fast but destructive) or building a scenario manager (correct but time-consuming). Claude in Excel offers a third option: describe the scenario, let Claude make the changes, review the output, and undo with Ctrl+Z to revert.
+
+CONCEPT BOX: What Is Sensitivity Analysis?
+
+Sensitivity analysis tests how much an output (like company value) changes when you vary one or more inputs (like growth rate). It answers: which assumptions matter most?
+
+A one-way table varies one input across a range (e.g., EBITDA margin from 15% to 25%). A two-way table varies two inputs simultaneously (e.g., a grid of EBITDA margin and revenue growth combinations).
+
+Sensitivity analysis does not predict which scenario will occur. It shows which inputs your conclusion depends on most: so you know where to focus your analysis and how to present uncertainty honestly.
+
+The CFO's Downside Scenario​
+
+The CFO needs three scenarios for the budget review: revenue growth of 7% (versus 12% base), gross margin compression of 150 basis points, and a capex increase of $5M: all simultaneously.
+
+She types: "Model a downside scenario: change revenue growth (B8) to 7%, reduce gross margin % (B14) by 1.5 percentage points from its current value, and increase Year 1 capex (C22) by 5. Tell me the impact on Year 3 free cash flow and the updated EBITDA for each year."
+
+Claude: "Applied three changes: B8 to 7.0%, B14 to 36.7% (from 38.2%), C22 to $23.0M (from $18.0M).
+
+Year 3 Free Cash Flow (F35): Reduced from $31.4M to $18.7M (minus 40.4%).
+
+EBITDA by year: Year 1: $47.2M to $41.8M (minus 11.4%). Year 2: $54.6M to $46.9M (minus 14.1%). Year 3: $63.1M to $52.3M (minus 17.1%).
+
+Only the three specified input cells were changed. All formula structures are intact."
+
+She documents the results, then undoes with Ctrl+Z and tests the bull case.
+
+Notice what happened in this exchange. The CFO specified exact cells and exact changes. Claude applied only those changes, reported the downstream effects with cell references, and confirmed that formula structures were preserved. The specificity of the instruction produced a precise, traceable result.
+
+CONCEPT BOX: What Is a DCF (Discounted Cash Flow)?
+
+A DCF estimates what a business is worth today based on the cash it will generate in the future. The core concept: a dollar received in five years is worth less than a dollar received today because today's dollar can be invested and grow.
+
+Key components: Free Cash Flow is the cash the business generates after operating costs and capital expenditure. Discount Rate, or WACC (Weighted Average Cost of Capital), is the required return of investors: a higher rate produces a lower valuation. Terminal Value captures the value of all cash flows beyond the projection period, usually five to ten years.
+
+Why sensitivity matters: A DCF is highly sensitive to the discount rate. A 1 percentage point increase in WACC typically reduces the equity value by 10 to 20 percent. This is why every professional DCF includes a sensitivity table showing value at different WACC and terminal growth rate combinations. You will explore WACC in detail in Lesson 5.
+
+Exercise 2: Scenario Testing​
+
+What you need: A financial model with input cells driving multiple outputs.
+
+Identify three input cells: one revenue-related, one cost-related, one balance sheet.
+Change one input via Claude and ask it to list every cell that changed as a result.
+Count the downstream effects. Were any surprising?
+Undo. Then run a two-input scenario simultaneously. Note how the combined impact differs from the sum of the individual impacts.
+
+The discipline to build: Complex models have non-linear interactions. Two changes that each reduce profit by 10% do not combine for a 20% reduction: they compound. Claude shows you the actual combined impact.
+
+Target time: 25 minutes.
+
+Debugging Formula Errors​
+
+Excel formula errors are among the most time-consuming problems in financial modelling. A #REF! in a summary cell can originate from a broken range reference three sheets away. A #VALUE! can come from a data type mismatch introduced when a number was accidentally formatted as text. Claude in Excel traces from symptom to source and explains both the cause and the fix.
+
+CONCEPT BOX: Common Excel Formula Errors
+
+#REF!: A formula points to a cell or range that no longer exists. Usually caused by deleting rows or columns that were referenced, or by OFFSET formulas broken when the worksheet structure changed.
+
+#VALUE!: A formula tries to perform a mathematical operation on something that is not a number. Most common cause: a cell looks like a number but is formatted as text (left-aligned instead of right-aligned).
+
+#DIV/0!: Division by zero. Common in ratio calculations where a denominator is blank or zero in a forecast period.
+
+#N/A: A lookup formula (VLOOKUP, XLOOKUP, MATCH) cannot find the value it is searching for. Often a formatting mismatch between the lookup value and the lookup range.
+
+Circular Reference (A formula refers, directly or indirectly, to its own cell. Some advanced models deliberately use circular references (e.g., interest expense depending on debt, which depends on cash, which depends on profit)) but this must be enabled explicitly via iterative calculation settings and carefully documented.
+
+Tracing a #REF! Error​
+
+A valuation model that has worked correctly for three months suddenly shows #REF! in the DCF equity value cell after an analyst adds a new row to the assumptions section.
+
+He types: "There is a #REF! error in cell F45 (DCF equity value). Trace the source."
+
+Claude: "F45 traces back through F35 (Terminal Value) to F34 (Year 5 EBITDA) to Assumptions!C8. Cell Assumptions!C8 now returns #REF!: its formula is =OFFSET(C7, 1, 0), which was correct before the new row was inserted. Inserting a row above row 7 shifted the OFFSET reference to point to a row that now contains the new line item, not the EBITDA growth rate.
+
+Fix: Update Assumptions!C8 to reference the EBITDA growth rate cell directly (the cell that now contains the rate after the row insertion), or adjust the OFFSET formula to account for the new row offset."
+
+Fifteen minutes of manual tracing becomes thirty seconds.
+
+The Invisible Text-Number Problem​
+
+A controller's SUM formula returns $3,421 when manually adding the column gives $18,350.
+
+She types: "The SUM in G42 should total G2:G41 but is returning $3,421 instead of approximately $18,350. What is happening?"
+
+Claude: "7 cells (G8, G13, G17, G22, G25, G31, G38) contain numbers formatted as text (they are left-aligned, which is Excel's indicator. These 7 cells sum to $14,929. SUM ignores text-formatted values, explaining the $14,929 shortfall. Fix: select those 7 cells, go to Data, then Text to Columns, then Finish. This forces Excel to re-evaluate them as numbers. The text formatting likely came from a data import) accounting system exports frequently format numeric fields as text."
+
+This error is invisible to manual inspection. The cells display numbers. They look correct. But SUM silently excludes them because Excel treats them as text. Claude identifies the exact cells, quantifies the shortfall, and explains both the fix and the likely origin.
+
+Exercise 3: Error Diagnosis​
+
+What you need: A workbook with a formula error, or one you create by deleting a referenced column.
+
+Ask Claude: "There is a [error type] in [cell]. Trace the full chain back to the source."
+Before fixing it, predict: will other errors clear after this fix, or are there secondary errors?
+Make the fix. Confirm.
+Bonus: deliberately enter a text-formatted number (type an apostrophe before a number, like '1234) in a cell feeding a SUM. Ask Claude why the sum is wrong.
+
+Target time: 20 minutes.
+
+Building Model Structures from Description​
+
+Claude in Excel can draft a financial model structure (tabs, row labels, formula architecture, cell linkages) from a plain-language description. This is not automation of the analytical judgment. It is elimination of the structural setup work that precedes it.
+
+CONCEPT BOX: What Is EBITDA?
+
+EBITDA stands for Earnings Before Interest, Tax, Depreciation and Amortisation. It measures operating profitability by stripping out financing decisions (interest), tax, and accounting policies for capital assets (depreciation and amortisation).
+
+Formula: Revenue minus Cost of Goods Sold minus Operating Expenses (excluding depreciation and amortisation).
+
+Why it matters: EBITDA is the basis for most enterprise valuation multiples. A company trading at "8x EBITDA" has an enterprise value eight times its annual EBITDA. If EBITDA is $50M, the enterprise value is $400M.
+
+What EBITDA is not: It ignores capital expenditure, working capital movements, and actual tax payments. A company with high EBITDA and high capex may generate very little actual free cash.
+
+CONCEPT BOX: The Three Financial Statements and How They Link
+
+Income Statement (P&L): Revenue to net income over a period. Net income flows to the balance sheet (retained earnings) and starts the cash flow statement.
+
+Balance Sheet: Assets and liabilities at a point in time. Always balances: Total Assets equals Total Liabilities plus Equity. The cash balance comes from the cash flow statement.
+
+Cash Flow Statement: Reconciles net income (accounting profit) to actual cash. Starts with net income, adds non-cash items (depreciation), adjusts for working capital (receivables, inventory, payables), and subtracts capital expenditure.
+
+Integration test: Change one revenue assumption. It should flow: higher revenue leads to higher net income on the P&L, which leads to higher retained earnings on the balance sheet, which leads to higher cash on the cash flow statement feeding back to the balance sheet. If the balance sheet does not balance after the change, there is a linkage error somewhere.
+
+Exercise 4: Build a Three-Statement Model​
+
+What you need: Claude in Excel open in a blank workbook.
+
+Part A: Commission the structure (25 min): Type to Claude:
+
+"Build a two-year financial model for a small retail business: (1) Assumptions tab: revenue Year 1 $500,000, revenue growth 15%, gross margin 45%, operating expenses 30% of revenue, tax rate 20%, capex Year 1 $20,000 and Year 2 $15,000, depreciation rate 20% of opening fixed assets, debtor days 45. (2) P&L tab: revenue, COGS, gross profit, gross margin %, operating expenses, EBITDA, depreciation, EBIT, tax, net income. (3) Cash flow tab: net income, add back depreciation, change in debtors, capex, net cash flow, closing cash balance. Use blue cells for inputs, black for formulas."
+
+Review what Claude builds. Check: are formulas referencing the Assumptions tab? Does gross profit equal revenue multiplied by gross margin? Does depreciation reduce EBIT correctly?
+
+Part B: Interrogate it (15 min): Ask: "What is gross margin % in Year 2?" Then: "If I increase the revenue growth rate to 20%, what happens to net income in Year 2?" Then: "How does the debtor days assumption affect the model?"
+
+Part C: Break it deliberately (10 min): Overtype one formula cell with a hard-coded number. Ask Claude: "Is there any cell in this model that should be a formula but appears to be hard-coded?"
+
+The discipline to build: The quality of the model Claude builds is proportional to the specificity of your instruction. A vague prompt produces a vague model. A specific one (with named tabs, explicit line items, and stated linkage requirements) produces a working starting point.
+
+Target time: 50 minutes.
+
+Try With AI​
+
+Use these prompts in Claude in Excel or your preferred AI assistant to practise the three skills from this lesson.
+
+Prompt 1: Scenario Impact Analysis​
+I have a financial model with these inputs:
+- Revenue growth rate (cell B8): currently 12%
+- Operating expense ratio (cell B15): currently 30%
+- Tax rate (cell B20): currently 25%
+
+Model a stress scenario: revenue growth drops to 5%, operating
+expenses rise to 35% of revenue, and tax rate increases to 28%.
+
+For each change, tell me:
+1. The individual impact on net income
+2. The combined impact of all three changes
+3. Why the combined impact differs from the sum of individual impacts
+
+Then suggest which input I should focus my analysis on — the one
+where a small change produces the largest swing in net income.
+
+
+What you're learning: Scenario analysis is not just about running numbers: it is about identifying which assumptions your conclusion depends on most. The gap between the sum of individual impacts and the combined impact reveals non-linear interactions in the model. Identifying the highest-sensitivity input tells you where to focus your analytical effort.
+
+Prompt 2: Error Chain Diagnosis​
+I have a workbook where cell F45 shows #REF! and cell H12 shows
+#VALUE!. I suspect they may be related because both appeared after
+I reorganised the Assumptions tab.
+
+For each error:
+1. Trace the full dependency chain from the error cell back to the
+   root cause
+2. Explain what specific action caused the error
+3. Recommend a fix
+4. Predict whether fixing this error will resolve any other errors
+   in the workbook
+
+After diagnosing both, tell me: should I fix them in a specific
+order, or are they independent?
+
+
+What you're learning: Formula errors rarely exist in isolation. Understanding the dependency chain teaches you to diagnose errors structurally rather than cell by cell. Predicting whether fixes cascade builds the mental model of how Excel's calculation engine propagates changes: a skill that transfers to any complex spreadsheet work.
+
+Prompt 3: Model Specification Writing​
+I want to build a financial model for a SaaS business. Before I
+ask Claude in Excel to build it, help me write the specification.
+
+The business has monthly recurring revenue, annual churn, and
+upsell revenue. It needs a P&L, a cash flow statement, and a
+unit economics tab showing CAC, LTV, and LTV:CAC ratio.
+
+For each tab, list:
+1. The exact line items (row labels)
+2. Which cells should be inputs (blue) vs formulas (black)
+3. How each tab links to the others
+
+Then assess: is this specification specific enough to produce a
+usable model, or are there ambiguities that would cause Claude
+to make assumptions I might not want?
+
+
+What you're learning: The specification is the primary skill in model building with AI. A well-written specification produces a model you can validate; a vague one produces a model you must rebuild. Practising specification writing before commissioning the build trains the habit of front-loading precision: a pattern that applies to every AI-assisted workflow, not just financial modelling.
+
+Flashcards Study Aid​
+
+Continue to Lesson 4: From Assistant to Agent →

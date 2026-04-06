@@ -1,0 +1,723 @@
+Multi-Agent Handoff & Production
+
+Your voice agent works. Users speak, your agent listens, thinks, and responds. But what happens when a billing question comes in and your general-purpose agent stumbles? Or when a technical issue requires deep domain expertise your triage agent doesn't have?
+
+This is where multi-agent architectures become essential. The same pattern that powers enterprise support systems—where you're transferred from a general representative to a billing specialist or technical expert—applies to voice AI. But here's the difference: in a well-designed system, the specialist already knows your entire conversation history. No "Can you repeat your account number?" No "What was the original issue again?"
+
+This lesson teaches you to build that experience. You'll implement triage-to-specialist handoffs with full context preservation, then deploy the entire system to Kubernetes for production scale. By the end, your livekit-agents skill will be production-ready—a genuine Digital FTE component you can deploy for customers.
+
+The Multi-Agent Pattern​
+Why Single Agents Hit Limits​
+
+A single voice agent can handle general conversations effectively. But consider these scenarios:
+
+Scenario	Single Agent Challenge	Multi-Agent Solution
+"I need a refund for my March invoice"	General agent may hallucinate billing policies	Billing specialist with access to invoicing APIs
+"My API keeps timing out under load"	Generic troubleshooting wastes time	Technical specialist who can run diagnostics
+"I want to upgrade to enterprise"	Support agent lacks pricing authority	Sales specialist with quote generation tools
+"I'm going to cancel unless..."	Retention requires nuanced handling	Escalation agent with retention authority
+
+Multi-agent architectures solve this by routing conversations to specialists who have:
+
+Domain-specific knowledge encoded in their prompts
+Specialized tools (billing APIs, diagnostic tools, CRM access)
+Authority boundaries (what they can promise, what requires escalation)
+The Triage Pattern​
+
+The triage agent is your front door. It greets users, understands their intent, and routes to the appropriate specialist:
+
+User: "Hi, I have a question about my bill"
+     │
+     ▼
+┌─────────────────┐
+│  Triage Agent   │
+│                 │
+│ Intent: billing │
+└────────┬────────┘
+         │
+         │ handoff_to(BillingAgent, context)
+         ▼
+┌─────────────────┐
+│ Billing Agent   │
+│                 │
+│ "I see you're   │
+│ calling about   │
+│ your March      │
+│ invoice..."     │
+└─────────────────┘
+
+
+The critical insight: handoff includes context. The billing agent doesn't start fresh—it receives the full conversation history and any extracted information (account ID, issue summary, sentiment).
+
+Implementation: The Triage Agent​
+
+Here's how to implement the triage pattern with LiveKit Agents:
+
+from livekit.agents import Agent, AgentSession, RunContext
+from livekit.agents.llm import ChatMessage
+from dataclasses import dataclass
+from typing import Optional
+import json
+
+@dataclass
+class HandoffContext:
+    """Context preserved across agent handoffs."""
+    conversation_history: list[ChatMessage]
+    user_intent: str
+    extracted_info: dict
+    sentiment: str
+    session_id: str
+
+class TriageAgent(Agent):
+    """Routes users to appropriate specialist agents."""
+
+    INTENTS = {
+        "billing": ["invoice", "payment", "refund", "charge", "bill", "pricing"],
+        "technical": ["error", "bug", "timeout", "crash", "not working", "broken"],
+        "sales": ["upgrade", "enterprise", "pricing", "demo", "features"],
+        "escalation": ["cancel", "frustrated", "manager", "complaint", "unacceptable"]
+    }
+
+    async def on_enter(self, ctx: RunContext):
+        """Greet user and begin intent detection."""
+        await ctx.say(
+            "Hello! I'm here to help you today. "
+            "What can I assist you with?"
+        )
+
+    async def on_user_turn(self, ctx: RunContext, message: str):
+        """Detect intent and route to specialist."""
+        # Classify intent
+        intent = await self.classify_intent(ctx, message)
+
+        if intent == "billing":
+            await self.handoff_to_specialist(
+                ctx, BillingAgent, "billing specialist"
+            )
+        elif intent == "technical":
+            await self.handoff_to_specialist(
+                ctx, TechnicalAgent, "technical support specialist"
+            )
+        elif intent == "sales":
+            await self.handoff_to_specialist(
+                ctx, SalesAgent, "sales representative"
+            )
+        elif intent == "escalation":
+            await self.handoff_to_specialist(
+                ctx, EscalationAgent, "customer success manager"
+            )
+        else:
+            # Handle general queries directly
+            response = await ctx.llm.generate(message)
+            await ctx.say(response)
+
+    async def classify_intent(
+        self, ctx: RunContext, message: str
+    ) -> Optional[str]:
+        """Use LLM to classify user intent."""
+        classification_prompt = f"""
+        Classify the following user message into one category:
+        - billing: Questions about invoices, payments, refunds
+        - technical: Issues with the product, errors, bugs
+        - sales: Interest in purchasing, upgrading, demos
+        - escalation: Frustrated customers, complaints, cancellation threats
+        - general: Everything else
+
+        User message: "{message}"
+
+        Return only the category name, nothing else.
+        """
+
+        result = await ctx.llm.generate(classification_prompt)
+        intent = result.strip().lower()
+
+        return intent if intent in self.INTENTS else None
+
+    async def handoff_to_specialist(
+        self,
+        ctx: RunContext,
+        agent_class: type,
+        agent_name: str
+    ):
+        """Transfer to specialist with full context."""
+        # Build handoff context
+        context = HandoffContext(
+            conversation_history=ctx.chat_history,
+            user_intent=self.last_intent,
+            extracted_info=await self.extract_key_info(ctx),
+            sentiment=await self.detect_sentiment(ctx),
+            session_id=ctx.session.id
+        )
+
+        # Announce the transfer
+        await ctx.say(
+            f"I'm connecting you with our {agent_name} who can "
+            "help you with this. One moment please."
+        )
+
+        # Perform handoff
+        await ctx.handoff(agent_class, context=context)
+
+
+Output:
+
+User: "Hi, I have a question about my March invoice"
+Agent: "Hello! I'm here to help you today. What can I assist you with?"
+       [Intent detected: billing]
+Agent: "I'm connecting you with our billing specialist who can
+        help you with this. One moment please."
+       [Handoff to BillingAgent with context]
+
+Implementation: The Specialist Agent​
+
+The specialist agent receives context and acknowledges the prior conversation:
+
+class BillingAgent(Agent):
+    """Handles billing inquiries with invoice API access."""
+
+    async def on_enter(self, ctx: RunContext):
+        """Acknowledge context and demonstrate awareness."""
+        if ctx.handoff_context:
+            # We have context from triage
+            context = ctx.handoff_context
+
+            # Summarize what we know
+            await ctx.say(
+                f"Hi there! I'm your billing specialist. "
+                f"I see you're calling about your invoice. "
+                f"Let me pull up your account details."
+            )
+
+            # If we extracted account info, use it
+            if "account_id" in context.extracted_info:
+                account = await self.fetch_account(
+                    context.extracted_info["account_id"]
+                )
+                await ctx.say(
+                    f"I have your account open, {account.name}. "
+                    f"How can I help with your billing question?"
+                )
+        else:
+            # Direct entry without handoff
+            await ctx.say(
+                "Hello! I'm your billing specialist. "
+                "How can I help you today?"
+            )
+
+    async def on_user_turn(self, ctx: RunContext, message: str):
+        """Handle billing-specific queries with tool access."""
+        # Use MCP tools for billing operations
+        if "refund" in message.lower():
+            result = await ctx.mcp.call_tool(
+                "billing_server",
+                "check_refund_eligibility",
+                {"session_id": ctx.session.id}
+            )
+            await ctx.say(self.format_refund_response(result))
+        elif "invoice" in message.lower():
+            invoices = await ctx.mcp.call_tool(
+                "billing_server",
+                "get_recent_invoices",
+                {"session_id": ctx.session.id}
+            )
+            await ctx.say(self.format_invoice_response(invoices))
+        else:
+            response = await ctx.llm.generate(
+                message,
+                system=self.BILLING_SYSTEM_PROMPT
+            )
+            await ctx.say(response)
+
+
+Output:
+
+[After handoff from TriageAgent]
+BillingAgent: "Hi there! I'm your billing specialist. I see you're
+              calling about your invoice. Let me pull up your
+              account details."
+              [Fetches account via API]
+BillingAgent: "I have your account open, Sarah. How can I help
+              with your billing question?"
+User: "I was charged twice for March"
+BillingAgent: [Calls check_refund_eligibility tool]
+              "I can see the duplicate charge on your account.
+              You're eligible for a full refund of $49.99. Would
+              you like me to process that now?"
+
+Context Preservation Deep Dive​
+What to Preserve​
+
+Not all context is equal. Preserve information that prevents user repetition:
+
+Context Type	Example	Why Preserve
+Intent summary	"User asking about March invoice refund"	Specialist knows the topic immediately
+Extracted entities	account_id, invoice_number, product_name	No "Can you give me your account number again?"
+Conversation history	Full transcript of triage conversation	Specialist can reference prior statements
+Sentiment	frustrated, neutral, happy	Specialist adjusts tone appropriately
+Prior attempts	"User already tried clearing cache"	No redundant troubleshooting
+What NOT to Preserve​
+
+Large or stale context degrades performance:
+
+Context Type	Why Exclude
+Raw audio buffers	Too large, already transcribed
+Internal system logs	Not relevant to conversation
+Old session data	Stale context confuses the LLM
+PII beyond what's needed	Privacy and security risk
+Implementation: Context Builder​
+class ContextBuilder:
+    """Builds minimal, relevant handoff context."""
+
+    @staticmethod
+    async def build_handoff_context(
+        ctx: RunContext,
+        intent: str
+    ) -> HandoffContext:
+        """Extract only what the specialist needs."""
+
+        # Summarize conversation (not full history for long sessions)
+        summary = await ctx.llm.generate(
+            f"Summarize this conversation in 2-3 sentences, "
+            f"focusing on the user's {intent} issue:\n"
+            f"{ctx.chat_history[-10:]}"  # Last 10 turns only
+        )
+
+        # Extract structured information
+        extracted = await ContextBuilder.extract_entities(ctx, intent)
+
+        # Detect sentiment for tone matching
+        sentiment = await ContextBuilder.detect_sentiment(ctx)
+
+        return HandoffContext(
+            conversation_history=ctx.chat_history[-10:],
+            user_intent=intent,
+            extracted_info=extracted,
+            sentiment=sentiment,
+            session_id=ctx.session.id
+        )
+
+    @staticmethod
+    async def extract_entities(
+        ctx: RunContext,
+        intent: str
+    ) -> dict:
+        """Extract intent-specific entities."""
+        extraction_prompt = f"""
+        Extract key information from this conversation for a
+        {intent} specialist. Return JSON with relevant fields.
+
+        For billing: account_id, invoice_number, amount, date
+        For technical: error_message, product, steps_tried
+        For sales: current_plan, interest, company_size
+
+        Conversation: {ctx.chat_history[-5:]}
+
+        Return only valid JSON.
+        """
+
+        result = await ctx.llm.generate(extraction_prompt)
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return {}
+
+Kubernetes Deployment​
+
+Your multi-agent voice system works locally. Now let's deploy it to Kubernetes for production scale.
+
+Architecture for Scale​
+                    ┌─────────────────────────────────────┐
+                    │        Kubernetes Cluster           │
+                    └─────────────────────────────────────┘
+                                     │
+        ┌────────────────────────────┼────────────────────────────┐
+        │                            │                            │
+┌───────▼───────┐           ┌───────▼───────┐           ┌───────▼───────┐
+│ Worker Pod 1  │           │ Worker Pod 2  │           │ Worker Pod N  │
+│               │           │               │           │               │
+│ TriageAgent   │           │ BillingAgent  │           │ TechnicalAgent│
+│ BillingAgent  │           │ SalesAgent    │           │ EscalationAgt │
+│ TechnicalAgt  │           │ TechnicalAgt  │           │ SalesAgent    │
+└───────┬───────┘           └───────────────┘           └───────────────┘
+        │
+        │ Session State
+        ▼
+┌───────────────┐
+│    Redis      │ ◄── Session persistence, handoff context
+│   Cluster     │
+└───────────────┘
+
+Worker Deployment​
+# livekit-workers-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-agent-workers
+  labels:
+    app: voice-agent
+    component: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: voice-agent
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: voice-agent
+        component: worker
+    spec:
+      containers:
+      - name: worker
+        image: myregistry/voice-agent:v1.2.0
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: LIVEKIT_URL
+          valueFrom:
+            secretKeyRef:
+              name: livekit-credentials
+              key: url
+        - name: LIVEKIT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: livekit-credentials
+              key: api-key
+        - name: LIVEKIT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: livekit-credentials
+              key: api-secret
+        - name: REDIS_URL
+          value: "redis://redis-cluster:6379"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-credentials
+              key: api-key
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2000m"
+            memory: "2Gi"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+
+Horizontal Pod Autoscaler​
+
+Scale based on concurrent sessions, not just CPU:
+
+# voice-agent-hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: voice-agent-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: voice-agent-workers
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: active_sessions
+      target:
+        type: AverageValue
+        averageValue: "50"  # 50 concurrent sessions per pod
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 4
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 120
+
+Session Persistence with Redis​
+
+Sessions must survive pod restarts:
+
+# session_persistence.py
+from redis import asyncio as aioredis
+from livekit.agents import AgentSession
+import pickle
+from typing import Optional
+
+class RedisSessionStore:
+    """Persist agent sessions to Redis for fault tolerance."""
+
+    def __init__(self, redis_url: str):
+        self.redis = aioredis.from_url(redis_url)
+        self.ttl = 3600  # 1 hour session TTL
+
+    async def save_session(self, session: AgentSession):
+        """Persist session state."""
+        key = f"session:{session.id}"
+        data = {
+            "id": session.id,
+            "agent_type": session.agent.__class__.__name__,
+            "chat_history": [
+                {"role": m.role, "content": m.content}
+                for m in session.chat_history
+            ],
+            "context": session.context,
+            "created_at": session.created_at.isoformat(),
+        }
+        await self.redis.setex(
+            key,
+            self.ttl,
+            pickle.dumps(data)
+        )
+
+    async def load_session(
+        self, session_id: str
+    ) -> Optional[dict]:
+        """Restore session from Redis."""
+        key = f"session:{session_id}"
+        data = await self.redis.get(key)
+        if data:
+            return pickle.loads(data)
+        return None
+
+    async def save_handoff_context(
+        self,
+        session_id: str,
+        context: HandoffContext
+    ):
+        """Persist handoff context for cross-pod handoffs."""
+        key = f"handoff:{session_id}"
+        await self.redis.setex(
+            key,
+            300,  # 5 minute TTL for handoffs
+            pickle.dumps(context)
+        )
+
+
+Output:
+
+# Verify deployment
+$ kubectl get pods -l app=voice-agent
+NAME                                   READY   STATUS    RESTARTS   AGE
+voice-agent-workers-7d9f8b6c44-abc12   1/1     Running   0          5m
+voice-agent-workers-7d9f8b6c44-def34   1/1     Running   0          5m
+voice-agent-workers-7d9f8b6c44-ghi56   1/1     Running   0          5m
+
+# Check HPA status
+$ kubectl get hpa voice-agent-hpa
+NAME              REFERENCE                    TARGETS         MINPODS   MAXPODS   REPLICAS
+voice-agent-hpa   Deployment/voice-agents      23/50, 45%/70%  3         20        3
+
+# Verify Redis sessions
+$ kubectl exec -it redis-0 -- redis-cli keys "session:*" | wc -l
+47
+
+Health Checks Implementation​
+# health.py
+from fastapi import FastAPI
+from livekit.agents import Worker
+
+app = FastAPI()
+worker: Worker = None
+
+@app.get("/health/live")
+async def liveness():
+    """Pod is alive and should not be killed."""
+    return {"status": "alive"}
+
+@app.get("/health/ready")
+async def readiness():
+    """Pod is ready to accept new sessions."""
+    if worker is None:
+        return {"status": "not_ready", "reason": "worker_not_initialized"}, 503
+
+    if worker.active_sessions >= worker.max_sessions:
+        return {"status": "not_ready", "reason": "at_capacity"}, 503
+
+    if not await worker.check_livekit_connection():
+        return {"status": "not_ready", "reason": "livekit_disconnected"}, 503
+
+    return {
+        "status": "ready",
+        "active_sessions": worker.active_sessions,
+        "capacity": worker.max_sessions
+    }
+
+Finalize Your Skill: Production Ready​
+
+You've learned multi-agent patterns and Kubernetes deployment. Now update your livekit-agents skill to include this production knowledge.
+
+Skill Review Checklist​
+
+Your livekit-agents skill should now guide:
+
+Capability	Status	Notes
+Architecture explanation	From Lesson 1	Agents, AgentSessions, Workers
+Voice pipeline setup	From Lesson 1	STT, LLM, TTS configuration
+Turn detection config	From Lesson 2	Semantic detection, barge-in
+MCP integration	From Lesson 2	One-line tool connection
+Multi-agent handoffs	NEW	Triage patterns, context preservation
+K8s deployment	NEW	Workers, HPA, session persistence
+Update Your Skill​
+
+Add these sections to .claude/skills/livekit-agents/SKILL.md:
+
+## Multi-Agent Architecture
+
+### When to Use Multi-Agent
+- User intents span multiple domains (billing, technical, sales)
+- Specialists need different tools and authority levels
+- Complex issues require escalation paths
+
+### The Triage Pattern
+1. Triage agent greets user and detects intent
+2. On intent match, build HandoffContext with:
+   - Conversation history (last 10 turns)
+   - Extracted entities (account_id, issue summary)
+   - Sentiment (for tone matching)
+3. Announce transfer, then handoff to specialist
+4. Specialist acknowledges context immediately
+
+### Context Preservation Rules
+- PRESERVE: Intent, entities, sentiment, recent history
+- EXCLUDE: Raw audio, system logs, stale data, excessive PII
+
+## Kubernetes Deployment
+
+### Deployment Checklist
+- [ ] Workers deployed with resource limits (500m-2000m CPU, 512Mi-2Gi RAM)
+- [ ] HPA configured for active_sessions metric (50/pod target)
+- [ ] Redis for session persistence (1 hour TTL)
+- [ ] Health probes: /health/live (liveness), /health/ready (readiness)
+- [ ] Secrets for LIVEKIT_*, OPENAI_API_KEY
+
+### Scaling Considerations
+- Scale on sessions, not just CPU (voice agents are memory-bound)
+- Use slow scale-down (300s stabilization) to avoid session disruption
+- Enable Redis cluster for high availability
+
+Test Your Finalized Skill​
+Prompt: "I need to deploy a multi-agent voice system to Kubernetes.
+We have triage, billing, and technical specialists. Walk me through
+the deployment architecture and what I need to configure."
+
+
+Your skill should now generate:
+
+Multi-agent architecture with handoff patterns
+Kubernetes manifests with proper resource configuration
+Redis session persistence setup
+Health check endpoints
+HPA configuration for voice workloads
+Try With AI​
+
+Use your livekit-agents skill with these prompts to solidify production patterns.
+
+Prompt 1: Design Your Agent Topology​
+I'm building a voice-enabled customer support system with these requirements:
+
+- Users call about billing (40%), technical issues (35%), sales (15%),
+  other (10%)
+- Frustrated customers should be escalated immediately
+- Each specialist needs different MCP tools:
+  - Billing: invoice API, refund processor
+  - Technical: diagnostic tools, ticket system
+  - Sales: CRM, pricing calculator
+
+Use my livekit-agents skill to design:
+1. The triage agent's intent detection logic
+2. What context passes in each handoff type
+3. Fallback behavior when specialists are overloaded
+4. How to handle mid-conversation topic switches
+
+I'll implement this and test with real scenarios.
+
+
+What you're learning: Architecture decisions for production multi-agent systems - balancing user experience with operational complexity.
+
+Prompt 2: Optimize for Scale​
+My voice agent is deployed but I'm seeing issues at scale:
+
+- 500+ concurrent sessions
+- Some handoffs fail when the receiving pod is at capacity
+- Sessions are lost when pods restart during traffic spikes
+- Turn detection latency increases under load
+
+Current setup:
+- 5 worker pods, 100 sessions each
+- Redis single instance
+- No GPU for STT (using API)
+
+Use my livekit-agents skill to diagnose and recommend:
+1. What's likely causing handoff failures?
+2. How do I make session persistence more robust?
+3. Should I add GPU nodes for STT? What's the cost/benefit?
+4. What metrics should I monitor for early warning?
+
+Walk me through each recommendation step by step.
+
+
+What you're learning: Performance optimization - diagnosing bottlenecks and making data-driven infrastructure decisions.
+
+Prompt 3: Production Checklist​
+I'm ready to launch my voice agent to production customers. Before
+I do, I want to validate my deployment is production-grade.
+
+My current state:
+- Multi-agent system: triage + 3 specialists
+- Kubernetes: 10 pods across 3 nodes
+- Redis cluster: 3 nodes
+- Monitoring: Prometheus + Grafana
+- No GPU (API-based STT/TTS)
+
+Use my livekit-agents skill to generate a production readiness checklist:
+1. What could fail that I haven't tested?
+2. What monitoring alerts should exist before launch?
+3. What's my rollback plan if something goes wrong?
+4. What documentation do I need for on-call engineers?
+5. What load testing should I run first?
+
+Be thorough - I'd rather delay launch than have an outage.
+
+
+What you're learning: Production readiness evaluation - thinking about failure modes before they happen.
+
+Safety Note​
+
+Multi-agent voice systems handle real customer conversations. Before production deployment:
+
+Test handoff flows with realistic scenarios
+Verify context preservation doesn't leak PII between unrelated sessions
+Ensure fallback behavior is graceful (never drop a call silently)
+Monitor sentiment trends to catch systemic issues

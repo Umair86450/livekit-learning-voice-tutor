@@ -1,0 +1,220 @@
+Supply Network Design Scenarios
+
+Your organisation has been shipping to your Pakistan customers from a Dubai distribution centre for three years. Transit times average 4.2 days. You have just signed two new customers in Lahore that together represent 30% volume growth in Pakistan. Your logistics cost for Pakistan has increased 18% year-on-year as fuel surcharges compound.
+
+Your supply chain director asks: should we open a Lahore DC?
+
+Eighteen months ago, answering this question would have required a consulting engagement. A team would spend 6-8 weeks gathering data, building an optimisation model, running scenarios, and producing a recommendation deck. By the time the analysis was complete, some of the underlying assumptions would already be stale.
+
+Samir Saci's published work on AI agents for supply chain network optimisation demonstrates that these studies can now be run conversationally: with the agent re-running scenarios in response to decision-maker questions in real time, turning a periodic consulting exercise into a continuous analytical capability. This lesson teaches the framework and the /supply-network-design skill that implements it.
+
+When to Trigger a Network Design Review​
+
+Not every operational change warrants a full network design review. These trigger events do:
+
+Trigger	Why It Matters
+Demand volume shifted >20% in a key region	The network was designed for the old demand pattern
+New significant customer in a new geography	New demand node not in the original design
+Supplier base materially changed	New sourcing region changes supply-side flows
+Transport or carrier cost increased >15%	Changes the cost optimum between network configurations
+New DC or manufacturing facility planned	New node to evaluate in the network
+Regulatory change affecting trade routes	Tariffs, customs changes, or sanctions affect route economics
+Sustainability target requiring Scope 3 reduction	Mode shifts or network changes needed to meet carbon targets
+Company acquisition creating overlapping networks	Two networks to rationalise into one
+
+For the Pakistan scenario: three triggers apply simultaneously: demand growth >20% in Pakistan, transport cost increase >15%, and new customers in a new city. This is a clear network design review.
+
+Scenario Definition Framework​
+
+Before running any optimisation, define what you are optimising for and what the parameters are. An undefined objective produces a technically correct answer to the wrong question.
+
+Objective function (state explicitly, in rank order):
+
+Primary:   [Cost / Service level / Carbon / Resilience — choose one]
+Secondary: [Cost / Service level / Carbon / Resilience]
+Constraint: [Any hard constraints that cannot be traded off]
+
+
+For the Pakistan case: primary objective is cost reduction; secondary is service level improvement for Pakistan customers; constraint is that existing Dubai DC cannot be closed (it serves other markets).
+
+Network parameters:
+
+Supply nodes: manufacturing sites and key suppliers with capacities
+Demand nodes: customer locations with demand volumes
+Intermediate nodes: existing and candidate warehouse/DC locations
+Time horizon: typically 1-5 years
+Demand forecast: current volumes plus growth assumptions per region
+
+Scenario structure (always include the status quo):
+
+Scenario A: Status quo (baseline: always include)
+Scenario B: First alternative: name the key change
+Scenario C: Second alternative
+Scenario D: Optional stress test: what if one node fails?
+The /supply-network-design Workflow​
+
+The command is /supply-network-design: this replaces the spec name /network-design to avoid collisions with other Anthropic surfaces.
+
+/supply-network-design
+> Agent: Describe the network design question.
+
+> User: We are opening a new distribution centre in Pakistan
+        (Lahore) to serve our South Asia market. We currently
+        ship from our Dubai DC. Model 3 scenarios:
+        Scenario A: Dubai DC serves all South Asia (status quo)
+        Scenario B: Lahore DC serves Pakistan only; Dubai serves rest
+        Scenario C: Lahore DC serves Pakistan + India; Dubai serves
+                    Gulf + other South Asia
+        Run cost, service level, and carbon analysis for each.
+
+
+The agent calls the MCP-connected network optimisation service: a FastAPI microservice exposing the optimisation algorithm as a typed tool: returns scenario outputs, and then provides analysis:
+
+NETWORK DESIGN SCENARIOS — South Asia Distribution
+════════════════════════════════════════════════════════════
+
+            Scenario A      Scenario B      Scenario C
+Total cost: £2.84M/yr      £2.41M/yr      £2.18M/yr
+Avg transit: 4.2 days      2.8 days (PK)  2.6 days (PK+IN)
+Carbon:     1,840 tCO2e   1,520 tCO2e    1,310 tCO2e
+Capex:      £0             £340K           £340K
+
+RECOMMENDATION: Scenario B is the inflection point.
+  Net saving vs. A: £430K/year
+  Payback on Lahore DC capex: <10 months
+  Service improvement for Pakistan: -1.4 days average transit
+  Carbon reduction: -17%
+
+Scenario C adds further efficiency for India routes but requires
+  modelling of India import duties, which differ significantly from
+  Pakistan's import framework. Recommend separate India analysis
+  before committing to Scenario C scope.
+════════════════════════════════════════════════════════════
+
+
+The output compares all three scenarios on cost, service level, carbon, and capex. The recommendation identifies the inflection point: the scenario that captures most of the value at acceptable risk and investment: and flags what additional analysis is needed before the next step.
+
+THE MCP ARCHITECTURE
+
+The /supply-network-design skill uses Claude as the conversational interface and a MCP-connected optimisation microservice as the computational backend. You do not need to understand the microservice architecture to use the skill. What matters is the capability it unlocks: the ability to re-run scenarios with modified assumptions in seconds rather than days.
+
+Conversational What-If Iteration​
+
+A single scenario comparison is not a complete network design study. The recommendation is only as good as its assumptions. What-if iteration tests whether the recommendation is robust: or whether it flips under plausible alternative scenarios.
+
+Ask these questions after receiving the initial output:
+
+Demand sensitivity:
+
+What if Pakistan demand increases 20% faster than forecast?
+Does Scenario B still have sufficient capacity, or does
+Scenario C become necessary sooner?
+
+
+Cost sensitivity:
+
+What if fuel costs rise another 15% over the next 12 months?
+How does this change the relative ranking of the three scenarios?
+Which scenario is most resilient to fuel cost increases?
+
+
+Break-even analysis:
+
+What is the break-even volume for the Lahore DC?
+At what annual shipment volume does Scenario B equal
+the cost of Scenario A?
+
+
+Resilience stress test:
+
+What happens if the Dubai-to-Pakistan route is disrupted
+for 3 months? What would re-routing through Lahore cost,
+and does the current Scenario B configuration have
+enough capacity to absorb the additional volume?
+
+
+Each question prompts the agent to re-run the affected scenarios with modified parameters and return the delta against the prior result: the decision-maker sees exactly how sensitive the recommendation is to each assumption.
+
+Network Design Trade-offs​
+
+Every network design decision involves trade-offs across cost, service level, carbon, and capex. The scenario output makes these explicit:
+
+For the Pakistan example:
+
+Scenario B vs. A: £430K/year saving, 1.4 day transit improvement, 17% carbon reduction, £340K capex (payback <10 months). Clear winner.
+Scenario C vs. B: Further efficiency on India routes, but requires India import duty modelling, adds complexity to DC operations, and captures diminishing returns relative to Scenario B's savings.
+
+The recommendation for Scenario B is not that Scenario C is wrong: it is that Scenario C's additional value requires additional analysis first. This is the kind of nuanced output that conversational iteration enables: not just "here is the best scenario" but "here is the next question you need to answer before going further."
+
+WHAT NEVER TO DO
+
+Never present a single scenario as a recommendation: always compare against the status quo baseline. Never optimise for cost alone without showing the service level and carbon implications. Never recommend closing an existing node without modelling the transition cost and transition period risk. Never base a network design on demand data more than 18 months old.
+
+Try With AI​
+TRY WITH AI
+
+Reproduce: Apply what you just learned to a simple case.
+
+I run procurement for a UK electronics company. We currently ship
+finished goods to our European customers from a single warehouse
+in Birmingham (UK).
+
+Context:
+- Annual Europe logistics spend: £1.8M
+- Average transit time to EU: 4.8 days (post-Brexit customs)
+- 60% of volume is to Germany, Netherlands, and France
+- We are evaluating opening a small DC in Rotterdam
+
+Model two scenarios:
+Scenario A: Status quo — Birmingham serves all Europe
+Scenario B: Rotterdam DC serves Germany, Netherlands, France;
+            Birmingham serves UK + other Europe
+
+Objective: primary = cost; secondary = service level
+Analyse cost, transit time, and capex requirements.
+
+
+What you are learning: The scenario definition framework: clear objective, status quo baseline, one key variable changed between scenarios: produces a comparable output. The structure of the question determines the usefulness of the answer.
+
+Adapt: Modify the scenario to match your organisation.
+
+Identify one network design question relevant to your organisation
+or industry. It could be:
+- A new distribution centre you are evaluating
+- A potential nearshoring decision (moving supply closer to demand)
+- A warehouse consolidation (reducing from 4 DCs to 2)
+- A trade route change forced by a regulatory change
+
+Define the scenario using the framework:
+1. What is the trigger event that makes this review necessary now?
+2. What is your objective function (cost / service level / carbon)?
+3. What is Scenario A (status quo)?
+4. What is Scenario B (the alternative you are evaluating)?
+5. What would make you choose Scenario B over Scenario A?
+
+
+What you are learning: Most organisations have network design questions they have been deferring because the analysis seemed too complex. Defining the scenario clearly: trigger, objective, baseline, alternative: makes the question tractable.
+
+Apply: Extend to a new situation the lesson didn't cover directly.
+
+Your CFO has just told you that your organisation needs to reduce
+logistics Scope 3 emissions by 25% within 2 years as part of
+sustainability commitments.
+
+Your current network uses road freight for 90% of volume.
+You ship 45,000 tonnes/year across your network.
+
+1. What network design changes could achieve a 25% carbon reduction?
+   What scenarios would you evaluate?
+2. What is the cost trade-off of each option?
+3. Which trigger events in the trigger list apply here?
+4. What data would you need to run the analysis?
+
+Design the scenario comparison you would present to your CFO.
+
+
+What you are learning: Carbon reduction targets are increasingly driving network design decisions. Translating a sustainability target into a scenario analysis follows the same framework as cost optimisation: but with carbon as the primary objective function.
+
+Flashcards Study Aid​
+
+Continue to Lesson 10: Spend Analytics and Consolidation →

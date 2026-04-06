@@ -1,0 +1,463 @@
+Bindings and Triggers
+
+Your Task API runs inside Kubernetes. But the real world doesn't live in your cluster. Customers send webhook callbacks. Scheduled jobs need to run at midnight. Messages arrive in external queues. Files appear in cloud storage. How does your Dapr application respond to these external events---and how does it send data back out?
+
+This is where bindings come in. Unlike pub/sub (which connects your microservices to each other), bindings connect your application to external systems. An input binding lets external events trigger your code. An output binding lets your code invoke external systems.
+
+In Lesson 4, you used pub/sub to connect your Task API to a notification service. Both were Dapr applications. Now you'll connect to the outside world: a cron scheduler that triggers cleanup jobs, an HTTP webhook that notifies external monitoring systems, a queue that receives messages from legacy systems.
+
+Input Bindings: External Events Trigger Your Code​
+
+An input binding makes Dapr call your application when something happens in an external system.
+
+Think of it like a doorbell. When someone presses the button (external event), a signal rings inside your house (your application). You didn't poll for visitors. You didn't check the door every 5 seconds. The event came to you.
+
+The Cron Input Binding​
+
+The simplest input binding is a cron schedule. Dapr calls your endpoint on a schedule---no external infrastructure required.
+
+Component YAML:
+
+# components/cron-binding.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cron-binding
+  namespace: default
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "*/5 * * * *"  # Every 5 minutes
+    - name: direction
+      value: "input"
+
+
+FastAPI Endpoint:
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.post("/cron-binding")
+async def handle_cron_trigger():
+    """Called by Dapr every 5 minutes."""
+    print("Cron triggered! Cleaning up expired todos...")
+
+    # Your cleanup logic here
+    expired_count = await cleanup_expired_tasks()
+
+    return {"status": "OK", "cleaned": expired_count}
+
+
+async def cleanup_expired_tasks() -> int:
+    """Clean up tasks older than 30 days."""
+    # In a real app, this would query your database
+    print("Removing tasks older than 30 days")
+    return 42  # Number of tasks cleaned
+
+
+Output:
+
+>>> # Every 5 minutes, Dapr calls your endpoint
+Cron triggered! Cleaning up expired todos...
+Removing tasks older than 30 days
+>>> # Your endpoint returns success
+{"status": "OK", "cleaned": 42}
+
+How Input Bindings Work​
+External System                    Dapr Sidecar              Your Application
+     │                                  │                           │
+     │  Event occurs                    │                           │
+     │──────────────────────────────────>│                           │
+     │                                  │  POST /<binding-name>     │
+     │                                  │──────────────────────────>│
+     │                                  │                           │
+     │                                  │  {"status": "OK"}         │
+     │                                  │<──────────────────────────│
+
+
+Key points:
+
+The endpoint path must match the component's metadata.name (e.g., /cron-binding)
+Dapr calls your endpoint with a POST request
+Return {"status": "OK"} to acknowledge successful processing
+If you return an error (or don't respond), Dapr may retry depending on the binding type
+Common Input Binding Types​
+Component Type	Trigger Source	Use Case
+bindings.cron	Time schedule	Scheduled cleanup, periodic sync
+bindings.kafka	Kafka topic	Legacy Kafka integration
+bindings.azure.storagequeues	Azure Storage Queue	Message processing
+bindings.aws.sqs	AWS SQS	Message processing
+bindings.http	Incoming HTTP	Webhooks from external services
+Output Bindings: Invoke External Systems​
+
+An output binding lets your code invoke external systems through Dapr's unified API.
+
+Think of it like a universal translator. You speak one language (Dapr's binding API), and it translates to whatever the external system expects---HTTP, AMQP, S3 API, email SMTP.
+
+HTTP Output Binding​
+
+A common use case: calling an external webhook when something happens in your system.
+
+Component YAML:
+
+# components/http-binding.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: http-binding
+  namespace: default
+spec:
+  type: bindings.http
+  version: v1
+  metadata:
+    - name: url
+      value: "https://monitoring.example.com/webhooks/dapr"
+    - name: direction
+      value: "output"
+
+
+Python Code:
+
+from dapr.clients import DaprClient
+import json
+
+async def notify_external_system(event_type: str, task_id: str):
+    """Send webhook notification to external monitoring system."""
+
+    payload = json.dumps({
+        "event": event_type,
+        "task_id": task_id,
+        "timestamp": "2025-12-29T10:30:00Z"
+    })
+
+    async with DaprClient() as client:
+        await client.invoke_binding(
+            binding_name='http-binding',
+            operation='post',
+            data=payload
+        )
+
+    print(f"Notified external system: {event_type} for {task_id}")
+
+
+Output:
+
+>>> # Your code invokes the output binding
+await notify_external_system("task.completed", "task-123")
+Notified external system: task.completed for task-123
+>>> # Dapr sends POST to https://monitoring.example.com/webhooks/dapr
+>>> # with your payload
+
+The invoke_binding Method​
+await client.invoke_binding(
+    binding_name='http-binding',    # Must match component metadata.name
+    operation='post',               # HTTP method (get, post, put, delete)
+    data='{"key": "value"}'         # Payload as string
+)
+
+
+Different binding types support different operations:
+
+Binding Type	Operations
+bindings.http	get, post, put, delete
+bindings.aws.s3	create, get, delete, list
+bindings.smtp	create (sends email)
+bindings.azure.blobstorage	create, get, delete, list
+Output Binding Example: Task Completion Flow​
+
+Here's how output bindings fit into a real workflow:
+
+from fastapi import FastAPI
+from dapr.clients import DaprClient
+import json
+
+app = FastAPI()
+
+@app.post("/tasks/{task_id}/complete")
+async def complete_task(task_id: str):
+    """Mark task complete and notify external system."""
+
+    # 1. Update task status (using state management from Lesson 3)
+    async with DaprClient() as client:
+        client.save_state(
+            store_name='statestore',
+            key=f'task-{task_id}',
+            value=json.dumps({"status": "completed"})
+        )
+
+        # 2. Notify external monitoring via output binding
+        await client.invoke_binding(
+            binding_name='http-binding',
+            operation='post',
+            data=json.dumps({
+                "event": "task.completed",
+                "task_id": task_id
+            })
+        )
+
+    return {"task_id": task_id, "status": "completed"}
+
+
+Output:
+
+>>> # Client calls your API
+POST /tasks/task-456/complete
+
+>>> # Task status saved to state store
+State saved: task-456 -> {"status": "completed"}
+
+>>> # External system notified via binding
+Webhook sent to https://monitoring.example.com/webhooks/dapr
+
+Bindings vs Pub/Sub: When to Use Each​
+
+This is the question that trips up newcomers: "I can send messages with pub/sub AND with bindings. What's the difference?"
+
+The Key Distinction​
+Aspect	Bindings	Pub/Sub
+Primary purpose	Connect to external systems	Connect internal microservices
+Direction	Input OR output (one-way)	Publish AND subscribe (bidirectional)
+Typical targets	Cron, webhooks, S3, SQS, email	Redis, Kafka, RabbitMQ (for internal messaging)
+Dapr involvement	Source or destination is outside Dapr	Both ends are Dapr applications
+Decision Framework​
+
+Ask yourself: "Is the other end a Dapr application?"
+
+┌─────────────────────────────────────────────────────────┐
+│                    DECISION TREE                        │
+│                                                         │
+│  Is the other system a Dapr-enabled microservice?       │
+│                                                         │
+│     YES ──────────────> Use Pub/Sub (Lesson 4-5)        │
+│     │                   - Service-to-service events     │
+│     │                   - Task API → Notification Svc   │
+│     │                                                   │
+│     NO ───────────────> Use Bindings                    │
+│                         - External webhooks             │
+│                         - Cron schedules                │
+│                         - Cloud storage triggers        │
+│                         - Legacy queue systems          │
+└─────────────────────────────────────────────────────────┘
+
+Examples​
+Scenario	Pattern	Why
+Task API notifies Notification Service	Pub/Sub	Both are Dapr apps in your cluster
+Cleanup job runs every night at midnight	Input Binding	Cron is external to your app
+Send alert to PagerDuty when task fails	Output Binding	PagerDuty is external system
+Process messages from legacy IBM MQ	Input Binding	Legacy queue isn't Dapr-enabled
+Task API talks to Order Service	Pub/Sub	Both are your microservices
+Combining Both Patterns​
+
+Real systems often use both. Here's a Task API that:
+
+Receives cron triggers (input binding)
+Publishes events to other services (pub/sub)
+Notifies external monitoring (output binding)
+from fastapi import FastAPI
+from dapr.clients import DaprClient
+from dapr.ext.fastapi import DaprApp
+import json
+
+app = FastAPI()
+dapr_app = DaprApp(app)
+
+# INPUT BINDING: Cron triggers cleanup
+@app.post("/cleanup-cron")
+async def handle_cleanup():
+    """Triggered by cron every hour."""
+    expired_tasks = await find_expired_tasks()
+
+    async with DaprClient() as client:
+        for task_id in expired_tasks:
+            # PUB/SUB: Notify internal services
+            client.publish_event(
+                pubsub_name='pubsub',
+                topic_name='task-events',
+                data=json.dumps({"event": "task.expired", "task_id": task_id})
+            )
+
+            # OUTPUT BINDING: Notify external monitoring
+            await client.invoke_binding(
+                binding_name='monitoring-webhook',
+                operation='post',
+                data=json.dumps({"alert": "task_expired", "task_id": task_id})
+            )
+
+    return {"status": "OK", "expired_count": len(expired_tasks)}
+
+
+# PUB/SUB: Subscribe to internal events
+@dapr_app.subscribe(pubsub='pubsub', topic='order-events')
+async def handle_order_event(event_data: dict):
+    """React to events from other Dapr services."""
+    print(f"Received order event: {event_data}")
+    return {"status": "SUCCESS"}
+
+The direction Metadata Field​
+
+You may have noticed direction in the component YAML. This field specifies whether a binding is input, output, or both.
+
+metadata:
+  - name: direction
+    value: "input"   # Triggers your app
+    # OR
+    value: "output"  # Your app invokes external system
+    # OR
+    value: "input, output"  # Bidirectional
+
+
+Most bindings default to one direction. The HTTP binding, for example, defaults to output. The cron binding is always input (you can't "invoke" a cron schedule).
+
+Common Binding Patterns​
+Pattern 1: Scheduled Tasks with Cron​
+# Run database maintenance every night at 2 AM
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: nightly-maintenance
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "0 2 * * *"
+
+Pattern 2: Webhook Receiver​
+# Receive webhooks from payment provider
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: payment-webhook
+spec:
+  type: bindings.http
+  version: v1
+  metadata:
+    - name: direction
+      value: "input"
+
+@app.post("/payment-webhook")
+async def handle_payment_webhook(request: Request):
+    """Stripe/PayPal/etc. calls this endpoint."""
+    body = await request.json()
+    print(f"Payment event received: {body}")
+    return {"status": "OK"}
+
+Pattern 3: Cloud Storage Triggers​
+# React to files uploaded to S3
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: s3-trigger
+spec:
+  type: bindings.aws.s3
+  version: v1
+  metadata:
+    - name: bucket
+      value: "task-attachments"
+    - name: region
+      value: "us-east-1"
+    - name: accessKey
+      secretKeyRef:
+        name: aws-credentials
+        key: access-key
+    - name: secretKey
+      secretKeyRef:
+        name: aws-credentials
+        key: secret-key
+
+Debugging Bindings​
+
+When bindings don't work, check these common issues:
+
+Symptom	Likely Cause	Fix
+Endpoint never called	Path doesn't match component name	Ensure /binding-name matches metadata.name
+404 errors in logs	Wrong HTTP method	Input bindings use POST, not GET
+Cron never triggers	Invalid schedule syntax	Verify cron expression at crontab.guru
+Output binding fails	Wrong operation	Check supported operations for binding type
+
+Check Dapr sidecar logs:
+
+kubectl logs deployment/task-api -c daprd | grep -i binding
+
+Reflect on Your Skill​
+
+You built a dapr-deployment skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my dapr-deployment skill, create a cron binding that triggers every 5 minutes. Show me the component YAML and the FastAPI handler.
+
+
+Does your skill generate correct component YAML with the direction metadata?
+
+Identify Gaps​
+
+Ask yourself:
+
+Does my skill explain input vs output bindings?
+Can it show when to use bindings vs pub/sub?
+Does it include the endpoint naming convention (path must match component name)?
+Improve Your Skill​
+
+If you found gaps:
+
+My dapr-deployment skill needs binding patterns.
+Add these concepts:
+1. Input bindings trigger your app from external events (cron, webhooks)
+2. Output bindings invoke external systems (HTTP, S3, email)
+3. Endpoint path must match component metadata.name
+4. Use bindings for external systems, pub/sub for internal services
+
+Try With AI​
+
+Apply binding patterns to your own integration scenarios.
+
+Setup: Open Claude Code or your preferred AI assistant in your Dapr project directory.
+
+Prompt 1: Create a Cron Binding
+
+Create a Dapr cron binding that triggers a cleanup endpoint every 5 minutes.
+Show me:
+1. The component YAML with correct schedule syntax
+2. The FastAPI handler that receives the trigger
+3. How to verify the binding is working
+
+I'm using Dapr 1.14 on Kubernetes.
+
+
+What you're learning: Input bindings connect external triggers to your code. The cron binding is the simplest example---no external infrastructure, just time-based triggers. Pay attention to the naming convention: endpoint path must match component name.
+
+Prompt 2: HTTP Output Binding
+
+Create an HTTP output binding to call an external webhook when tasks are completed.
+Show me:
+1. The component YAML for the output binding
+2. Async DaprClient usage to invoke the binding
+3. How to pass JSON payload to the external endpoint
+
+The webhook URL is https://monitoring.internal/webhooks/tasks
+
+
+What you're learning: Output bindings abstract away external HTTP calls. Instead of managing HTTP clients, retries, and error handling, you configure once and invoke through Dapr's unified API. The invoke_binding method is your interface to any external system.
+
+Prompt 3: Bindings vs Pub/Sub Decision
+
+I'm building a task management system with these integration needs:
+1. Run cleanup every night at midnight
+2. Notify my Notification Service when tasks are created
+3. Send alerts to PagerDuty when tasks fail
+4. Process incoming webhooks from a third-party calendar service
+
+For each scenario, tell me:
+- Should I use bindings or pub/sub?
+- Why?
+- What component type would I use?
+
+Give me a clear decision framework I can apply to future scenarios.
+
+
+What you're learning: The key distinction is internal vs external. Pub/sub connects your Dapr microservices. Bindings connect to the outside world. This prompt helps you internalize the decision framework and apply it consistently.
+
+Safety Note: When configuring bindings that receive webhooks, validate the source. Add authentication (API keys, signatures) to prevent malicious actors from triggering your endpoints. Check the Dapr documentation for your specific binding type's security options.

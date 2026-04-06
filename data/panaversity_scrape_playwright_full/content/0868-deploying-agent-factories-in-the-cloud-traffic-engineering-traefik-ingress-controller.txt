@@ -1,0 +1,552 @@
+Traefik Ingress Controller
+
+The previous lesson explained why Ingress has limitations—annotation chaos, vendor lock-in, no role separation. Gateway API solves these problems, but it introduces new abstractions: GatewayClass, Gateway, HTTPRoute, BackendTrafficPolicy. That's a lot to absorb before routing your first request.
+
+What if you just want external traffic reaching your Task API in 5 minutes?
+
+Traefik offers exactly that. It's a simpler ingress controller with its own CRDs (IngressRoute, Middleware) that are more intuitive than Ingress annotations. You'll understand traffic routing fundamentals faster with Traefik, which prepares you for Gateway API's more powerful—but more complex—model.
+
+This lesson gets your Task API accessible from outside the cluster with rate limiting protection. Then you'll understand exactly what Gateway API improves upon.
+
+Installing Traefik with Helm​
+
+Traefik publishes a Helm chart that handles all the complexity—Deployment, Service, ServiceAccount, RBAC, CRDs. You just run two commands.
+
+Add the Traefik Helm repository:
+
+helm repo add traefik https://traefik.github.io/charts
+
+
+Output:
+
+"traefik" has been added to your repositories
+
+
+Update repository information:
+
+helm repo update
+
+
+Output:
+
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "traefik" chart repository
+Update Complete. ⎈Happy Helming!⎈
+
+
+Install Traefik in its own namespace:
+
+helm install traefik traefik/traefik -n traefik --create-namespace
+
+
+Output:
+
+NAME: traefik
+LAST DEPLOYED: Mon Dec 30 10:15:00 2024
+NAMESPACE: traefik
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Traefik Proxy v3.2.0 has been deployed successfully on traefik namespace!
+
+
+Verify the installation:
+
+kubectl get pods -n traefik
+
+
+Output:
+
+NAME                       READY   STATUS    RESTARTS   AGE
+traefik-7d9c8f6c5b-xk2m9   1/1     Running   0          30s
+
+
+Check the Service created by Traefik:
+
+kubectl get svc -n traefik
+
+
+Output:
+
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+traefik   LoadBalancer   10.96.45.123   localhost     80:31234/TCP,443:32456/TCP   45s
+
+
+On Docker Desktop, localhost appears as the external IP. On a cloud provider, you'd see a real public IP. Either way, Traefik now accepts traffic on ports 80 (HTTP) and 443 (HTTPS).
+
+Understanding Traefik Architecture​
+
+Before creating routes, understand how Traefik processes requests:
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Traefik Architecture                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Internet Request                                                    │
+│       │                                                              │
+│       ▼                                                              │
+│  ┌─────────────┐                                                    │
+│  │ EntryPoints │  ← Ports Traefik listens on (80, 443)              │
+│  └──────┬──────┘                                                    │
+│         │                                                            │
+│         ▼                                                            │
+│  ┌─────────────┐                                                    │
+│  │   Routers   │  ← Match rules (Host, Path, Headers)               │
+│  └──────┬──────┘                                                    │
+│         │                                                            │
+│         ▼                                                            │
+│  ┌─────────────┐                                                    │
+│  │ Middlewares │  ← Transformations (rate limit, auth, headers)     │
+│  └──────┬──────┘                                                    │
+│         │                                                            │
+│         ▼                                                            │
+│  ┌─────────────┐                                                    │
+│  │  Services   │  ← Backend targets (Kubernetes Services)           │
+│  └─────────────┘                                                    │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+
+EntryPoints: Ports where Traefik accepts connections. The Helm chart creates web (port 80) and websecure (port 443) by default.
+
+Routers: Rules that match incoming requests. When a request matches a Router's rule (e.g., Host('api.example.com') && PathPrefix('/tasks')), Traefik sends it to the associated Service.
+
+Middlewares: Transformations applied before reaching the backend. Rate limiting, authentication, header manipulation, path stripping—all are Middlewares.
+
+Services: Backend targets. In Kubernetes, these point to Kubernetes Services that forward to Pods.
+
+This is similar to Gateway API's model (Gateway, HTTPRoute, BackendTrafficPolicy) but with different terminology and simpler CRDs.
+
+Creating Your First IngressRoute​
+
+Traefik's IngressRoute CRD replaces Kubernetes' Ingress resource with a cleaner syntax. No annotations required.
+
+First, ensure your Task API is running. If you've been following along, you have it deployed:
+
+kubectl get svc task-api -n task-api
+
+
+Output:
+
+NAME       TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+task-api   ClusterIP   10.96.78.234   <none>        8000/TCP   2h
+
+
+Now create task-api-ingressroute.yaml that routes /api/v1/tasks to the Task API:
+
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: task-api-route
+  namespace: task-api
+spec:
+  entryPoints:
+    - web  # Listen on port 80
+  routes:
+    - match: PathPrefix(`/api/v1/tasks`)
+      kind: Rule
+      services:
+        - name: task-api
+          port: 8000
+
+
+Output:
+
+(This is the manifest—we'll apply it next)
+
+Apply the IngressRoute:
+
+kubectl apply -f task-api-ingressroute.yaml
+
+
+Output:
+
+ingressroute.traefik.io/task-api-route created
+
+
+Test the route:
+
+curl http://localhost/api/v1/tasks
+
+
+Output:
+
+{"tasks": []}
+
+
+Your Task API is now accessible from outside the cluster through Traefik. The request flow:
+
+Request arrives at localhost:80 (Traefik's web EntryPoint)
+Traefik matches PathPrefix('/api/v1/tasks') → task-api-route
+Traefik forwards to task-api:8000 in the task-api namespace
+Task API responds, Traefik returns the response
+
+Compare this to the Ingress resource from Lesson 1. No annotations needed. The routing logic is in structured YAML fields, not string annotations.
+
+Understanding the Match Rule Syntax​
+
+Traefik's match rules use a simple expression language:
+
+Expression	Meaning
+Host('api.example.com')	Match requests with this Host header
+PathPrefix('/api')	Match paths starting with /api
+Path('/health')	Match exactly /health
+Headers('X-Version', '2')	Match requests with this header value
+Method('POST')	Match only POST requests
+&&	AND - both conditions must match
+`	
+
+Examples:
+
+Route only POST requests to /tasks:
+
+routes:
+  - match: PathPrefix(`/api/v1/tasks`) && Method(`POST`)
+    kind: Rule
+    services:
+      - name: task-api
+        port: 8000
+
+
+Route based on API version header:
+
+routes:
+  - match: PathPrefix(`/api`) && Headers(`X-API-Version`, `v2`)
+    kind: Rule
+    services:
+      - name: task-api-v2
+        port: 8000
+
+
+This expressive matching is something standard Ingress cannot do without controller-specific annotations.
+
+Adding Rate Limiting with Middleware​
+
+Your AI agent's Task API could be expensive to run. Without rate limiting, a single user could exhaust your compute budget. Traefik Middlewares handle this.
+
+Create ratelimit-middleware.yaml:
+
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit
+  namespace: task-api
+spec:
+  rateLimit:
+    average: 10      # 10 requests per second average
+    burst: 20        # Allow bursts up to 20 requests
+    period: 1s       # Time window
+
+
+Output:
+
+(This is the manifest—we'll apply it next)
+
+Apply the Middleware:
+
+kubectl apply -f ratelimit-middleware.yaml
+
+
+Output:
+
+middleware.traefik.io/rate-limit created
+
+
+Now attach the Middleware to your IngressRoute. Create task-api-ingressroute-ratelimited.yaml:
+
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: task-api-route
+  namespace: task-api
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: PathPrefix(`/api/v1/tasks`)
+      kind: Rule
+      middlewares:
+        - name: rate-limit  # Attach the Middleware
+      services:
+        - name: task-api
+          port: 8000
+
+
+Apply the updated IngressRoute:
+
+kubectl apply -f task-api-ingressroute-ratelimited.yaml
+
+
+Output:
+
+ingressroute.traefik.io/task-api-route configured
+
+
+Test the rate limit by sending many requests quickly:
+
+for i in {1..25}; do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost/api/v1/tasks
+done
+
+
+Output:
+
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+429
+429
+429
+429
+429
+
+
+After approximately 20 requests (the burst limit), Traefik returns 429 Too Many Requests. The rate limiter is protecting your backend.
+
+Path Manipulation with Middlewares​
+
+Sometimes your backend expects a different path than what external clients use. Middlewares can transform paths.
+
+StripPrefix Middleware​
+
+Remove a path prefix before forwarding. Create strip-prefix-middleware.yaml:
+
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-api-prefix
+  namespace: task-api
+spec:
+  stripPrefix:
+    prefixes:
+      - /api/v1
+
+
+Output:
+
+(Manifest only)
+
+If a client requests /api/v1/tasks, Traefik forwards /tasks to the backend. Useful when your internal services don't expect version prefixes.
+
+AddPrefix Middleware​
+
+Add a path prefix before forwarding. Create add-prefix-middleware.yaml:
+
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: add-internal-prefix
+  namespace: task-api
+spec:
+  addPrefix:
+    prefix: /internal
+
+
+Output:
+
+(Manifest only)
+
+A request to /tasks becomes /internal/tasks when reaching the backend.
+
+Headers Middleware​
+
+Add or modify HTTP headers. Create headers-middleware.yaml:
+
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: custom-headers
+  namespace: task-api
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-By: "traefik"
+      X-Real-IP: ""  # Empty string removes the header
+    customResponseHeaders:
+      X-Served-By: "task-api-cluster"
+
+
+Output:
+
+(Manifest only)
+
+Chaining Multiple Middlewares​
+
+Apply multiple Middlewares in sequence:
+
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: task-api-route
+  namespace: task-api
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: PathPrefix(`/api/v1/tasks`)
+      kind: Rule
+      middlewares:
+        - name: rate-limit       # Applied first
+        - name: strip-api-prefix  # Applied second
+        - name: custom-headers    # Applied third
+      services:
+        - name: task-api
+          port: 8000
+
+
+Middlewares execute in order. Rate limiting happens before path stripping, which happens before header modification.
+
+Enabling the Traefik Dashboard​
+
+Traefik includes a web dashboard for monitoring routes, services, and middlewares. Enable it by upgrading the Helm release:
+
+helm upgrade traefik traefik/traefik -n traefik \
+  --set dashboard.enabled=true \
+  --set ingressRoute.dashboard.enabled=true
+
+
+Output:
+
+Release "traefik" has been upgraded. Happy Helming!
+NAME: traefik
+LAST DEPLOYED: Mon Dec 30 10:45:00 2024
+NAMESPACE: traefik
+STATUS: deployed
+REVISION: 2
+
+
+Access the dashboard via port-forward:
+
+kubectl port-forward -n traefik svc/traefik 9000:9000
+
+
+Output:
+
+Forwarding from 127.0.0.1:9000 -> 9000
+Forwarding from [::1]:9000 -> 9000
+
+
+Open http://localhost:9000/dashboard/ in your browser. You'll see:
+
+HTTP Routers: Your IngressRoutes and their status
+HTTP Services: Backend services Traefik knows about
+HTTP Middlewares: All Middleware resources
+EntryPoints: Ports Traefik is listening on
+
+The dashboard updates in real-time. Create a new IngressRoute, and it appears within seconds. This visibility is valuable for debugging routing issues.
+
+When to Use Traefik vs Gateway API​
+
+Both Traefik and Gateway API solve the same problem—routing external traffic to internal services. The choice depends on your situation.
+
+Use Traefik When:​
+Scenario	Why Traefik
+Quick development/staging setup	Install → route in 5 minutes
+Team already knows Traefik	Existing expertise reduces learning curve
+Don't need cross-vendor portability	Traefik CRDs are Traefik-only
+Simpler configuration preferred	IngressRoute is more intuitive than Gateway API
+Need dashboard out of the box	Built-in visualization
+Use Gateway API When:​
+Scenario	Why Gateway API
+Production with potential vendor changes	GatewayClass swap without route rewrites
+Need role separation (platform vs app team)	Gateway owned by platform, HTTPRoute by apps
+Want CNCF-standard portability	Industry standard, multiple implementations
+Need advanced traffic splitting, mirroring	Native support vs Traefik-specific CRDs
+Enterprise compliance requirements	Standard API easier to audit
+Decision Table​
+Question	Traefik	Gateway API
+Time to first route?	Minutes	30+ minutes (install controller + CRDs)
+Vendor lock-in?	Yes (Traefik CRDs)	No (standard API)
+Role separation?	Limited	Built-in (GatewayClass/Gateway/HTTPRoute)
+Learning curve?	Lower	Higher
+Advanced features?	Via Middlewares	Via BackendTrafficPolicy
+Multi-cluster?	Possible	Better supported
+
+For this book's learning path: We teach Traefik first because it's faster to understand. Once you've internalized traffic routing concepts with Traefik, Gateway API's abstractions will make more sense. Lessons 3-11 will then teach Gateway API as your production solution.
+
+Exercises​
+Exercise 1: Install Traefik and Access Dashboard​
+
+If you haven't already:
+
+Install Traefik with Helm
+Enable the dashboard
+Access the dashboard at localhost:9000/dashboard/
+
+Verify you can see EntryPoints, Routers, Services, and Middlewares sections.
+
+Exercise 2: Create IngressRoute for Task API​
+
+Create an IngressRoute that:
+
+Listens on EntryPoint web
+Matches path /api/v1/tasks
+Routes to the task-api Service on port 8000
+
+Test with curl http://localhost/api/v1/tasks.
+
+Exercise 3: Add Rate Limiting Middleware​
+Create a Middleware with:
+average: 5 requests per second
+burst: 10 requests
+Attach it to your IngressRoute
+Test by sending 15 requests quickly
+
+Verify you see 429 responses after the burst limit.
+
+Exercise 4: Add StripPrefix Middleware​
+Create a StripPrefix Middleware that removes /api/v1
+Chain it with your rate limit Middleware
+Verify the order matters: rate limiting should happen first
+
+Check the Traefik dashboard to see both Middlewares attached to your route.
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Test and improve it based on what you learned.
+
+Update Your Skill's Decision Logic​
+
+Your skill should now include Traefik as an option:
+
+When should your skill recommend Traefik?
+
+Development/staging environments needing quick setup
+Teams already using Traefik
+Simpler configuration requirements
+Need built-in dashboard for monitoring
+
+When should your skill recommend Gateway API?
+
+Production environments requiring vendor portability
+Multi-team setups needing role separation
+Advanced traffic patterns (splitting, mirroring)
+CNCF compliance requirements
+What Traefik Patterns Are Worth Encoding?​
+
+Consider adding these to your skill:
+
+Standard IngressRoute template with EntryPoints and match rules
+Rate limiting Middleware with configurable average/burst
+Middleware chaining pattern (rate limit → strip prefix → headers)
+Dashboard enablement for development clusters
+
+Your skill should generate the appropriate CRDs based on whether Traefik or Gateway API is chosen.

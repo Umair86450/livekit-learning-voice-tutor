@@ -1,0 +1,827 @@
+TLS Termination with CertManager
+
+Every production API needs HTTPS. Without TLS, credentials travel in plaintext, session tokens can be intercepted, and users see browser warnings that destroy trust. For AI agents, the stakes are higher: API keys for LLM providers, user authentication tokens, and sensitive business data all flow through your endpoints. A single intercepted request could expose thousands of dollars in API credits or compromise user accounts.
+
+Manual certificate management does not scale. Certificates expire every 90 days with Let's Encrypt, every year with traditional CAs. Forgetting to renew crashes your production service at 3 AM. cert-manager automates the entire lifecycle: issuing certificates when you create TLS listeners, renewing them before expiration, and updating secrets without downtime.
+
+This lesson installs cert-manager, configures it to issue certificates from Let's Encrypt, and connects it to your Gateway API infrastructure. By the end, your Task API will serve HTTPS traffic with automatically renewed certificates, and you will understand how the ACME protocol proves domain ownership without manual intervention.
+
+How Certificate Automation Works​
+
+Before installing anything, understand the flow from Gateway creation to HTTPS traffic. Three components collaborate: cert-manager (certificate lifecycle), Let's Encrypt (certificate authority), and Envoy Gateway (TLS termination).
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         CERTIFICATE LIFECYCLE                                  │
+│                                                                                │
+│  ┌─────────────────────┐      ┌─────────────────────┐      ┌────────────────┐│
+│  │ 1. Gateway Created  │      │ 2. cert-manager     │      │ 3. ACME        ││
+│  │    with TLS listener│─────▶│    Detects Need     │─────▶│    Challenge   ││
+│  │    + annotations    │      │    for Certificate  │      │    Initiated   ││
+│  └─────────────────────┘      └─────────────────────┘      └───────┬────────┘│
+│                                                                     │         │
+│                                                                     ▼         │
+│  ┌─────────────────────┐      ┌─────────────────────┐      ┌────────────────┐│
+│  │ 6. Envoy Uses       │      │ 5. Secret Created   │      │ 4. HTTP-01     ││
+│  │    Certificate for  │◀─────│    with TLS         │◀─────│    Challenge   ││
+│  │    TLS Termination  │      │    Certificate      │      │    Completed   ││
+│  └─────────────────────┘      └─────────────────────┘      └────────────────┘│
+│                                                                                │
+│  ┌───────────────────────────────────────────────────────────────────────────┐│
+│  │                       RENEWAL (Before Expiration)                          ││
+│  │  cert-manager monitors expiration → Repeats steps 2-5 → Updates secret     ││
+│  │  Envoy picks up new certificate automatically (no restart)                 ││
+│  └───────────────────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘
+
+The ACME Protocol​
+
+Let's Encrypt uses ACME (Automatic Certificate Management Environment) to verify you control the domain before issuing certificates. The HTTP-01 challenge works like this:
+
+Step	Who	What Happens
+1	cert-manager	Requests certificate for api.example.com
+2	Let's Encrypt	Returns challenge token
+3	cert-manager	Creates temporary HTTPRoute serving token at /.well-known/acme-challenge/TOKEN
+4	Let's Encrypt	HTTP request to http://api.example.com/.well-known/acme-challenge/TOKEN
+5	Envoy Gateway	Serves the token (proves domain control)
+6	Let's Encrypt	Issues signed certificate
+7	cert-manager	Stores certificate in Kubernetes Secret, deletes temporary route
+
+This entire process takes 30-90 seconds and requires no manual intervention.
+
+Certificate Storage​
+
+Certificates end up in Kubernetes Secrets:
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: task-api-tls
+  namespace: task-api
+type: kubernetes.io/tls
+data:
+  tls.crt: <base64-encoded certificate chain>
+  tls.key: <base64-encoded private key>
+
+
+Envoy Gateway watches these secrets. When cert-manager updates the secret with a renewed certificate, Envoy proxies pick up the new certificate within seconds—no pod restarts required.
+
+Installing cert-manager​
+
+cert-manager is distributed as a Helm chart. The installation includes CRDs for Certificate, ClusterIssuer, and other resources, plus the controller that manages the certificate lifecycle.
+
+Add the Jetstack Helm repository:
+
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+
+
+Output:
+
+"jetstack" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "jetstack" chart repository
+Update Complete. Happy Helming!
+
+
+Install cert-manager with Gateway API support:
+
+helm install cert-manager jetstack/cert-manager \
+  --version v1.17.0 \
+  --namespace cert-manager \
+  --create-namespace \
+  --set crds.enabled=true \
+  --set config.apiVersion="controller.config.cert-manager.io/v1alpha1" \
+  --set config.kind="ControllerConfiguration" \
+  --set config.enableGatewayAPI=true
+
+
+Output:
+
+NAME: cert-manager
+LAST DEPLOYED: Mon Dec 30 10:00:00 2025
+NAMESPACE: cert-manager
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+cert-manager v1.17.0 has been deployed successfully!
+
+
+The --set config.enableGatewayAPI=true flag is critical. Without it, cert-manager ignores Gateway resources and only watches Ingress resources.
+
+Wait for cert-manager to become available:
+
+kubectl wait --timeout=5m -n cert-manager \
+  deployment/cert-manager --for=condition=Available
+
+
+Output:
+
+deployment.apps/cert-manager condition met
+
+
+Verify all cert-manager components are running:
+
+kubectl get pods -n cert-manager
+
+
+Output:
+
+NAME                                       READY   STATUS    RESTARTS   AGE
+cert-manager-5c6866597-zrnw6               1/1     Running   0          2m
+cert-manager-cainjector-577f6d9fd7-rxhn9   1/1     Running   0          2m
+cert-manager-webhook-787858fcdb-lp87k      1/1     Running   0          2m
+
+
+Three pods run the cert-manager components:
+
+Pod	Purpose
+cert-manager	Main controller watching Certificate resources
+cainjector	Injects CA bundles into webhooks
+webhook	Validates and mutates cert-manager resources
+Creating a ClusterIssuer​
+
+Before cert-manager can issue certificates, it needs to know how. A ClusterIssuer defines the certificate authority and authentication method. For Let's Encrypt, this means configuring the ACME protocol.
+
+Let's Encrypt Staging vs Production​
+
+Let's Encrypt provides two endpoints:
+
+Environment	URL	Rate Limits	Use Case
+Staging	https://acme-staging-v02.api.letsencrypt.org/directory	Generous	Testing configuration
+Production	https://acme-v02.api.letsencrypt.org/directory	Strict (50 certs/week/domain)	Real deployments
+
+Always test with staging first. Production rate limits can lock you out for a week if you misconfigure and retry repeatedly.
+
+Creating a Staging ClusterIssuer​
+
+Start with staging to validate your configuration. Create clusterissuer-staging.yaml:
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - kind: Gateway
+            name: task-api-gateway
+            namespace: default
+
+
+Field meanings:
+
+Field	Purpose
+server	ACME server URL (staging or production)
+email	Contact for certificate expiration warnings
+privateKeySecretRef	Where to store the ACME account private key
+solvers[].http01.gatewayHTTPRoute	Use Gateway API for HTTP-01 challenges
+parentRefs	Which Gateway handles challenge traffic
+
+Apply the ClusterIssuer:
+
+kubectl apply -f clusterissuer-staging.yaml
+
+
+Output:
+
+clusterissuer.cert-manager.io/letsencrypt-staging created
+
+
+Verify the ClusterIssuer is ready:
+
+kubectl get clusterissuer letsencrypt-staging
+
+
+Output:
+
+NAME                  READY   AGE
+letsencrypt-staging   True    30s
+
+
+Check detailed status:
+
+kubectl describe clusterissuer letsencrypt-staging
+
+
+Output:
+
+Name:         letsencrypt-staging
+Namespace:
+Labels:       <none>
+API Version:  cert-manager.io/v1
+Kind:         ClusterIssuer
+Spec:
+  Acme:
+    Email:  your-email@example.com
+    Server:  https://acme-staging-v02.api.letsencrypt.org/directory
+    Private Key Secret Ref:
+      Name:  letsencrypt-staging-account-key
+    Solvers:
+      Http 01:
+        Gateway HTTP Route:
+          Parent Refs:
+            Kind:       Gateway
+            Name:       task-api-gateway
+            Namespace:  default
+Status:
+  Acme:
+    Last Registered Email:  your-email@example.com
+    Uri:                    https://acme-staging-v02.api.letsencrypt.org/acme/acct/123456789
+  Conditions:
+    Last Transition Time:  2025-12-30T10:05:00Z
+    Message:               The ACME account was registered with the ACME server
+    Reason:                ACMEAccountRegistered
+    Status:                True
+    Type:                  Ready
+
+
+The ACME account was registered message confirms cert-manager successfully authenticated with Let's Encrypt.
+
+Creating a Production ClusterIssuer​
+
+Once staging works, create clusterissuer-production.yaml:
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-production-account-key
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - kind: Gateway
+            name: task-api-gateway
+            namespace: default
+
+
+Apply when ready for production:
+
+kubectl apply -f clusterissuer-production.yaml
+
+
+Output:
+
+clusterissuer.cert-manager.io/letsencrypt-production created
+
+Configuring Gateway for TLS​
+
+With cert-manager installed and ClusterIssuer configured, update your Gateway to request certificates automatically. This requires two changes: adding cert-manager annotations and configuring a TLS listener.
+
+Gateway with TLS Configuration​
+
+Create task-api-gateway-tls.yaml:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: task-api-gateway
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+spec:
+  gatewayClassName: eg
+  listeners:
+  # HTTP listener for ACME challenges and redirect
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same
+  # HTTPS listener with TLS termination
+  - name: https
+    protocol: HTTPS
+    hostname: api.example.com
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: task-api-tls
+    allowedRoutes:
+      namespaces:
+        from: Same
+
+
+Key configuration points:
+
+Field	Purpose
+cert-manager.io/cluster-issuer	Tells cert-manager which issuer to use
+hostname	Domain for the certificate (required for TLS)
+tls.mode: Terminate	Decrypt TLS at the Gateway, forward plaintext to backends
+certificateRefs	Secret where cert-manager stores the certificate
+
+Apply the Gateway:
+
+kubectl apply -f task-api-gateway-tls.yaml
+
+
+Output:
+
+gateway.gateway.networking.k8s.io/task-api-gateway configured
+
+What Happens After Apply​
+
+When you apply the annotated Gateway, cert-manager's gateway-shim:
+
+Detects the Gateway has cert-manager.io/cluster-issuer annotation
+Notices the https listener with hostname api.example.com
+Creates a Certificate resource requesting a cert for that hostname
+The Certificate triggers an ACME Order
+cert-manager creates a temporary HTTPRoute for the challenge
+Let's Encrypt verifies the challenge
+Certificate is stored in the Secret referenced by certificateRefs
+
+Watch the certificate creation:
+
+kubectl get certificate -w
+
+
+Output (over 30-60 seconds):
+
+NAME           READY   SECRET          AGE
+task-api-tls   False   task-api-tls    5s
+task-api-tls   False   task-api-tls    15s
+task-api-tls   True    task-api-tls    45s
+
+
+The certificate transitions from READY: False to READY: True when issuance completes.
+
+Verifying TLS Configuration​
+
+After the certificate is issued, verify HTTPS works end-to-end.
+
+Check the Certificate Resource​
+kubectl describe certificate task-api-tls
+
+
+Output:
+
+Name:         task-api-tls
+Namespace:    default
+Labels:       <none>
+API Version:  cert-manager.io/v1
+Kind:         Certificate
+Spec:
+  Dns Names:
+    api.example.com
+  Issuer Ref:
+    Group:      cert-manager.io
+    Kind:       ClusterIssuer
+    Name:       letsencrypt-staging
+  Secret Name:  task-api-tls
+Status:
+  Conditions:
+    Last Transition Time:  2025-12-30T10:10:00Z
+    Message:               Certificate is up to date and has not expired
+    Reason:                Ready
+    Status:                True
+    Type:                  Ready
+  Not After:               2025-03-30T10:10:00Z
+  Not Before:              2025-12-30T10:10:00Z
+  Renewal Time:            2025-02-28T10:10:00Z
+
+
+Key status fields:
+
+Field	Meaning
+Not After	Certificate expiration date
+Not Before	Certificate start date
+Renewal Time	When cert-manager will attempt renewal (30 days before expiration)
+Check the TLS Secret​
+kubectl get secret task-api-tls
+
+
+Output:
+
+NAME           TYPE                DATA   AGE
+task-api-tls   kubernetes.io/tls   2      2m
+
+
+View certificate details:
+
+kubectl get secret task-api-tls -o jsonpath='{.data.tls\.crt}' | \
+  base64 -d | openssl x509 -noout -text | head -20
+
+
+Output:
+
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            fa:bf:12:34:56:78:90:ab:cd:ef
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: CN = (STAGING) Ersatz Apricot R10
+        Validity
+            Not Before: Dec 30 10:10:00 2025 GMT
+            Not After : Mar 30 10:10:00 2026 GMT
+        Subject: CN = api.example.com
+
+
+The (STAGING) in the issuer confirms this is a staging certificate. Production certificates show R10 or similar without the staging prefix.
+
+Test HTTPS Access​
+
+For local testing with port-forward:
+
+kubectl port-forward svc/envoy-default-task-api-gateway 8443:443
+
+
+Test with curl (staging cert is not trusted by default):
+
+curl -k https://localhost:8443/api/tasks \
+  -H "Host: api.example.com"
+
+
+Output:
+
+{"tasks": []}
+
+
+The -k flag skips certificate verification (needed for staging certs). Production certs from Let's Encrypt are trusted by default.
+
+Troubleshooting Certificate Issues​
+
+Certificate issuance can fail for several reasons. The troubleshooting workflow follows the certificate lifecycle.
+
+Check Certificate Status​
+kubectl get certificate task-api-tls -o yaml
+
+
+Look for status conditions:
+
+status:
+  conditions:
+  - type: Ready
+    status: "False"
+    reason: Pending
+    message: "Waiting for certificate request to be signed"
+
+
+Common status reasons:
+
+Reason	Meaning	Next Step
+Pending	Waiting for issuance	Check CertificateRequest and Order
+Failed	Issuance failed	Check Order and Challenge
+Ready	Certificate issued	Check Secret exists
+Check CertificateRequest​
+kubectl get certificaterequest
+
+
+Output:
+
+NAME                   READY   AGE
+task-api-tls-abc123    True    5m
+
+
+If not ready, describe for details:
+
+kubectl describe certificaterequest task-api-tls-abc123
+
+Check ACME Order​
+kubectl get order
+
+
+Output:
+
+NAME                           STATE     AGE
+task-api-tls-abc123-123456     valid     5m
+
+
+Order states:
+
+State	Meaning
+pending	Waiting for challenges
+valid	All challenges passed
+invalid	Challenge failed
+errored	ACME error
+Check Challenge​
+
+If Order is stuck at pending, check the Challenge:
+
+kubectl get challenge
+
+
+Output:
+
+NAME                                   STATE     DOMAIN            AGE
+task-api-tls-abc123-123456-0           pending   api.example.com   2m
+
+
+Describe the challenge:
+
+kubectl describe challenge task-api-tls-abc123-123456-0
+
+
+Common failure messages:
+
+Message	Cause	Fix
+Waiting for HTTP-01 challenge propagation	HTTPRoute not created	Check cert-manager logs
+Connection refused	Gateway not accessible	Verify Gateway has external IP
+Timeout during connect	Firewall blocking port 80	Open port 80 inbound
+Invalid response from server	Wrong content served	Check HTTPRoute targeting
+Check cert-manager Logs​
+kubectl logs -n cert-manager deployment/cert-manager --tail=50
+
+
+Look for errors related to your certificate:
+
+E1230 10:15:00.123456   1 controller.go:163] cert-manager/challenges:
+  "msg"="propagation check failed" "error"="wrong status code '404'"
+
+
+This error means the challenge HTTPRoute is not serving the token correctly.
+
+HTTP to HTTPS Redirect​
+
+Production deployments should redirect HTTP traffic to HTTPS. Create http-redirect.yaml:
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: http-to-https-redirect
+  namespace: default
+spec:
+  parentRefs:
+  - name: task-api-gateway
+    sectionName: http
+  hostnames:
+  - "api.example.com"
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect:
+        scheme: https
+        statusCode: 301
+
+
+Apply the redirect:
+
+kubectl apply -f http-redirect.yaml
+
+
+Output:
+
+httproute.gateway.networking.k8s.io/http-to-https-redirect created
+
+
+Test the redirect:
+
+curl -I http://api.example.com/api/tasks
+
+
+Output:
+
+HTTP/1.1 301 Moved Permanently
+location: https://api.example.com/api/tasks
+
+
+Note: The redirect should not interfere with ACME challenges. cert-manager creates challenge routes with higher priority that match the specific /.well-known/acme-challenge/ path.
+
+Self-Signed Certificates for Local Development​
+
+For local development without DNS or when you cannot reach Let's Encrypt, use a self-signed ClusterIssuer. Create clusterissuer-selfsigned.yaml:
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+
+
+Apply:
+
+kubectl apply -f clusterissuer-selfsigned.yaml
+
+
+Output:
+
+clusterissuer.cert-manager.io/selfsigned created
+
+
+Update Gateway annotation:
+
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned
+
+
+Self-signed certificates are not trusted by browsers but work for development and testing.
+
+Exercises​
+Exercise 1: Install cert-manager​
+
+Install cert-manager with Gateway API support:
+
+helm repo add jetstack https://charts.jetstack.io
+helm install cert-manager jetstack/cert-manager \
+  --version v1.17.0 \
+  --namespace cert-manager \
+  --create-namespace \
+  --set crds.enabled=true \
+  --set config.apiVersion="controller.config.cert-manager.io/v1alpha1" \
+  --set config.kind="ControllerConfiguration" \
+  --set config.enableGatewayAPI=true
+
+kubectl get pods -n cert-manager
+
+
+Expected: Three pods running (cert-manager, cainjector, webhook)
+
+Exercise 2: Create Staging ClusterIssuer​
+
+Create a ClusterIssuer for Let's Encrypt staging:
+
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: test@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - kind: Gateway
+            name: task-api-gateway
+            namespace: default
+EOF
+
+kubectl get clusterissuer letsencrypt-staging
+
+
+Expected: ClusterIssuer shows READY: True
+
+Exercise 3: Add TLS Listener to Gateway​
+
+Update your Gateway with a TLS listener:
+
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: task-api-gateway
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+spec:
+  gatewayClassName: eg
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same
+  - name: https
+    protocol: HTTPS
+    hostname: test.example.com
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: test-tls
+    allowedRoutes:
+      namespaces:
+        from: Same
+EOF
+
+kubectl get gateway task-api-gateway
+
+
+Expected: Gateway shows PROGRAMMED: True
+
+Exercise 4: Monitor Certificate Issuance​
+
+Watch the certificate lifecycle:
+
+# Watch certificate status
+kubectl get certificate -w
+
+# Check certificate request
+kubectl get certificaterequest
+
+# Check ACME order (if using ACME issuer)
+kubectl get order
+
+# Check challenge status
+kubectl get challenge
+
+
+Expected: Certificate transitions to READY: True (or stay pending if DNS is not configured for the hostname)
+
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about TLS and cert-manager:
+
+Add TLS Decision Logic​
+
+Your skill should ask:
+
+Question	If Yes	If No
+Production deployment?	Use Let's Encrypt production	Use staging or self-signed
+Public DNS configured?	Use HTTP-01 challenge	Consider DNS-01 or self-signed
+Need wildcard certificate?	Use DNS-01 challenge	HTTP-01 is simpler
+Add Installation Commands​
+# cert-manager with Gateway API support
+helm install cert-manager jetstack/cert-manager \
+  --version v1.17.0 \
+  --namespace cert-manager \
+  --create-namespace \
+  --set crds.enabled=true \
+  --set config.enableGatewayAPI=true
+
+Add Certificate Troubleshooting​
+Symptom	Check	Likely Cause
+Certificate stuck Pending	kubectl get order	ACME challenge failing
+Challenge stuck Pending	kubectl describe challenge	Gateway not accessible on port 80
+Secret not created	kubectl get certificaterequest	Certificate request failed
+HTTPS not working	Certificate Ready status	TLS listener misconfigured
+Add Verification Commands​
+# Check certificate chain
+kubectl get secret task-api-tls -o jsonpath='{.data.tls\.crt}' | \
+  base64 -d | openssl x509 -noout -dates
+
+# Check renewal schedule
+kubectl get certificate task-api-tls -o jsonpath='{.status.renewalTime}'
+
+Try With AI​
+Generate TLS Configuration​
+
+Ask your traffic-engineer skill to generate complete TLS setup:
+
+Using my traffic-engineer skill, generate cert-manager configuration for my Task API:
+
+- Production deployment using Let's Encrypt
+- Domain: api.taskmanager.io
+- Need both HTTP (for ACME challenges) and HTTPS listeners
+- Gateway name: task-api-gateway in default namespace
+
+
+What you're learning: AI generates ClusterIssuer and Gateway configurations together. Review the output: Does the ClusterIssuer reference the correct Gateway? Does the Gateway annotation reference the correct ClusterIssuer name?
+
+Evaluate the Configuration​
+
+Check AI's output for common mistakes:
+
+Is the ACME server URL correct (production vs staging)?
+Does the Gateway hostname match the domain in ClusterIssuer expectations?
+Is certificateRefs pointing to the right Secret name?
+Is the http01 solver configured with correct parentRefs?
+
+If something is missing or incorrect:
+
+The ClusterIssuer should use the production ACME server since this is
+a production deployment. Also, the Gateway needs both http and https
+listeners - http is required for ACME HTTP-01 challenges. Please update.
+
+Request Troubleshooting Guidance​
+
+Request troubleshooting guidance:
+
+My certificate is stuck at "Pending" for 5 minutes. What commands should
+I run to diagnose the issue? Walk me through the certificate lifecycle
+from Certificate to Order to Challenge.
+
+
+What you're learning: AI can explain the troubleshooting workflow. Compare with the troubleshooting section in this lesson. Did AI include checking the Challenge status and cert-manager logs?
+
+Validate Before Applying​
+
+Before applying AI-generated configuration:
+
+# Validate YAML syntax
+kubectl apply --dry-run=client -f clusterissuer.yaml
+kubectl apply --dry-run=client -f gateway-tls.yaml
+
+# Verify cert-manager CRDs exist
+kubectl get crd clusterissuers.cert-manager.io
+
+
+This iteration refines production configurations safely without impacting live systems.
+
+Safety Note​
+
+Test TLS configuration in staging before production. Let's Encrypt production has rate limits: 50 certificates per registered domain per week. If your configuration is wrong and you retry repeatedly, you may hit these limits and be unable to issue certificates for a week. Always validate with the staging endpoint first, then switch the ClusterIssuer to production only after confirming the full certificate lifecycle works.

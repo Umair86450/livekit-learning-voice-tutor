@@ -1,0 +1,301 @@
+Three Pillars of Observability
+
+It's 3am. Your phone buzzes with an alert: "Task API response time exceeds threshold." You open your laptop, eyes adjusting to the screen. The AI agent that handles customer task creation is responding slowly. Users are waiting. Revenue is at risk.
+
+You need answers. Is the database slow? Is there a network issue? Is one specific request type causing problems? Is the AI inference service overloaded? Without observability, you're guessing. You might restart services hoping something fixes itself. You might check logs randomly, scrolling through thousands of lines. You might ping the database directly, but that doesn't explain the pattern.
+
+Observability transforms this chaos into clarity. Instead of guessing, you look at metrics: "Response time jumped from 100ms to 2 seconds at 2:47am." You drill into traces: "Requests to the inference service are waiting 1.8 seconds for responses." You check logs: "Inference service shows 'GPU memory exhausted' warnings starting at 2:45am." In minutes, you understand the problem. The inference service needs more memory. You scale it, response times recover, and you go back to sleep.
+
+This lesson teaches the conceptual foundation of observability: the three pillars (metrics, traces, logs), the four golden signals (latency, traffic, errors, saturation), and how to choose the right signal for different debugging scenarios.
+
+Why Observability Matters for AI Applications​
+
+AI applications are harder to debug than traditional software. A web server returns predictable responses: the same input produces the same output. AI agents are different. They interact with language models, make decisions based on context, and chain multiple service calls together. When something goes wrong, the failure mode is often subtle: the agent returns a valid response, but it's wrong or slow.
+
+The debugging challenge: Your Task API agent receives a request to create a task. The request flows through:
+
+API gateway (authentication, rate limiting)
+FastAPI service (request parsing, validation)
+Inference service (AI decision about task priority)
+Database (store the task)
+Event bus (notify other services)
+
+If the response takes 5 seconds, which component caused the delay? Without observability, you'd add print statements, redeploy, test, and repeat. With observability, you query existing data: "Show me the latency breakdown for requests in the last hour."
+
+The cost of blindness: Production systems without observability operate on hope. You hope the system is healthy. You hope no users are experiencing errors. When problems occur, you spend hours or days diagnosing. With observability, you know the system state at all times. Problems are detected in minutes, often before users notice.
+
+The Three Pillars: Metrics, Traces, and Logs​
+
+Observability rests on three complementary data types. Each answers different questions. You need all three for complete visibility.
+
+Pillar 1: Metrics (Aggregated Numerical Data)​
+
+What it is: Metrics are numerical measurements collected over time. They're aggregated (summed, averaged, percentiled) and stored efficiently. A metric might be "request count per second" or "P95 latency in milliseconds."
+
+Tool: Prometheus (with PromQL query language)
+
+What it tells you: System-wide trends and thresholds. Metrics answer: "How many requests are we handling? What's the error rate? Are we running out of memory?"
+
+Characteristics:
+
+Highly compressed (millions of requests become a few numbers)
+Fast to query (even across weeks of data)
+Good for dashboards and alerts
+Does NOT tell you about individual requests
+
+Example: Your Task API handles 1,000 requests per second. The P95 latency is 150ms. The error rate is 0.1%. These three metrics describe system health without storing every request detail.
+
+# Request rate by service
+sum(rate(http_requests_total[5m])) by (service)
+
+# P95 latency
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# Error rate as percentage
+sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) * 100
+
+Pillar 2: Traces (Request Flow Across Services)​
+
+What it is: A trace follows a single request through every service it touches. It's like a detailed receipt showing: "This request entered Service A at time T1, called Service B at time T2, waited for the database at T3."
+
+Tool: Jaeger (with OpenTelemetry for instrumentation)
+
+What it tells you: Why a specific request was slow or failed. Traces answer: "Where did this request spend its time? Which service failed?"
+
+Characteristics:
+
+High cardinality (one trace per request or sampled subset)
+Shows causality (service A called service B)
+Includes timing for each span (segment of the request)
+Expensive to store at 100% sampling in high-traffic systems
+
+Example: A user reports slow task creation. You search for their trace ID, which shows: API gateway (10ms), FastAPI service (20ms), Inference service (1,800ms), Database (15ms). The inference service took 1.8 seconds. That's your bottleneck.
+
+Trace ID: abc123def456
+
+├── API Gateway (10ms)
+│   └── FastAPI Service (1835ms)
+│       ├── Validate Request (5ms)
+│       ├── Inference Service (1800ms)  ← Bottleneck!
+│       │   └── LLM API Call (1795ms)
+│       └── Database Insert (15ms)
+
+Pillar 3: Logs (Event-Level Detail)​
+
+What it is: Logs are timestamped text records of events. They capture what happened in human-readable (or structured JSON) form: "User 123 created task with title 'Fix bug' at 2025-12-30 03:47:12 UTC."
+
+Tool: Loki (with LogQL query language)
+
+What it tells you: Exactly what happened and why. Logs answer: "What error message did the service produce? What parameters did the request include?"
+
+Characteristics:
+
+Rich context (can include any details)
+High volume (services produce thousands of lines per second)
+Expensive to search without indexing
+Essential for debugging edge cases
+
+Example: The trace shows the inference service was slow. You check logs for that time period: "GPU memory exhausted, falling back to CPU inference." Now you understand why: the GPU ran out of memory, forcing slower CPU processing.
+
+# All logs from inference service at error level
+{namespace="default", app="inference-service"} | json | level="error"
+
+# Search for specific error message
+{namespace="default"} |= "GPU memory exhausted"
+
+How the Three Pillars Work Together​
+
+The pillars aren't alternatives; they're layers of detail. You move from broad to specific:
+
+Metrics (System Overview)
+    ↓ "Something is wrong"
+Traces (Request Path)
+    ↓ "The problem is in this service"
+Logs (Event Detail)
+    ↓ "This specific error caused it"
+
+
+The debugging workflow:
+
+Start with metrics: Alert fires—"Error rate exceeded 1%." You check the dashboard: errors started at 2:45am, affecting the inference service.
+
+Drill into traces: You find a trace from 2:46am showing a failed request. The trace shows the inference service returned an error after 100ms.
+
+Read the logs: You query logs for that time window and service. The logs show: "Model loading failed: file not found." A deployment removed the model file.
+
+Each pillar adds context. Metrics told you something was wrong. Traces showed you where. Logs explained why.
+
+Comparison: When to Use Each Pillar​
+Scenario	Start With	Why
+"Is the system healthy right now?"	Metrics	Dashboard shows real-time aggregates
+"Why is this specific request slow?"	Traces	Trace shows timing breakdown per service
+"What happened at 3am?"	Logs	Logs capture event-level detail
+"Are we meeting our SLO?"	Metrics	Error budgets are tracked via metrics
+"Which service is the bottleneck?"	Traces	Traces show where time is spent
+"What error message did users see?"	Logs	Logs contain the actual error text
+
+Rule of thumb:
+
+Metrics for "how much" and "how often"
+Traces for "where" and "how long"
+Logs for "what" and "why"
+The 4 Golden Signals​
+
+Google's Site Reliability Engineering (SRE) book defines four signals that capture most of what matters about service health. These are the starting point for any observability strategy.
+
+Signal 1: Latency​
+
+What it measures: How long requests take to complete.
+
+Why it matters: Users experience latency directly. A service with 0% errors but 10-second response times is broken from the user's perspective.
+
+What to track:
+
+P50 (median): Typical user experience
+P95 (95th percentile): "Most" users experience this or better
+P99 (99th percentile): Tail latency; worst 1% of requests
+
+Example: Task API P50 is 80ms, P95 is 150ms, P99 is 800ms. The P99 is high—1% of users wait almost a second. Worth investigating.
+
+Signal 2: Traffic​
+
+What it measures: How much demand the system is handling.
+
+Why it matters: Traffic correlates with resource usage, revenue, and capacity planning. A sudden traffic spike explains why latency increased.
+
+What to track:
+
+Requests per second (RPS)
+Requests by endpoint (some are heavier than others)
+Requests by user segment (free vs paid users)
+
+Example: Task API normally handles 500 RPS. At 2:45am, traffic spiked to 2,000 RPS due to a scheduled batch job. The inference service couldn't handle the load, causing latency to spike.
+
+Signal 3: Errors​
+
+What it measures: How many requests fail.
+
+Why it matters: Errors are the clearest signal that something is wrong. A 5% error rate means 1 in 20 users experiences a failure.
+
+What to track:
+
+Error rate as percentage of total requests
+Error count by type (4xx client errors vs 5xx server errors)
+Error rate by endpoint (is one endpoint failing more than others?)
+
+Example: Task API error rate jumped from 0.1% to 5% at 2:45am. All errors are 503 (Service Unavailable) from the inference service. The inference service is the problem.
+
+Signal 4: Saturation​
+
+What it measures: How "full" the system is—how close resources are to their limits.
+
+Why it matters: Saturation is a leading indicator. Before latency spikes or errors occur, saturation shows you're approaching limits.
+
+What to track:
+
+CPU utilization (percentage of available CPU)
+Memory utilization (percentage of available memory)
+Disk I/O (percentage of throughput capacity)
+Connection pools (percentage of connections in use)
+
+Example: Inference service CPU is at 95%, memory at 88%. The service is saturated. Adding more traffic will cause failures. You need to scale before that happens.
+
+Choosing the Right Signal for Debugging​
+
+When a problem occurs, which signal do you examine first?
+
+Symptom	First Signal to Check	Follow-Up
+Users report slow responses	Latency (P95, P99)	Traces to find bottleneck
+Spike in error alerts	Errors (rate and type)	Logs to see error messages
+System becomes unresponsive	Saturation (CPU, memory)	Metrics history to find when saturation started
+Unexpected cost increase	Traffic (RPS by endpoint)	Metrics to identify heavy endpoints
+Intermittent failures	Errors (by time and endpoint)	Traces of failed requests
+
+The investigation pattern:
+
+Triage with metrics: What's the overall health? Which signal is anomalous?
+Locate with traces: Which service or component is responsible?
+Diagnose with logs: What exactly happened?
+Building Your Mental Model​
+
+Before we deploy observability tools in later lessons, internalize this framework:
+
+Metrics are the dashboard: They tell you if the system is healthy at a glance. They power alerts. They track trends over weeks and months.
+
+Traces are the debugger: They follow individual requests through the system. They show you exactly where time is spent.
+
+Logs are the source code of events: They capture the details that explain behavior. They're the final level of detail when metrics and traces point to a component.
+
+The 4 Golden Signals are your starting questions:
+
+Is it slow? (Latency)
+Is it busy? (Traffic)
+Is it failing? (Errors)
+Is it running out of capacity? (Saturation)
+Try With AI​
+
+These prompts help you apply observability concepts to your own projects.
+
+Prompt 1: Observability Strategy
+
+I'm building a FastAPI AI agent that handles task management.
+The agent calls an LLM API for task classification.
+
+Design an observability strategy for this system:
+- What metrics should I collect at each component?
+- Where should I add trace spans?
+- What log events are essential?
+
+
+What you're learning: How to plan observability before implementation. AI helps you think through which signals matter for your specific architecture.
+
+Prompt 2: Debugging with Signals
+
+My AI agent is responding slowly (P95 latency increased from 200ms to 2 seconds).
+Traffic is normal. Error rate is 0%.
+
+Walk me through how I would use the 4 golden signals to debug this:
+- What does each signal tell me?
+- What should I check first?
+- What traces would help?
+
+
+What you're learning: How to apply the debugging workflow systematically. AI demonstrates the thought process of an SRE diagnosing performance issues.
+
+Prompt 3: Signal Selection
+
+For each of these production scenarios, tell me which golden signal
+and which pillar (metrics, traces, or logs) I should start with:
+
+1. Users report seeing error messages
+2. Monthly cloud bill doubled
+3. One user's requests always time out
+4. System works fine during the day but fails at night
+
+
+What you're learning: How to quickly triage production issues. The right starting point saves debugging time.
+
+Safety note: Observability systems collect sensitive data (request parameters, user IDs, error details). In production, configure retention policies, access controls, and data masking. Never expose observability dashboards publicly.
+
+Reflect on Your Skill​
+
+You built an observability-cost-engineer skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my observability-cost-engineer skill, explain the three pillars of observability.
+Does my skill describe metrics, traces, and logs correctly?
+Does it explain when to use each pillar?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include the 4 golden signals (latency, traffic, errors, saturation)?
+Did it explain how the pillars work together in a debugging workflow?
+Improve Your Skill​
+
+If you found gaps:
+
+My observability-cost-engineer skill is missing the 4 golden signals framework.
+Update it to include latency, traffic, errors, and saturation,
+and explain which signal to check first for different debugging scenarios.

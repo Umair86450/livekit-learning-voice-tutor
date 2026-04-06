@@ -1,0 +1,585 @@
+Serving Custom Models Locally
+
+You have a quantized GGUF file. You have Ollama installed. Now you need to connect them and make your fine-tuned model accessible to applications. This lesson walks through the complete deployment workflow: registering your model, testing it, and integrating it with Python applications.
+
+The Deployment Pipeline​
+
+The deployment process follows a clear sequence:
+
+┌────────────────────────────────────────────────────────────────┐
+│ 1. Prepare: GGUF file + Modelfile in same directory            │
+├────────────────────────────────────────────────────────────────┤
+│ 2. Register: ollama create <name> -f Modelfile                  │
+├────────────────────────────────────────────────────────────────┤
+│ 3. Verify: ollama run <name> "test prompt"                      │
+├────────────────────────────────────────────────────────────────┤
+│ 4. Integrate: Python client or REST API                         │
+├────────────────────────────────────────────────────────────────┤
+│ 5. Monitor: Check performance and resource usage                │
+└────────────────────────────────────────────────────────────────┘
+
+Step 1: Prepare Your Model Files​
+
+Organize your deployment directory:
+
+# Create deployment directory
+mkdir -p ~/models/task-api
+cd ~/models/task-api
+
+# Your GGUF file should be here
+ls -la
+
+
+Output:
+
+total 4194304
+-rw-r--r--  1 user  staff  4.1G Jan 1 10:00 task-api-q4_k_m.gguf
+
+
+Create your Modelfile for the Task API model:
+
+cat > Modelfile << 'EOF'
+# Task API Model Configuration
+FROM ./task-api-q4_k_m.gguf
+
+# Parameters optimized for structured output
+PARAMETER temperature 0.3
+PARAMETER top_p 0.9
+PARAMETER num_ctx 4096
+PARAMETER repeat_penalty 1.1
+
+# Stop sequences for chat template
+PARAMETER stop "<|end|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER stop "<|im_end|>"
+
+# System prompt defining model behavior
+SYSTEM """You are the Task API assistant. You respond to task management
+requests with structured JSON. Every response must be valid JSON.
+
+Available actions:
+- create_task: Create a new task with title, due_date, and priority
+- list_tasks: List tasks with optional filters
+- update_task: Update a task by ID
+- delete_task: Delete a task by ID
+- complete_task: Mark a task as complete
+
+Response format:
+{"action": "...", "parameters": {...}, "success": true}
+
+If you cannot understand the request, respond with:
+{"action": "error", "message": "Could not parse request", "success": false}
+"""
+
+# Chat template matching training format
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>"""
+EOF
+
+Step 2: Register the Model​
+
+Create the model in Ollama's registry:
+
+# Register the model
+ollama create task-api -f Modelfile
+
+
+Output:
+
+transferring model data
+creating model layer
+creating template layer
+creating system layer
+creating parameters layer
+writing manifest
+success
+
+
+Verify the model is registered:
+
+# List all models
+ollama list
+
+
+Output:
+
+NAME                    ID              SIZE      MODIFIED
+task-api:latest         a1b2c3d4e5f6    4.1 GB    5 seconds ago
+llama3.2:1b             f6e5d4c3b2a1    1.3 GB    1 hour ago
+
+Step 3: Test the Model​
+
+Run an interactive test:
+
+ollama run task-api "Create a task: Review PR #42 by tomorrow, high priority"
+
+
+Output:
+
+{"action": "create_task", "parameters": {"title": "Review PR #42", "due_date": "tomorrow", "priority": "high"}, "success": true}
+
+
+Test edge cases:
+
+# Test with ambiguous input
+ollama run task-api "maybe do something later?"
+
+
+Output:
+
+{"action": "error", "message": "Could not parse request: no clear task action identified", "success": false}
+
+Step 4: Python Client Integration​
+Install the Ollama Python Library​
+pip install ollama
+
+Basic Client Usage​
+import ollama
+
+def create_task(description: str) -> dict:
+    """Send a task creation request to the local model."""
+    response = ollama.chat(
+        model='task-api',
+        messages=[
+            {
+                'role': 'user',
+                'content': description
+            }
+        ]
+    )
+    return response['message']['content']
+
+# Test the function
+result = create_task("Create a task: Submit quarterly report by Friday")
+print(result)
+
+
+Output:
+
+{"action": "create_task", "parameters": {"title": "Submit quarterly report", "due_date": "Friday", "priority": "normal"}, "success": true}
+
+Parsing JSON Responses​
+import ollama
+import json
+from typing import Optional
+
+class TaskAPIClient:
+    """Client for the Task API model."""
+
+    def __init__(self, model: str = 'task-api'):
+        self.model = model
+
+    def _call_model(self, prompt: str) -> dict:
+        """Make a call to the model and parse JSON response."""
+        response = ollama.chat(
+            model=self.model,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+
+        content = response['message']['content']
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            return {
+                'action': 'error',
+                'message': f'Invalid JSON response: {str(e)}',
+                'raw_response': content,
+                'success': False
+            }
+
+    def create_task(self, title: str, due_date: Optional[str] = None,
+                    priority: str = 'normal') -> dict:
+        """Create a new task."""
+        prompt = f"Create a task: {title}"
+        if due_date:
+            prompt += f" by {due_date}"
+        if priority != 'normal':
+            prompt += f", {priority} priority"
+        return self._call_model(prompt)
+
+    def list_tasks(self, filter_priority: Optional[str] = None) -> dict:
+        """List tasks with optional filtering."""
+        prompt = "List all tasks"
+        if filter_priority:
+            prompt += f" with {filter_priority} priority"
+        return self._call_model(prompt)
+
+    def complete_task(self, task_id: int) -> dict:
+        """Mark a task as complete."""
+        return self._call_model(f"Mark task {task_id} as complete")
+
+# Example usage
+client = TaskAPIClient()
+
+# Create tasks
+result1 = client.create_task("Review documentation", "Friday", "high")
+print(f"Created: {result1}")
+
+result2 = client.list_tasks("high")
+print(f"Listed: {result2}")
+
+result3 = client.complete_task(1)
+print(f"Completed: {result3}")
+
+
+Output:
+
+Created: {'action': 'create_task', 'parameters': {'title': 'Review documentation', 'due_date': 'Friday', 'priority': 'high'}, 'success': True}
+Listed: {'action': 'list_tasks', 'parameters': {'filter': {'priority': 'high'}}, 'success': True}
+Completed: {'action': 'complete_task', 'parameters': {'task_id': 1}, 'success': True}
+
+Streaming Responses​
+
+For long-form outputs, use streaming to improve perceived latency:
+
+import ollama
+
+def stream_response(prompt: str, model: str = 'task-api'):
+    """Stream response tokens as they are generated."""
+    stream = ollama.chat(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}],
+        stream=True
+    )
+
+    full_response = ""
+    for chunk in stream:
+        content = chunk['message']['content']
+        print(content, end='', flush=True)
+        full_response += content
+
+    print()  # Newline after streaming
+    return full_response
+
+# Stream a response
+response = stream_response("List all high priority tasks for this week")
+
+
+Output:
+
+{"action": "list_tasks", "parameters": {"filter": {"priority": "high", "due": "this_week"}}, "success": true}
+
+REST API Integration​
+
+For applications that cannot use the Python library, use the REST API directly.
+
+Generate Endpoint​
+import requests
+
+def call_ollama_generate(prompt: str, model: str = 'task-api') -> str:
+    """Call Ollama's generate endpoint."""
+    response = requests.post(
+        'http://localhost:11434/api/generate',
+        json={
+            'model': model,
+            'prompt': prompt,
+            'stream': False
+        }
+    )
+    response.raise_for_status()
+    return response.json()['response']
+
+# Test
+result = call_ollama_generate("Create a task: Update dependencies")
+print(result)
+
+
+Output:
+
+{"action": "create_task", "parameters": {"title": "Update dependencies"}, "success": true}
+
+Chat Endpoint (Recommended)​
+
+The chat endpoint maintains conversation context:
+
+import requests
+from typing import List, Dict
+
+def call_ollama_chat(messages: List[Dict[str, str]],
+                     model: str = 'task-api') -> str:
+    """Call Ollama's chat endpoint with message history."""
+    response = requests.post(
+        'http://localhost:11434/api/chat',
+        json={
+            'model': model,
+            'messages': messages,
+            'stream': False
+        }
+    )
+    response.raise_for_status()
+    return response.json()['message']['content']
+
+# Maintain conversation
+messages = []
+
+# First turn
+messages.append({'role': 'user', 'content': 'Create a task: Design new API'})
+response1 = call_ollama_chat(messages)
+messages.append({'role': 'assistant', 'content': response1})
+print(f"Turn 1: {response1}")
+
+# Second turn (context maintained)
+messages.append({'role': 'user', 'content': 'Set it to high priority'})
+response2 = call_ollama_chat(messages)
+print(f"Turn 2: {response2}")
+
+
+Output:
+
+Turn 1: {"action": "create_task", "parameters": {"title": "Design new API"}, "success": true}
+Turn 2: {"action": "update_task", "parameters": {"priority": "high"}, "success": true}
+
+Streaming with REST API​
+import requests
+import json
+
+def stream_ollama(prompt: str, model: str = 'task-api'):
+    """Stream responses using REST API."""
+    response = requests.post(
+        'http://localhost:11434/api/generate',
+        json={
+            'model': model,
+            'prompt': prompt,
+            'stream': True
+        },
+        stream=True
+    )
+
+    full_response = ""
+    for line in response.iter_lines():
+        if line:
+            chunk = json.loads(line)
+            content = chunk.get('response', '')
+            print(content, end='', flush=True)
+            full_response += content
+
+            if chunk.get('done', False):
+                break
+
+    print()
+    return full_response
+
+# Stream example
+result = stream_ollama("List tasks due today")
+
+Error Handling​
+
+Production applications need robust error handling:
+
+import ollama
+import json
+import time
+from typing import Optional
+
+class RobustTaskClient:
+    """Production-ready Task API client with error handling."""
+
+    def __init__(self, model: str = 'task-api', max_retries: int = 3):
+        self.model = model
+        self.max_retries = max_retries
+
+    def _call_with_retry(self, prompt: str) -> dict:
+        """Call model with retry logic."""
+        last_error = None
+
+        for attempt in range(self.max_retries):
+            try:
+                response = ollama.chat(
+                    model=self.model,
+                    messages=[{'role': 'user', 'content': prompt}]
+                )
+                content = response['message']['content']
+                return json.loads(content)
+
+            except ollama.ResponseError as e:
+                last_error = e
+                if e.status_code == 503:
+                    # Model loading, wait and retry
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+
+            except json.JSONDecodeError as e:
+                return {
+                    'action': 'error',
+                    'message': 'Model returned invalid JSON',
+                    'success': False
+                }
+
+            except Exception as e:
+                last_error = e
+                time.sleep(1)
+                continue
+
+        return {
+            'action': 'error',
+            'message': f'Failed after {self.max_retries} attempts: {str(last_error)}',
+            'success': False
+        }
+
+    def execute(self, command: str) -> dict:
+        """Execute a task command with full error handling."""
+        if not command.strip():
+            return {
+                'action': 'error',
+                'message': 'Empty command',
+                'success': False
+            }
+
+        result = self._call_with_retry(command)
+
+        # Validate response structure
+        if not isinstance(result, dict):
+            return {
+                'action': 'error',
+                'message': 'Invalid response structure',
+                'success': False
+            }
+
+        return result
+
+# Usage
+client = RobustTaskClient()
+result = client.execute("Create a task: Deploy to production by EOD")
+print(f"Result: {result}")
+
+
+Output:
+
+Result: {'action': 'create_task', 'parameters': {'title': 'Deploy to production', 'due_date': 'EOD'}, 'success': True}
+
+Monitoring Performance​
+
+Track your model's performance in production:
+
+import ollama
+import time
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class InferenceMetrics:
+    prompt_tokens: int
+    completion_tokens: int
+    total_duration_ms: float
+    load_duration_ms: float
+    eval_duration_ms: float
+
+def measure_inference(prompt: str, model: str = 'task-api') -> tuple:
+    """Measure inference performance."""
+    start = time.time()
+
+    response = ollama.chat(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+
+    total_time = (time.time() - start) * 1000
+
+    # Extract metrics from response
+    metrics = InferenceMetrics(
+        prompt_tokens=response.get('prompt_eval_count', 0),
+        completion_tokens=response.get('eval_count', 0),
+        total_duration_ms=total_time,
+        load_duration_ms=response.get('load_duration', 0) / 1e6,
+        eval_duration_ms=response.get('eval_duration', 0) / 1e6
+    )
+
+    return response['message']['content'], metrics
+
+# Benchmark
+content, metrics = measure_inference("Create a task: Test performance")
+print(f"Response: {content}")
+print(f"Prompt tokens: {metrics.prompt_tokens}")
+print(f"Completion tokens: {metrics.completion_tokens}")
+print(f"Total time: {metrics.total_duration_ms:.1f}ms")
+print(f"Tokens/second: {metrics.completion_tokens / (metrics.eval_duration_ms / 1000):.1f}")
+
+
+Output:
+
+Response: {"action": "create_task", "parameters": {"title": "Test performance"}, "success": true}
+Prompt tokens: 45
+Completion tokens: 28
+Total time: 142.3ms
+Tokens/second: 35.2
+
+Reflect on Your Skill​
+
+Update your model-serving skill with client integration patterns:
+
+## Python Client Patterns
+
+### Basic Usage
+import ollama
+response = ollama.chat(model='task-api', messages=[{'role': 'user', 'content': prompt}])
+
+### REST API
+POST http://localhost:11434/api/chat
+{"model": "task-api", "messages": [...], "stream": false}
+
+### Error Handling Pattern
+- Retry on 503 (model loading)
+- Parse JSON with fallback
+- Validate response structure
+
+### Performance Targets
+- First token: <200ms (warm)
+- Full response: <500ms typical
+- Tokens/second: 30-50 on consumer GPU
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, Gemini, or similar).
+
+Prompt 1: Design Your API Client​
+I want to build a Python client for my Task API model that:
+1. Provides typed methods for each action (create, list, update, delete)
+2. Validates responses against a Pydantic schema
+3. Supports both sync and async operations
+4. Logs all requests and responses for debugging
+
+Help me design the class structure and key methods.
+
+
+What you are learning: API client architecture. A well-designed client makes your model easy to integrate.
+
+Prompt 2: Optimize for Latency​
+My Task API model is responding in 800ms average. My target is <500ms.
+Current setup:
+- Model: 7B Q4_K_M on RTX 3060 (12GB VRAM)
+- Context length: 4096
+- Temperature: 0.3
+
+What can I tune to reduce latency? Consider:
+1. Model parameters
+2. Ollama configuration
+3. Client-side optimizations
+4. Architecture changes
+
+
+What you are learning: Performance optimization. Meeting latency targets often requires multiple adjustments.
+
+Prompt 3: Handle Edge Cases​
+My Task API model sometimes returns responses that are not valid JSON:
+- Extra text before or after the JSON
+- Truncated JSON (missing closing braces)
+- Multiple JSON objects in one response
+
+Help me write robust parsing code that:
+1. Extracts JSON from mixed content
+2. Repairs common truncation issues
+3. Handles multiple objects
+4. Falls back gracefully when parsing fails
+
+
+What you are learning: Production robustness. Real-world models produce unexpected outputs that need handling.
+
+Safety Note​
+
+When deploying locally-served models in applications, implement rate limiting and input validation. A user could potentially craft prompts that cause excessive resource usage or produce harmful outputs. Always validate model responses before acting on them in production systems.

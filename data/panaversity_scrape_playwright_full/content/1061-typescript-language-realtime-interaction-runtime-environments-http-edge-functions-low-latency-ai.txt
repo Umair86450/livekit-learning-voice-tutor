@@ -1,0 +1,653 @@
+Edge Functions: Low-Latency AI
+
+Your users are global. A user in Tokyo makes a request to your AI chatbot. The request travels to your server in us-east-1, waits for a cold start, calls OpenAI, and travels back. Total round-trip: 400ms before the first token appears. That same user's competitor app responds in 80ms because their edge function was already warm in Tokyo.
+
+Edge functions fundamentally change where your code runs. Instead of centralized servers, your code executes in 300+ data centers worldwide—within 50ms of 95% of the global internet population. For AI applications that stream tokens to users, this difference transforms user experience from "noticeable delay" to "instant response."
+
+This lesson teaches you edge computing for AI applications. You'll understand why V8 isolates enable near-zero cold starts, learn the three major platforms (Cloudflare Workers, Vercel Edge Functions, Deno Deploy), and recognize when edge deployment helps versus when it hurts.
+
+Why Edge Functions Matter for AI​
+
+Traditional serverless (AWS Lambda, Google Cloud Functions) runs your code in containers. When a request arrives and no warm container exists, the platform spins one up. This takes 100ms to over a second.
+
+Edge functions use a different model: V8 isolates. Instead of containers, your code runs in lightweight JavaScript sandboxes that share a single process. This changes everything about cold starts.
+
+Cold Start Comparison​
+Platform	Cold Start	Why
+AWS Lambda (Node.js)	100-800ms	Container initialization
+Google Cloud Functions	100-500ms	Container initialization
+Cloudflare Workers	0-5ms	V8 isolate, pre-warmed
+Vercel Edge Functions	~30ms	V8 isolate via edge runtime
+Deno Deploy	~20ms	V8 isolate, global deployment
+
+Cloudflare achieves effectively zero cold starts through smart optimization: when they receive the TLS handshake, they start warming the isolate before the HTTP request even completes. By the time your request arrives, the Worker is ready.
+
+Global Deployment by Default​
+
+When you deploy to Cloudflare Workers, your code runs in 330+ cities across 122+ countries. There's no region selection. There's no "deploy to us-east-1 and hope." Your code is everywhere, and requests route to the nearest location automatically.
+
+For AI applications, this means:
+
+Faster first-byte: Users connect to nearby edge locations
+Lower streaming latency: Each token travels a shorter distance
+Reduced jitter: Consistent performance regardless of user location
+How V8 Isolates Work​
+
+Traditional containers isolate applications through operating system boundaries. Each container has its own file system, network stack, and process space. This provides strong isolation but requires significant startup time.
+
+V8 isolates take a different approach. They run multiple JavaScript environments within a single process, separated by V8's security model rather than OS boundaries:
+
+Traditional Serverless (Container Model):
+┌─────────────────────────────────────────┐
+│ Container A                             │
+│ ┌─────────────────────────────────────┐ │
+│ │ OS Layer                            │ │
+│ │ ┌─────────────────────────────────┐ │ │
+│ │ │ Node.js Process                 │ │ │
+│ │ │ ┌─────────────────────────────┐ │ │ │
+│ │ │ │ Your Code                   │ │ │ │
+│ │ │ └─────────────────────────────┘ │ │ │
+│ │ └─────────────────────────────────┘ │ │
+│ └─────────────────────────────────────┘ │
+└─────────────────────────────────────────┘
+Cold start: Initialize container → OS → Node.js → Code
+
+Edge Functions (Isolate Model):
+┌─────────────────────────────────────────┐
+│ Single Process (V8 Engine)              │
+│ ┌─────────┐ ┌─────────┐ ┌─────────┐    │
+│ │Isolate A│ │Isolate B│ │Isolate C│    │
+│ │(Your    │ │(Another │ │(Third   │    │
+│ │ code)   │ │ tenant) │ │ tenant) │    │
+│ └─────────┘ └─────────┘ └─────────┘    │
+└─────────────────────────────────────────┘
+Cold start: Create isolate → Load code (milliseconds)
+
+
+The tradeoff: isolates share the same process, so they can't use native binaries, can't spawn child processes, and have stricter memory limits. But for JavaScript-heavy workloads like proxying AI requests, they're dramatically faster.
+
+Cloudflare Workers: The Performance Leader​
+
+Cloudflare Workers pioneered the edge function model and remain the performance leader. Let's build an AI proxy that adds caching, rate limiting, and error handling at the edge.
+
+Your First Worker​
+
+Create a new Cloudflare Workers project:
+
+npm create cloudflare@latest ai-edge-proxy
+cd ai-edge-proxy
+
+
+Output:
+
+using create-cloudflare version 2.40.0
+
+╭ Create an application with Cloudflare Step 1 of 3
+│
+├ In which directory do you want to create your application?
+│ dir ./ai-edge-proxy
+│
+├ What would you like to start with?
+│ category Hello World example
+│
+├ Which template would you like to use?
+│ type Hello World Worker
+│
+├ Which language do you want to use?
+│ lang TypeScript
+│
+╰ Application created
+
+
+Replace the generated src/index.ts:
+
+// src/index.ts - AI API proxy at the edge
+export interface Env {
+  OPENAI_API_KEY: string;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    // Only accept POST requests
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    // Parse the incoming request
+    const body = await request.json() as { prompt: string };
+
+    if (!body.prompt) {
+      return new Response(
+        JSON.stringify({ error: "Missing prompt" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Call OpenAI API
+    const openaiResponse = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4",
+          messages: [{ role: "user", content: body.prompt }],
+          max_tokens: 500,
+        }),
+      }
+    );
+
+    if (!openaiResponse.ok) {
+      return new Response(
+        JSON.stringify({ error: "OpenAI API error" }),
+        { status: 502, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const data = await openaiResponse.json() as {
+      choices: Array<{ message: { content: string } }>;
+    };
+
+    return new Response(
+      JSON.stringify({
+        response: data.choices[0].message.content,
+        edge_location: request.cf?.colo ?? "unknown",
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  },
+};
+
+
+Set your API key and test locally:
+
+# Add secret (won't appear in wrangler.toml)
+npx wrangler secret put OPENAI_API_KEY
+
+# Start local development
+npx wrangler dev
+
+
+Output:
+
+⎔ Starting local server...
+[wrangler:inf] Ready on http://localhost:8787
+
+
+Test with curl:
+
+curl -X POST http://localhost:8787 \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is edge computing in one sentence?"}'
+
+
+Output:
+
+{
+  "response": "Edge computing processes data closer to its source rather than in centralized data centers, reducing latency and bandwidth usage.",
+  "edge_location": "local"
+}
+
+
+Deploy globally:
+
+npx wrangler deploy
+
+
+Output:
+
+⛅️ wrangler 3.50.0
+──────────────────────────────────────
+Uploading ai-edge-proxy...
+Published ai-edge-proxy (1.50 sec)
+  https://ai-edge-proxy.your-subdomain.workers.dev
+
+
+Your code now runs in 330+ locations worldwide. Test from different regions to see the edge_location change.
+
+Streaming Responses at the Edge​
+
+For AI applications, streaming is essential. Users shouldn't wait for complete responses. Here's how to stream OpenAI responses through Cloudflare Workers:
+
+// src/index-streaming.ts
+export interface Env {
+  OPENAI_API_KEY: string;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    const body = await request.json() as { prompt: string };
+
+    // Request streaming from OpenAI
+    const openaiResponse = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4",
+          messages: [{ role: "user", content: body.prompt }],
+          stream: true,  // Enable streaming
+        }),
+      }
+    );
+
+    if (!openaiResponse.ok || !openaiResponse.body) {
+      return new Response(
+        JSON.stringify({ error: "OpenAI API error" }),
+        { status: 502 }
+      );
+    }
+
+    // Stream the response through to the client
+    return new Response(openaiResponse.body, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      },
+    });
+  },
+};
+
+
+The edge function acts as a pass-through, forwarding the stream from OpenAI to the client with minimal latency overhead. Because the edge location is close to the user, each chunk arrives faster.
+
+Vercel Edge Functions: Next.js Integration​
+
+If you're building with Next.js, Vercel Edge Functions integrate seamlessly. They use the same V8 isolate model but with tighter framework integration.
+
+Edge API Routes in Next.js​
+// app/api/chat/route.ts
+import { NextRequest } from "next/server";
+
+// Mark this route as edge
+export const runtime = "edge";
+
+export async function POST(request: NextRequest): Promise<Response> {
+  const { prompt } = await request.json();
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4",
+      messages: [{ role: "user", content: prompt }],
+      stream: true,
+    }),
+  });
+
+  // Stream back to client
+  return new Response(response.body, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    },
+  });
+}
+
+
+The key difference is export const runtime = "edge". This single line moves your API route from Node.js serverless to edge runtime. The same code structure, dramatically different deployment model.
+
+Vercel AI SDK Integration​
+
+Vercel's AI SDK simplifies streaming even further:
+
+// app/api/chat/route.ts
+import { openai } from "@ai-sdk/openai";
+import { streamText } from "ai";
+
+export const runtime = "edge";
+
+export async function POST(request: Request): Promise<Response> {
+  const { messages } = await request.json();
+
+  const result = streamText({
+    model: openai("gpt-4"),
+    messages,
+  });
+
+  return result.toDataStreamResponse();
+}
+
+
+Output:
+
+# Streams tokens directly to the client
+# Each token arrives as soon as OpenAI generates it
+
+
+The SDK handles SSE formatting, error boundaries, and type safety. You focus on the AI logic.
+
+Deno Deploy: Standards-First Edge​
+
+Deno Deploy extends Deno's runtime to the edge. If you're already using Deno, deployment is seamless.
+
+Deploy from GitHub​
+
+Create main.ts:
+
+// main.ts - Deno Deploy edge function
+Deno.serve(async (request: Request): Promise<Response> => {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const { prompt } = await request.json();
+  const apiKey = Deno.env.get("OPENAI_API_KEY");
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4",
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await response.json();
+
+  return new Response(
+    JSON.stringify({ response: data.choices[0].message.content }),
+    { headers: { "Content-Type": "application/json" } }
+  );
+});
+
+
+Push to GitHub, connect to Deno Deploy, and your edge function is live. No build step. No configuration. Deno's native TypeScript support means your code runs as-is.
+
+Local Development with Deno​
+# Run locally with permissions
+deno run --allow-net --allow-env main.ts
+
+
+Output:
+
+Listening on http://localhost:8000/
+
+
+Test it:
+
+curl -X POST http://localhost:8000 \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Hello from Deno Deploy!"}'
+
+
+Output:
+
+{"response":"Hello! How can I help you today?"}
+
+Edge Platform Comparison​
+
+Each platform has strengths and constraints. Choose based on your requirements:
+
+Feature	Cloudflare Workers	Vercel Edge	Deno Deploy
+Cold Start	0-5ms	~30ms	~20ms
+Edge Locations	330+ cities	18+ regions	35+ regions
+Memory Limit	128MB	128MB (4MB bundle)	512MB
+CPU Time	30s (free), 5min (paid)	25s streaming	50ms CPU per request
+Native TypeScript	Via bundler	Via bundler	Native, no build
+Framework Integration	Framework-agnostic	Next.js native	Fresh framework
+npm Compatibility	Full	Full	Full (npm: prefix)
+Pricing Model	Per request	Per invocation	Per request
+When to Use Each​
+
+Cloudflare Workers when you need:
+
+Lowest possible latency (0ms cold start)
+Widest geographic coverage
+Framework-agnostic deployment
+Advanced features (Durable Objects, KV, R2)
+
+Vercel Edge Functions when you need:
+
+Next.js integration
+Seamless preview deployments
+AI SDK streaming helpers
+Git-based workflow
+
+Deno Deploy when you need:
+
+Native TypeScript without bundling
+Deno-first development
+Standard Web APIs only
+Simple deployment from GitHub
+Edge Limitations: When NOT to Use Edge​
+
+Edge functions aren't universally better. Their constraints make them inappropriate for certain workloads.
+
+Memory Limits​
+
+Edge functions typically have 128MB memory limits (512MB for Deno Deploy). This is insufficient for:
+
+Large model loading: On-device inference requires loading model weights
+Large document processing: PDFs, images, or files exceeding memory
+Complex data transformations: DataFrames, heavy computation
+// This will fail on edge - memory exceeded
+const largeArray = new Array(50_000_000).fill(0); // ~400MB
+
+CPU Time Limits​
+
+Edge functions are optimized for I/O-bound work, not CPU-bound computation:
+
+Platform	CPU Time Limit
+Cloudflare (free)	10ms per request
+Cloudflare (paid)	30s (configurable to 5min)
+Vercel Edge	Must begin response in 25s
+Deno Deploy	50ms CPU per request
+
+If your AI workload involves:
+
+Custom model inference
+Heavy preprocessing (tokenization, embedding generation)
+Complex algorithmic computation
+
+Use traditional serverless (Lambda, Cloud Functions) or dedicated compute instead.
+
+No Native Binaries​
+
+V8 isolates run JavaScript only. You cannot:
+
+Execute Python scripts
+Run native machine learning libraries (PyTorch, TensorFlow)
+Use system commands (ffmpeg, imagemagick)
+
+For these workloads, edge functions can orchestrate but not execute. Call a traditional backend for the heavy work.
+
+Database Connections​
+
+Edge functions don't maintain persistent connections. Traditional database drivers (pg, mysql2) that rely on connection pooling don't work well. Use:
+
+HTTP-based databases (PlanetScale, Neon, Supabase)
+Edge-native KV stores (Cloudflare KV, Upstash)
+Connection poolers (PgBouncer, Prisma Data Proxy)
+// This works - HTTP-based database
+const response = await fetch("https://your-db.neon.tech/sql", {
+  method: "POST",
+  body: JSON.stringify({ query: "SELECT * FROM users" }),
+});
+
+// This doesn't work - TCP connection
+import { Pool } from "pg";
+const pool = new Pool(); // Fails: no TCP sockets
+
+Real-World Edge AI Patterns​
+Pattern 1: Edge AI Gateway​
+
+Route AI requests through the edge for caching, rate limiting, and fallback:
+
+// Edge gateway that adds caching and fallback
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const body = await request.json() as { prompt: string };
+    const cacheKey = `ai:${await sha256(body.prompt)}`;
+
+    // Check cache first
+    const cached = await env.AI_CACHE.get(cacheKey);
+    if (cached) {
+      return new Response(cached, {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Cache": "HIT",
+        },
+      });
+    }
+
+    // Try primary provider, fallback to secondary
+    let response: Response;
+    try {
+      response = await callOpenAI(body.prompt, env.OPENAI_API_KEY);
+    } catch {
+      response = await callAnthropic(body.prompt, env.ANTHROPIC_API_KEY);
+    }
+
+    // Cache successful responses
+    const responseText = await response.text();
+    await env.AI_CACHE.put(cacheKey, responseText, { expirationTtl: 3600 });
+
+    return new Response(responseText, {
+      headers: {
+        "Content-Type": "application/json",
+        "X-Cache": "MISS",
+      },
+    });
+  },
+};
+
+Pattern 2: Geolocation-Aware Routing​
+
+Select AI providers based on user location:
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    // Cloudflare provides location data automatically
+    const country = request.cf?.country ?? "US";
+    const continent = request.cf?.continent ?? "NA";
+
+    // Route to nearest AI provider
+    let apiUrl: string;
+    if (continent === "AS") {
+      apiUrl = "https://api.asia.ai-provider.com";  // Lower latency for Asia
+    } else if (continent === "EU") {
+      apiUrl = "https://api.eu.ai-provider.com";    // GDPR-compliant endpoint
+    } else {
+      apiUrl = "https://api.ai-provider.com";       // Default
+    }
+
+    // Proxy to selected endpoint
+    const response = await fetch(apiUrl, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    });
+
+    return response;
+  },
+};
+
+Pattern 3: Response Augmentation​
+
+Enrich AI responses at the edge before returning to users:
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const { prompt } = await request.json();
+
+    // Get AI response
+    const aiResponse = await callOpenAI(prompt, env.OPENAI_API_KEY);
+    const aiData = await aiResponse.json();
+
+    // Augment at the edge
+    const augmented = {
+      ...aiData,
+      metadata: {
+        edge_location: request.cf?.colo,
+        latency_region: request.cf?.continent,
+        timestamp: new Date().toISOString(),
+        user_country: request.cf?.country,
+      },
+    };
+
+    return new Response(JSON.stringify(augmented), {
+      headers: { "Content-Type": "application/json" },
+    });
+  },
+};
+
+Try With AI​
+Prompt 1: Architecture Decision​
+I'm building an AI chatbot with these requirements:
+- Global users (US, Europe, Asia)
+- 500ms maximum time-to-first-token
+- Streaming responses
+- Need to call OpenAI API
+- Must handle 10,000 requests/hour
+
+Help me decide between:
+1. Traditional serverless (Lambda)
+2. Cloudflare Workers
+3. Vercel Edge Functions
+
+For each option, estimate the latency breakdown (cold start + network + processing).
+What would you recommend and why?
+
+
+What you're learning: How to evaluate edge deployment for real business requirements. The latency breakdown exercise teaches you to think about each component of request time, not just total response time.
+
+Prompt 2: Limitations Analysis​
+I want to build an AI application that:
+1. Accepts PDF uploads (up to 50MB)
+2. Extracts text from the PDF
+3. Summarizes the content using GPT-4
+4. Returns the summary
+
+Can I do this entirely on edge functions? Walk me through which parts
+could run on the edge and which need traditional serverless.
+Design an architecture that uses edge where beneficial and
+traditional compute where necessary.
+
+
+What you're learning: Understanding edge limitations in practice. Not everything should run on the edge, and knowing where to draw the line is a critical architecture skill. This prompt forces you to think through memory limits, CPU constraints, and appropriate separation of concerns.
+
+Prompt 3: Cross-Platform Migration​
+I have this Cloudflare Worker:
+
+export default {
+  async fetch(request, env) {
+    const data = await request.json();
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${env.OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: "gpt-4", messages: data.messages }),
+    });
+    return response;
+  }
+};
+
+Help me:
+1. Convert this to a Vercel Edge Function (Next.js API route)
+2. Convert this to a Deno Deploy function
+3. Explain what changes between platforms and what stays the same
+
+Which approach would you recommend for a team already using Next.js?
+
+
+What you're learning: The Web API foundation that makes edge functions portable. Understanding what's standard (fetch, Request, Response) versus platform-specific (env access, configuration) helps you write code that migrates easily between providers.
+
+Safety note: Edge functions are public endpoints by default. Always implement authentication (API keys, JWTs) before deploying AI proxies to production. A misconfigured edge function can expose your OpenAI API key or allow unlimited requests at your expense. Use Cloudflare's secret bindings, Vercel's environment variables, or Deno Deploy's environment configuration to protect credentials.

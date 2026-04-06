@@ -1,0 +1,344 @@
+From Request-Response to Events
+
+Your Task API is working beautifully. Users create tasks, update them, mark them complete. Everything runs smoothly in development. Then your team adds requirements that seem straightforward:
+
+When a task is created, send a Slack notification to the team
+When a task is completed, update the audit log for compliance
+When a task is overdue, trigger a reminder email
+
+You implement these the obvious way: when the Task API creates a task, it calls the Notification Service, waits for a response, then calls the Audit Service, waits for a response, then calls the Reminder Service. Clean, synchronous, easy to understand.
+
+Until the Notification Service has a bad day. Slack rate-limits your API calls. Now every task creation takes 3 seconds instead of 50 milliseconds. Users complain. Your Task API's response time charts look like a heart attack. And here's the worst part: the Task API did nothing wrong. It's just waiting for a service it depends on.
+
+This is the coupling problem. And it's not a code quality issue you can refactor away. It's an architectural constraint baked into how request-response communication works.
+
+The Request-Response Chain​
+
+Consider what happens when your Task API creates a task using direct HTTP calls:
+
+User Request
+    |
+    v
++------------------+
+|    Task API      |  1. Validate and save task
++------------------+
+    |
+    | HTTP POST /notifications  (blocks waiting)
+    v
++------------------+
+|  Notification    |  2. Send Slack message
+|    Service       |     (Slack rate-limited: 2s delay)
++------------------+
+    |
+    | HTTP Response (2s later)
+    v
++------------------+
+|    Task API      |  3. Continue to next call
++------------------+
+    |
+    | HTTP POST /audit  (blocks waiting)
+    v
++------------------+
+|  Audit Service   |  4. Write audit record
+|                  |     (database slow: 500ms)
++------------------+
+    |
+    | HTTP Response (500ms later)
+    v
++------------------+
+|    Task API      |  5. Continue to next call
++------------------+
+    |
+    | HTTP POST /reminders  (blocks waiting)
+    v
++------------------+
+| Reminder Service |  6. Schedule reminder
+|                  |     (normal: 50ms)
++------------------+
+    |
+    | HTTP Response (50ms later)
+    v
++------------------+
+|    Task API      |  7. Finally respond to user
++------------------+
+    |
+    v
+User Response (2.55 seconds later)
+
+
+The user asked to create a task. The Task API did its job in 50ms. But the user waited 2.55 seconds because of services that have nothing to do with task creation.
+
+Now imagine the Notification Service crashes entirely. What happens to your Task API?
+
+Cascading Failures​
+
+When services are chained through synchronous calls, a failure anywhere becomes a failure everywhere:
+
+Failure Cascade Scenario:
+
+1. Notification Service crashes
+   |
+   v
+2. Task API calls Notification Service
+   → Connection timeout (30 seconds)
+   → Task API thread blocked
+   |
+   v
+3. More users create tasks
+   → More Task API threads blocked
+   → Thread pool exhausts
+   |
+   v
+4. Task API can't accept new requests
+   → Returns 503 Service Unavailable
+   |
+   v
+5. Frontend shows error to all users
+   "Unable to create task"
+
+Business Impact: Nobody can create tasks because
+Slack notifications are down.
+
+
+This is the cascading failure problem. The Notification Service going down should mean "notifications don't work." Instead, it means "the entire task creation system doesn't work."
+
+Your users don't care about Slack notifications. They care about creating tasks. But your architecture doesn't let them have one without the other.
+
+Three Types of Coupling​
+
+The request-response pattern creates three distinct coupling problems. Understanding them separately helps you see why the event-driven solution addresses each one.
+
+Temporal Coupling​
+
+Definition: Both services must be running at the same moment for communication to succeed.
+
+Service A wants to...	Service B is...	Result
+Send notification	Running	Success
+Send notification	Crashed	Failure
+Send notification	Deploying	Failure
+Send notification	Rate-limited	Delayed, maybe failure
+
+Business Impact: If your Notification Service deploys a new version (even a 30-second rolling update), task creation fails during that window. You can't independently deploy services.
+
+Example: Your Task API creates a task at 2:00:03 PM. Your Notification Service restart takes from 2:00:00 PM to 2:00:30 PM. That task creation fails, even though both services work fine 99.99% of the time.
+
+Availability Coupling​
+
+Definition: Service A's availability becomes dependent on Service B's availability.
+
+The math is brutal. If each service has 99.9% uptime (3.65 hours downtime per year):
+
+Services in Chain	Combined Availability	Annual Downtime
+1	99.9%	8.76 hours
+2	99.8%	17.5 hours
+3	99.7%	26.3 hours
+4	99.6%	35.1 hours
+
+Business Impact: Adding the Notification, Audit, and Reminder services dropped your Task API's effective availability from 99.9% to 99.6%. That's four times more downtime, and you didn't change a single line in your Task API code.
+
+Example: You promise customers 99.9% uptime for task creation. But your architecture makes that promise impossible to keep unless every dependent service also achieves 99.9%.
+
+Behavioral Coupling​
+
+Definition: The calling service must know the interface details of the called service.
+
+Your Task API code looks like this:
+
+# Task API must know Notification Service's interface
+async def create_task(task: TaskCreate):
+    task_id = await save_task(task)
+
+    # Coupling: Task API knows notification API structure
+    await http_client.post(
+        "http://notification-service/api/v1/notifications",
+        json={
+            "channel": "slack",
+            "workspace": "team-tasks",
+            "message": f"Task created: {task.title}",
+            "priority": "normal"
+        }
+    )
+
+    # Coupling: Task API knows audit API structure
+    await http_client.post(
+        "http://audit-service/api/v2/records",
+        json={
+            "entity_type": "task",
+            "entity_id": task_id,
+            "action": "created",
+            "actor": task.created_by,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+
+    return task_id
+
+
+Business Impact:
+
+If Notification Service changes its API from /api/v1/ to /api/v2/, Task API must update and redeploy
+If Audit Service adds a required field, Task API must update and redeploy
+Task API developers must understand how notification and audit services work
+
+Example: The Audit team decides to add a source_ip field to audit records. Now the Task API team, Notification team, Reminder team, and every other service that writes audit records must coordinate their deployments. One team's API change cascades to every caller.
+
+The Event-Driven Alternative​
+
+What if the Task API didn't call other services at all? What if it simply announced what happened and let interested services react independently?
+
+Event-Driven Approach:
+
+User Request
+    |
+    v
++------------------+
+|    Task API      |  1. Validate, save task, publish event
++------------------+
+    |
+    | "Task Created" event
+    v
++------------------+
+|   Event Stream   |  2. Durable log of events
+|     (Kafka)      |     (stored until consumed)
++------------------+
+    |             \              \
+    v              v              v
++----------+  +----------+  +----------+
+| Notif.   |  | Audit    |  | Reminder |
+| Service  |  | Service  |  | Service  |
++----------+  +----------+  +----------+
+     |             |              |
+     v             v              v
+  Sends        Writes         Schedules
+  Slack        audit          reminder
+  message      record
+
+User Response: 50ms (Task API's actual time)
+
+
+The Task API responds immediately. It doesn't wait for notifications, audits, or reminders. It doesn't know those services exist. It just publishes a fact: "Task X was created by User Y at Time Z."
+
+Each downstream service:
+
+Consumes events at its own pace
+Operates independently of Task API availability
+Doesn't affect Task API if it crashes or slows down
+How Events Solve Each Coupling Problem​
+Coupling Type	Request-Response Problem	Event-Driven Solution
+Temporal	Both services must be running simultaneously	Events are stored durably; consumers read when ready
+Availability	Chain availability multiplies failure probability	Producer doesn't depend on consumer availability
+Behavioral	Caller must know callee's API details	Publisher only knows event schema; consumers decide how to react
+
+Temporal decoupling: If the Notification Service is down when a task is created, the event waits in the stream. When the Notification Service recovers, it reads the event and sends the notification. No failure, just delay.
+
+Availability decoupling: Task API's availability is now independent. It only depends on the event stream (Kafka), which is designed for 99.99%+ availability through replication.
+
+Behavioral decoupling: Task API publishes a TaskCreated event with the task data. It doesn't know or care that Notification Service exists. The Notification Service decides what notifications to send based on the event. If Audit Service needs a new field, it either uses data already in the event or ignores that event—no Task API changes required.
+
+Events Are Immutable Facts​
+
+This is the mental model shift: events are not requests. They're facts about things that happened.
+
+Request (Command)	Event (Fact)
+"Send a notification"	"Task was created"
+"Write an audit record"	"User completed task"
+"Schedule a reminder"	"Task is now overdue"
+Can fail or be rejected	Already happened, cannot un-happen
+Caller expects response	Publisher doesn't wait for consumers
+
+A request says "do this thing." An event says "this thing happened." The difference is fundamental:
+
+You can refuse a request. You can't refuse that something happened.
+You can fail to fulfill a request. You can't fail to record a fact.
+Requests create dependencies. Facts create opportunities.
+
+When you shift from "Task API tells Notification Service to send a message" to "Task API records that a task was created," you fundamentally change the relationship between services. The Task API is no longer the boss giving orders. It's a journalist reporting facts. Consumers decide what to do with those facts.
+
+When Request-Response Still Makes Sense​
+
+Event-driven architecture isn't universally better. Some interactions genuinely require synchronous request-response:
+
+Use Case	Why Request-Response
+Authentication	User can't proceed until identity confirmed
+Payment processing	Must know if charge succeeded before fulfilling order
+Real-time queries	User needs data now, not eventually
+Strong consistency	Transaction must complete atomically
+
+The key question: Does the caller need to wait for the result?
+
+Creating a task: No. The task exists regardless of what happens downstream.
+Checking account balance: Yes. The user needs the answer immediately.
+Completing a purchase: Yes. The user needs to know if it worked.
+Sending notifications about a purchase: No. The purchase is complete; notifications are side effects.
+Reflect on Your Skill​
+
+You built a kafka-events skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my kafka-events skill, analyze this scenario: A Task API calls three services directly (Notification, Audit, Reminder). Each call takes 500ms. What coupling problems exist?
+Does my skill identify temporal, availability, and behavioral coupling?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain the three types of coupling from this lesson?
+Did it distinguish between events (immutable facts) and commands (requests)?
+Improve Your Skill​
+
+If you found gaps:
+
+My kafka-events skill is missing coverage of coupling types (temporal, availability, behavioral).
+Update it to include when each coupling type appears and how events solve them.
+
+Try With AI​
+
+Open your AI companion (Claude, ChatGPT, Gemini) and explore these scenarios.
+
+Prompt 1: Analyze Your Architecture​
+I'm building a system where [describe your system, e.g., "an e-commerce
+platform where placing an order triggers inventory updates, payment
+processing, shipping label creation, and customer notifications"].
+
+Help me identify which of these interactions have coupling problems:
+- Which have temporal coupling? (both must be up simultaneously)
+- Which have availability coupling? (one service failure breaks everything)
+- Which have behavioral coupling? (one service knows too much about another)
+
+For each coupling you find, ask me: "Does the caller actually need to
+wait for this result?"
+
+
+What you're learning: Applying the three coupling types to your own domain. The AI helps you see your architecture through the lens of coupling analysis.
+
+Prompt 2: Design an Event​
+Take this synchronous call from my system:
+
+[Describe a call, e.g., "After a user places an order, the Order Service
+calls the Inventory Service to reduce stock quantities"]
+
+Help me redesign this as an event. What fact happened that could be
+published? What would consumers need to know? Challenge me: is this
+truly a case where event-driven is better, or do I actually need the
+synchronous response?
+
+
+What you're learning: Converting request-response patterns to events. The AI pushes back when event-driven might not be the right choice, helping you develop judgment about when to apply each pattern.
+
+Prompt 3: Calculate Availability Impact​
+I have a request-response chain with these services:
+- Service A: 99.9% availability
+- Service B: 99.5% availability
+- Service C: 99.9% availability
+
+Calculate the combined availability. Then help me reason about: if I
+move Services B and C to consume events asynchronously, what becomes
+Service A's effective availability? What's the business case for
+making this architectural change?
+
+
+What you're learning: Quantifying the business impact of coupling. Availability calculations make abstract coupling problems concrete, helping you justify architectural decisions.
+
+Safety Note​
+
+As you explore event-driven patterns with AI, remember that architecture decisions have trade-offs. Event-driven systems solve coupling problems but introduce complexity around eventual consistency, event ordering, and debugging. Always validate AI suggestions against your specific business requirements and constraints.

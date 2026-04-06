@@ -1,0 +1,269 @@
+Linux Operations Exercises
+
+Ali's competitor-tracker agent is running in production. It survived a reboot, recovered from a crash, and generates reports every morning. That took seven lessons of learning -- SSH connections, filesystem navigation, directory setup, systemd services, security hardening, and systematic debugging. You understand how each piece works. But there is a gap between understanding the pieces and reaching for the right instruction when a real deployment goes sideways at 2am.
+
+These exercises close that gap. Fourteen hands-on challenges across three tiers practice the skills that make Linux operations second nature: server navigation (finding your way around and reading what the system tells you), infrastructure setup (building production-ready deployments from scratch), and systematic diagnosis (finding root causes instead of blindly restarting). Every exercise puts you in Ali's shoes -- you direct Claude Code, read the output, and make decisions.
+
+DOWNLOAD EXERCISE FILES
+
+Download Linux Operations Exercises (ZIP)
+
+After downloading, unzip the file. Each exercise has its own folder with an INSTRUCTIONS.md and starter files (simulated server output, broken configs, log files) you need.
+
+If the download link doesn't work, visit the repository releases page directly.
+
+How to Use These Exercises​
+
+The workflow for every exercise is the same:
+
+Read the scenario -- understand what Ali is facing and what needs to happen
+Direct Claude Code -- give clear instructions based on what you learned in the lessons
+Read the output -- interpret what comes back before taking the next step
+For Debug exercises: read the broken state carefully before attempting any fix
+Reflect using the questions provided -- this is where the real learning happens
+
+You do not need to complete all 14 in one sitting. Work through one tier at a time. Each tier builds on the lessons indicated.
+
+Key Differences from Chapter Lessons​
+
+In Lessons 1-7, you worked through each concept with guided walkthroughs and Ali's story leading the way. These exercises are different in three ways:
+
+No step-by-step walkthrough. The exercises describe the scenario, the broken state or goal, and what success looks like. You decide what to tell Claude Code.
+Build + Debug pairing. Every pair has a Build exercise (create something from scratch) and a Debug exercise (diagnose and fix something broken). Debugging broken deployments develops different skills than building clean ones -- you learn to read system output critically and trace errors to their root cause.
+Increasing independence. Foundation exercises include starter prompts. Operations exercises provide less scaffolding. Diagnosis exercises give you only the symptoms -- you design the entire investigation.
+
+By the Diagnosis tier, you should be able to face a broken deployment and instinctively direct Claude Code through the LNPS method without reviewing the chapter lessons.
+
+Tool Guide​
+Claude Code -- Required for all exercises. You direct it to run commands on the server and interpret the output.
+Cowork -- Use for planning your approach before executing. Helpful for thinking through what to tell Claude Code before you say it.
+Most exercises require the terminal. Use Cowork for strategy, Claude Code for execution.
+Tier 1: Foundation (Lessons 1-2)​
+
+Core Skills: Navigating a server and reading what the system tells you
+
+Lessons 1-2 taught you how to SSH into a server, explore the filesystem tree, interpret command output, and read file permissions. These exercises put those skills into realistic scenarios where Ali needs to orient himself on an unfamiliar server and make sense of what he finds.
+
+Exercise 1.1 -- Server Orientation (Build)​
+
+The Scenario: Ali just got SSH access to a new cloud server from a different hosting provider. He has never logged into this machine before. Before he deploys anything, he needs to understand what he is working with -- how much disk space is available, what is already installed, where things live, and whether anyone else has been using this server.
+
+Your Task: Direct Claude Code to explore the server systematically. Find out: (1) what Linux distribution and version is running, (2) how much disk space and memory are available, (3) what is in the /home directory (are there other users?), (4) what is in /opt and /var (has anyone deployed anything here before?), and (5) what the current user's permissions are. By the end, you should be able to describe this server in two sentences.
+
+What to Tell Claude Code:
+
+"I just SSH'd into a new server and need to understand what I'm working with. Check the OS version, available disk space and memory, list what's in /home, /opt, and /var, and show me who I'm logged in as and what groups I belong to."
+
+Expected Outcome: You can answer: What OS is this? How much space do I have? Am I alone on this server? Has anything been deployed here before? What can I do without sudo?
+
+Reflection Question: Why does Ali check what is already on the server before deploying anything? What could go wrong if he skipped this step?
+
+Exercise 1.2 -- The Mystery Server (Debug)​
+
+The Scenario: Ali's colleague Priya asks for help. She deployed an agent to a server last month but cannot remember the details. She knows it is "somewhere in /opt" and it "used to work." She gives Ali SSH access and asks him to figure out what is there, where it lives, and whether it is still running.
+
+The Broken State: The server has a project directory somewhere under /opt with Python files, a .env file, and some log files. The agent is not currently running. There may be clues in the directory structure, file timestamps, and log contents about what happened.
+
+Your Task: Direct Claude Code to investigate. Find the project directory under /opt. Read the directory structure to understand what the agent does. Check the file timestamps to see when things were last modified. Look at the log files for any error messages or the last successful run. Determine whether the agent was run manually or as a service. Produce a summary for Priya: "Your agent is at [path], it does [purpose], it last ran on [date], and it stopped because [reason]."
+
+What to Tell Claude Code:
+
+"There's supposed to be an agent deployed somewhere under /opt. Find it, show me the directory structure, check when files were last modified, read any log files for errors, and check if there's a systemd service for it."
+
+Expected Outcome: A clear summary of what the agent is, where it lives, when it last ran, and why it stopped. You should be able to explain each piece of evidence you found.
+
+Reflection Question: What clues did the file timestamps and log contents give you? If the logs were empty, what would you check next?
+
+Exercise 1.3 -- Reading the Room (Build)​
+
+The Scenario: Ali wants to check the health of Dev's server before deploying his competitor-tracker. He needs to read system output and understand what it means -- not just see numbers, but interpret them.
+
+Your Task: Direct Claude Code to run diagnostic commands and then explain the output. Specifically: (1) run df -h and identify which filesystem is most full, (2) run free -h and determine if there is enough memory for a Python agent, (3) run ps aux --sort=-%mem | head -10 and identify the top memory consumers, (4) run uptime and explain what the load averages mean. For each command, write one sentence explaining what the output tells you about this server's readiness for a new deployment.
+
+What to Tell Claude Code:
+
+"Check the server health before I deploy. Show me disk usage, memory usage, the top 10 processes by memory, and the system uptime with load averages. For each one, explain what the numbers mean for my deployment."
+
+Expected Outcome: A health assessment: "This server has X GB free disk, Y GB free memory, the heaviest process is Z using N%, and the load average is W which means [acceptable/concerning]." You should understand every number Claude Code reports.
+
+Reflection Question: If the disk was 92% full, what would you tell Claude Code to do before deploying? How would you decide what is safe to delete?
+
+Exercise 1.4 -- Permission Puzzle (Debug)​
+
+The Scenario: Ali tries to read a log file and gets "Permission denied." He tries to write to a configuration directory and gets "Permission denied" again. He can see the files exist (they show up in ls) but he cannot access them. Something about the file permissions is blocking him.
+
+The Broken State: Several files and directories have incorrect permissions:
+
+A log file owned by root that Ali's user cannot read
+A config directory with permissions set to 700 owned by another user
+An executable script that is missing the execute permission
+A .env file that is world-readable (the opposite problem -- too open, not too closed)
+
+Your Task: Direct Claude Code to diagnose each permission problem by reading ls -la output. For each file, explain: who owns it, what permissions are set, why Ali cannot access it, and what the correct permissions should be. Do not just fix the permissions blindly -- explain the problem first, then direct the fix.
+
+What to Tell Claude Code:
+
+"I'm getting 'Permission denied' on several files. Run ls -la on each of these paths and explain the permission strings. Tell me who owns each file, what the current permissions mean, and what they should be changed to."
+
+Expected Outcome: For each file, you can decode the permission string (e.g., -rw------- means only the owner can read and write), explain the problem, and state the correct fix. You should catch the .env file that is too open as well as the files that are too restrictive.
+
+Reflection Question: Why is a world-readable .env file a bigger security risk than a log file Ali cannot read? Which problem would you fix first in production?
+
+Tier 2: Operations (Lessons 3-5)​
+
+Core Skills: Building production infrastructure from scratch
+
+Lessons 3-5 taught you how to create directory structures, manage secrets in .env files, set up persistent logging, create systemd services, and harden security with dedicated users and SSH keys. These exercises challenge you to build and fix real deployment infrastructure.
+
+Exercise 2.1 -- Agent Home Setup (Build)​
+
+The Scenario: Ali is deploying a new agent -- a social-media-monitor that tracks brand mentions. He needs to set up the complete directory structure on the server before any code runs. This is Lesson 3 applied from scratch: the right directories, a .env file for API keys, and a logging setup that persists.
+
+Your Task: Direct Claude Code to create the full project structure at /opt/agents/social-monitor/. It needs: (1) a src/ directory for the Python code, (2) a config/ directory with a .env file containing placeholder API keys, (3) a logs/ directory with proper permissions, (4) a data/ directory for output files, (5) a README.md explaining what the agent does and how to run it. The .env file must not be world-readable. The logs/ directory must be writable by the agent user.
+
+Expected Outcome: Running ls -la /opt/agents/social-monitor/ shows all five subdirectories and the README. The .env file has 600 permissions. The logs/ directory is writable. A developer joining the project tomorrow could look at the directory structure and understand where everything goes.
+
+Reflection Question: Why does Ali create the directory structure before writing any code? What would happen if he just dumped all files in one flat directory?
+
+Exercise 2.2 -- The Missing Pieces (Debug)​
+
+The Scenario: Ali comes back to a server where an intern set up a project directory, but several things are wrong. The agent keeps failing on startup and nobody can figure out why.
+
+The Broken State: The project at /opt/agents/data-collector/ has these problems:
+
+The .env file exists but has permissions 644 (world-readable -- anyone on the server can read the API keys)
+The logs/ directory does not exist at all (the agent crashes trying to write logs)
+The source code is in the root of the project instead of a src/ subdirectory
+There is no README.md -- nobody knows what this agent does or how to start it
+A node_modules/ directory with 15,000 files is taking up 200MB of disk space unnecessarily
+
+Your Task: Direct Claude Code to audit the directory, identify every problem, fix each one in order of severity (security first, then functionality, then organization), and verify each fix. The security issue (world-readable .env) should be fixed before anything else.
+
+Expected Outcome: The .env permissions are 600. The logs/ directory exists. Source code is organized in src/. A README.md exists. The node_modules/ is either removed or added to .gitignore. You can explain why you fixed things in the order you did.
+
+Reflection Question: The intern's setup "almost worked" -- the agent could read the .env file and the code was present. Why is "almost works" dangerous in production? What is the difference between "runs" and "runs correctly"?
+
+Exercise 2.3 -- Service From Scratch (Build)​
+
+The Scenario: Ali's social-media-monitor agent is ready to run. Right now he starts it manually with python3 src/main.py. Every time his SSH session ends, the agent dies. He needs to turn this process into a systemd service that survives reboots and restarts after crashes -- the Lesson 4 transformation.
+
+Your Task: Direct Claude Code to create a complete systemd service for the social-media-monitor. The service should: (1) run as a dedicated social-monitor user (not root), (2) load environment variables from the .env file, (3) use Restart=on-failure with a 10-second delay between restarts, (4) set a memory limit of 256MB, (5) start automatically on boot. After creating the unit file, enable and start the service, then verify it is running.
+
+Expected Outcome: systemctl status social-monitor shows the service as active and running. systemctl is-enabled social-monitor shows "enabled." The unit file is at /etc/systemd/system/social-monitor.service with all five requirements present. Closing your terminal does not kill the agent.
+
+Reflection Question: Why did Ali choose Restart=on-failure instead of Restart=always? What is the difference, and when would always be the wrong choice?
+
+Exercise 2.4 -- The Service That Won't Start (Debug)​
+
+The Scenario: Ali's competitor-tracker service was working yesterday. This morning, systemctl status competitor-tracker shows it as "failed." Ali's instinct is to restart it. But he remembers Lesson 6: restarting is not debugging.
+
+The Broken State: The service fails to start. The symptoms are:
+
+systemctl status competitor-tracker shows "failed" with exit code 1
+The unit file references a Python path that no longer exists (someone moved the virtualenv)
+The .env file is missing a required DATABASE_URL variable (someone deleted it during "cleanup")
+The logs/ directory permissions were changed to read-only (someone ran chmod incorrectly)
+
+Your Task: Direct Claude Code through a systematic investigation. Do NOT restart the service first. Instead: (1) check systemctl status for the error message, (2) check journalctl -u competitor-tracker for detailed logs, (3) verify the paths in the unit file actually exist, (4) verify the .env file has all required variables, (5) check the logs/ directory permissions. Fix each root cause, then restart and verify.
+
+Expected Outcome: You identified all three root causes before restarting. The Python path is corrected in the unit file. The DATABASE_URL is restored in .env. The logs/ directory is writable again. The service starts successfully after all fixes are applied.
+
+Reflection Question: If Ali had just restarted the service, what would have happened? Would restarting have fixed any of these three problems? Why is the diagnostic step non-negotiable?
+
+Exercise 2.5 -- Lock It Down (Build)​
+
+The Scenario: Ali's social-media-monitor is running as a systemd service. But it is running as root because the intern never created a dedicated user. Dev tells Ali: "A root agent with internet access is a security nightmare. Lock it down." This is Lesson 5 applied from scratch.
+
+Your Task: Direct Claude Code to harden the deployment: (1) create a dedicated social-monitor system user with no login shell and no home directory, (2) change ownership of /opt/agents/social-monitor/ to the new user, (3) set file permissions so only the service user can read the .env file, (4) update the systemd unit file to run as the new user, (5) set up SSH key authentication for Ali's personal login (disable password auth). After each step, verify the change took effect.
+
+Expected Outcome: id social-monitor shows the user exists. ls -la /opt/agents/social-monitor/.env shows ownership by social-monitor and permissions 600. The systemd unit file has User=social-monitor. SSH key auth works and password auth is disabled. The service still runs correctly under the new user.
+
+Reflection Question: Why does Ali create a system user with no login shell instead of a regular user? What attack vector does this close?
+
+Exercise 2.6 -- The Overprivileged Agent (Debug)​
+
+The Scenario: Ali audits a server that another team has been using. He finds an agent running as root with security holes everywhere. Dev asks him to identify and fix every security problem.
+
+The Broken State: The agent at /opt/agents/report-generator/ has these security problems:
+
+The systemd service runs as User=root
+The .env file has permissions 666 (everyone can read AND write the API keys)
+Password authentication is enabled on SSH (the server accepts password logins from the internet)
+The agent's log file at /var/log/report-agent.log contains printed API keys (someone added debug logging that dumps environment variables)
+The agent's port (8080) is exposed to the internet with no firewall rule
+
+Your Task: Direct Claude Code to audit the deployment by checking each of the five areas. For each problem: state what is wrong, explain the specific risk (what could an attacker do?), and direct the fix. Fix them in order of severity -- the exposed API keys in logs are the most urgent because they are actively leaking right now.
+
+Expected Outcome: A security audit report listing all five problems, their risk levels, and the fixes applied. The logs with leaked keys are rotated or truncated. The .env is locked down. The service runs as a dedicated user. Password auth is disabled. The port is firewalled or bound to localhost.
+
+Reflection Question: Which of the five problems could be exploited by someone who does not have SSH access to the server? Which require an attacker to already be on the machine? How does this change your fix priority?
+
+Tier 3: Diagnosis (Lessons 6-7)​
+
+Core Skills: Systematic debugging and deployment specification
+
+Lessons 6-7 taught you the LNPS triage method (Logs, Network, Process, System) and how to write deployment specs that capture everything needed to reproduce a deployment. These exercises put you in diagnosis scenarios where the symptoms are ambiguous and the root cause is not obvious.
+
+Exercise 3.1 -- The Silent Agent (Debug)​
+
+The Scenario: Ali checks his competitor-tracker Monday morning. The systemd service shows "active (running)" -- green light, everything looks fine. But the daily report email never arrived. The dashboard shows no new data since Friday. The agent is running but not doing anything. This is the most dangerous kind of failure: silent.
+
+The Broken State: The LNPS investigation will reveal:
+
+Logs: The last log entry says "Waiting for database connection..." repeated every 30 seconds since Friday at 11pm
+Network: The database server (port 5432) is unreachable -- a firewall rule was changed Friday evening during maintenance
+Process: The agent process is alive and consuming CPU (it is stuck in a connection retry loop)
+System: Disk space and memory are fine
+
+Your Task: Direct Claude Code through the full LNPS method. Do NOT restart the agent first. Start with logs (journalctl -u competitor-tracker --since "Friday"), then check network connectivity to the database, then check the process state, then check system resources. Follow the LNPS order even if you think you know the answer after step 1.
+
+Expected Outcome: You identified the root cause (database unreachable due to firewall change) by following LNPS in order. You can explain why the agent appeared healthy (systemd reported "active") despite being non-functional. You know that restarting the agent would not fix this -- the network issue must be resolved first.
+
+Reflection Question: Why is a "silent failure" more dangerous than a crash? If the agent had crashed instead of retrying silently, would Ali have noticed sooner?
+
+Exercise 3.2 -- The Cascading Failure (Debug)​
+
+The Scenario: Ali wakes up to three alerts at once. The competitor-tracker is down. The social-media-monitor is down. The report-generator is down. Three agents, all failed within the same hour. Ali's instinct says "the server is broken" but each agent shows a different error message. He needs to find the single root cause.
+
+The Broken State: The LNPS investigation across all three agents will reveal:
+
+competitor-tracker logs: "OSError: [Errno 28] No space left on device" -- cannot write to logs
+social-monitor logs: "PermissionError: [Errno 13] Permission denied: '/opt/agents/social-monitor/data/output.json'" -- cannot write output
+report-generator logs: "ConnectionError: database disk image is malformed" -- SQLite database corrupted
+System: df -h shows / is 100% full. The root filesystem ran out of disk space.
+
+Your Task: Direct Claude Code to investigate all three agents, but start with the system-level check. Run df -h first. Then check each agent's logs. Trace all three failures back to the single root cause: the disk filled up. Identify what filled the disk (direct Claude Code to find the largest files with du -sh /* | sort -rh | head -10). Fix the root cause, then restart the agents.
+
+Expected Outcome: You identified the root cause (full disk) before investigating individual agents, or you identified it after seeing the first agent's error and correctly predicted the others. You found what filled the disk. You freed space and restarted all three agents successfully.
+
+Reflection Question: Ali saw three different error messages from three different agents. How did following LNPS (starting with System) lead him to the single root cause faster than investigating each agent separately?
+
+Exercise 3.3 -- Write the Deployment Spec (Build)​
+
+The Scenario: Ali has deployed three agents manually over the past week. Each time, he had to remember the steps, look back at old terminal output, and re-discover things he already figured out. Dev says: "Write it down once. Next time, hand the spec to Claude Code and it does the whole deployment in thirty minutes." This is the Lesson 7 capstone skill applied to a new agent.
+
+Your Task: Write a DEPLOYMENT-SPEC.md for deploying a new agent called inventory-checker that monitors product stock levels. The spec must cover all six sections from Lesson 7: (1) Server Requirements -- OS, memory, disk, ports needed, (2) Project Structure -- exact directory layout at /opt/agents/inventory-checker/, (3) Dependencies -- Python version, pip packages, system packages, (4) Secret Management -- what goes in .env, permissions, (5) systemd Service -- complete unit file with user, restart policy, and resource limits, (6) Verification Checklist -- how to confirm the deployment is production-ready.
+
+Expected Outcome: A complete DEPLOYMENT-SPEC.md that you could hand to someone who has never seen this agent and they could deploy it without asking a single question. Every path is absolute. Every permission is specified. Every verification step has an expected result.
+
+Reflection Question: If Ali hands this spec to Claude Code with the instruction "Deploy this agent following the spec exactly," what could still go wrong? What assumptions does the spec make that might not hold on a different server?
+
+Exercise 3.4 -- Spec vs Reality (Debug)​
+
+The Scenario: Ali wrote a deployment spec and handed it to Claude Code. The deployment completed without errors. But when he runs the verification checklist from the spec, three checks fail. The spec said one thing; the server shows another. Ali needs to find the gaps between what the spec promised and what actually exists.
+
+The Broken State: The deployment at /opt/agents/price-watcher/ was executed from a spec, but:
+
+The spec says the service runs as price-watcher user, but systemctl show -p User price-watcher shows User=root (the unit file was written correctly but systemctl daemon-reload was never run after editing)
+The spec says .env has permissions 600, but ls -la shows 644 (the chmod command was applied to the wrong file)
+The spec says the service starts on boot, but systemctl is-enabled price-watcher shows "disabled" (the systemctl enable step was skipped)
+
+Your Task: Direct Claude Code to run the verification checklist from the spec. For each failed check, identify the gap between the spec and reality, determine why the gap exists (what went wrong during deployment), and fix it. After all fixes, re-run the full checklist to confirm everything passes.
+
+Expected Outcome: All three gaps are identified, explained, and fixed. The verification checklist passes completely on the second run. You can explain why each gap occurred -- not just what the fix was, but what mistake during deployment caused it.
+
+Reflection Question: The deployment "completed without errors" but three checks failed. What does this tell you about the difference between "no errors" and "correct"? Why is the verification checklist the most important part of the spec?
+
+What's Next​
+
+You have practiced the three core skills -- server navigation, infrastructure setup, and systematic diagnosis -- across 14 exercises. These skills compound: every exercise makes Linux operations feel more instinctive, so when Ali's agent goes silent at 2am, you reach for the LNPS method instead of blindly restarting. Next in the Chapter Quiz, you will test your understanding of Linux concepts and deployment scenarios. The operations patterns you built here become the foundation for the Project lesson, where your agents deploy themselves.

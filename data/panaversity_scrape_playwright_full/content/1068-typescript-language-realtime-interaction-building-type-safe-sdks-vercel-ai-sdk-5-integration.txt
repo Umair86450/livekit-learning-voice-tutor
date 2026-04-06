@@ -1,0 +1,457 @@
+Vercel AI SDK 5 Integration
+
+When you start building AI-powered applications in TypeScript, you quickly discover a frustrating reality: every AI provider has different APIs, different streaming formats, and different ways of handling structured outputs. OpenAI uses one interface, Anthropic another, Google yet another. Your code becomes a patchwork of provider-specific adapters.
+
+The Vercel AI SDK solves this by providing a unified interface across 100+ models from 25+ providers. You write your code once, and it works with GPT-4, Claude, Gemini, and dozens of other models. But the real power goes beyond abstraction: the SDK provides streaming that actually works across all JavaScript runtimes, structured output generation with type safety, and an Agent class for building multi-step workflows.
+
+In this lesson, you'll learn the four core patterns that make the Vercel AI SDK the standard for TypeScript AI development: streamText for streaming responses, generateObject for structured outputs, useChat for React integration, and the Agent class for agentic patterns.
+
+The Provider System: One API, Many Models​
+
+Before diving into specific functions, understand how the SDK handles multiple providers. Instead of importing from different packages with different APIs, you install provider-specific adapters that all share the same interface:
+
+import { streamText } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { anthropic } from "@ai-sdk/anthropic";
+import { google } from "@ai-sdk/google";
+
+// All providers use the same streamText API
+const openaiResult = await streamText({
+  model: openai("gpt-4o"),
+  prompt: "Explain quantum computing",
+});
+
+const claudeResult = await streamText({
+  model: anthropic("claude-sonnet-4-20250514"),
+  prompt: "Explain quantum computing",
+});
+
+const geminiResult = await streamText({
+  model: google("gemini-2.0-flash"),
+  prompt: "Explain quantum computing",
+});
+
+
+Output:
+
+// Each returns the same interface - textStream, text, usage, etc.
+// Provider differences are handled internally
+
+
+The beauty here is that switching providers requires changing one line. Your streaming logic, error handling, and UI integration remain identical.
+
+Streaming Text with streamText​
+
+The streamText function is the workhorse of the SDK. It returns a result object with multiple ways to consume the stream:
+
+import { streamText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+async function streamingExample() {
+  const result = await streamText({
+    model: openai("gpt-4o"),
+    system: "You are a helpful coding assistant.",
+    prompt: "Write a TypeScript function to validate email addresses",
+  });
+
+  // Method 1: Async iterator (most flexible)
+  for await (const chunk of result.textStream) {
+    process.stdout.write(chunk);
+  }
+
+  // Method 2: Get final text after streaming
+  const finalText = await result.text;
+  console.log("\n\nFinal text:", finalText.length, "chars");
+
+  // Method 3: Access token usage
+  const usage = await result.usage;
+  console.log("Tokens:", usage.promptTokens, "in /", usage.completionTokens, "out");
+}
+
+streamingExample();
+
+
+Output:
+
+Here's a TypeScript function to validate email addresses:
+
+```typescript
+function validateEmail(email: string): boolean {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+}
+
+// Usage examples:
+console.log(validateEmail("user@example.com")); // true
+console.log(validateEmail("invalid-email")); // false
+
+
+Final text: 284 chars Tokens: 24 in / 89 out
+
+
+### Using streamText in API Routes
+
+For server-side usage, `toDataStreamResponse()` converts the stream into a proper HTTP response with Server-Sent Events:
+
+```typescript
+import { streamText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+// Next.js App Router API route
+export async function POST(req: Request) {
+  const { messages } = await req.json();
+
+  const result = await streamText({
+    model: openai("gpt-4o"),
+    system: "You are a helpful assistant.",
+    messages,
+  });
+
+  // Returns a Response object with SSE streaming
+  return result.toDataStreamResponse();
+}
+
+
+Output:
+
+// HTTP Response with headers:
+// Content-Type: text/event-stream
+// Cache-Control: no-cache
+// Connection: keep-alive
+
+// Body streams SSE events:
+// data: {"type":"text-delta","textDelta":"Here"}
+// data: {"type":"text-delta","textDelta":"'s"}
+// data: {"type":"text-delta","textDelta":" how"}
+// ...
+
+
+The SDK handles all the SSE formatting, chunk encoding, and connection management. Your code focuses on the AI logic.
+
+Structured Outputs with generateObject​
+
+When you need the AI to return data in a specific shape (not freeform text), generateObject combines Zod schema validation with AI generation:
+
+import { generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+// Define the schema for your structured output
+const RecipeSchema = z.object({
+  name: z.string().describe("The name of the recipe"),
+  ingredients: z.array(
+    z.object({
+      item: z.string(),
+      amount: z.string(),
+      unit: z.string().nullable(),
+    })
+  ).describe("List of ingredients with quantities"),
+  steps: z.array(z.string()).describe("Step-by-step cooking instructions"),
+  prepTime: z.number().describe("Preparation time in minutes"),
+  cookTime: z.number().describe("Cooking time in minutes"),
+  servings: z.number().describe("Number of servings"),
+});
+
+async function extractRecipe() {
+  const { object } = await generateObject({
+    model: openai("gpt-4o"),
+    schema: RecipeSchema,
+    prompt: "Generate a recipe for chocolate chip cookies",
+  });
+
+  // TypeScript knows the exact shape
+  console.log(`Recipe: ${object.name}`);
+  console.log(`Prep: ${object.prepTime}min, Cook: ${object.cookTime}min`);
+  console.log(`Serves: ${object.servings}`);
+  console.log("\nIngredients:");
+  object.ingredients.forEach((ing) => {
+    console.log(`  - ${ing.amount} ${ing.unit || ""} ${ing.item}`);
+  });
+  console.log("\nSteps:");
+  object.steps.forEach((step, i) => {
+    console.log(`  ${i + 1}. ${step}`);
+  });
+}
+
+extractRecipe();
+
+
+Output:
+
+Recipe: Classic Chocolate Chip Cookies
+Prep: 15min, Cook: 12min
+Serves: 24
+
+Ingredients:
+  - 2.25 cups all-purpose flour
+  - 1 tsp baking soda
+  - 1 tsp salt
+  - 1 cup softened butter
+  - 0.75 cup granulated sugar
+  - 0.75 cup brown sugar
+  - 2  large eggs
+  - 1 tsp vanilla extract
+  - 2 cups chocolate chips
+
+Steps:
+  1. Preheat oven to 375°F (190°C)
+  2. Mix flour, baking soda, and salt in a bowl
+  3. Cream butter and sugars until fluffy
+  4. Beat in eggs and vanilla
+  5. Gradually blend in flour mixture
+  6. Stir in chocolate chips
+  7. Drop rounded tablespoons onto baking sheets
+  8. Bake 9-11 minutes until golden brown
+
+Schema Design Best Practices​
+
+The .describe() method on Zod fields significantly improves output quality by giving the AI context:
+
+const TaskSchema = z.object({
+  // Prefer nullable over optional - forces the model to make a decision
+  title: z.string().describe("A concise task title, max 50 characters"),
+  priority: z.enum(["low", "medium", "high"]).describe("Task urgency level"),
+  dueDate: z
+    .string()
+    .nullable()
+    .describe("Due date in YYYY-MM-DD format, or null if no deadline"),
+  estimatedHours: z
+    .number()
+    .nullable()
+    .describe("Estimated hours to complete, or null if unknown"),
+});
+
+
+Output:
+
+// TypeScript type inferred automatically:
+type Task = {
+  title: string;
+  priority: "low" | "medium" | "high";
+  dueDate: string | null;
+  estimatedHours: number | null;
+};
+
+The useChat Hook for React​
+
+While streamText works on the server, useChat provides the client-side integration for React applications. It manages chat state, handles streaming updates, and provides a clean API for building chat UIs:
+
+"use client";
+
+import { useChat } from "@ai-sdk/react";
+
+export default function ChatComponent() {
+  const {
+    messages,      // Array of chat messages
+    input,         // Current input value
+    handleInputChange,  // Input change handler
+    handleSubmit,  // Form submit handler
+    status,        // 'ready' | 'streaming' | 'error'
+    error,         // Error object if status is 'error'
+  } = useChat({
+    api: "/api/chat",  // Your streamText endpoint
+  });
+
+  return (
+    <div className="chat-container">
+      <div className="messages">
+        {messages.map((message) => (
+          <div
+            key={message.id}
+            className={`message ${message.role}`}
+          >
+            <strong>{message.role === "user" ? "You" : "AI"}:</strong>
+            <p>{message.content}</p>
+          </div>
+        ))}
+      </div>
+
+      <form onSubmit={handleSubmit}>
+        <input
+          value={input}
+          onChange={handleInputChange}
+          placeholder="Type a message..."
+          disabled={status !== "ready"}
+        />
+        <button type="submit" disabled={status !== "ready"}>
+          {status === "streaming" ? "Generating..." : "Send"}
+        </button>
+      </form>
+
+      {error && (
+        <div className="error">
+          Error: {error.message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+Output:
+
+// Browser renders:
+// [Chat messages display as they stream in]
+// Input disabled during streaming
+// Error displayed if API fails
+
+
+The hook automatically:
+
+Appends user messages to the conversation
+Sends requests to your API endpoint
+Streams assistant responses character by character
+Updates the UI as chunks arrive
+Manages loading and error states
+
+This is the pattern you'll see in Part 10 when building full chat interfaces with Next.js.
+
+The Agent Class for Agentic Patterns​
+
+For multi-step workflows where the AI needs to use tools and make decisions, the Agent class provides a higher-level abstraction. It wraps generateText or streamText with tool-calling loop control:
+
+import { Agent } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+const searchAgent = new Agent({
+  model: openai("gpt-4o"),
+  system: "You are a research assistant. Use tools to find information.",
+  tools: {
+    search: {
+      description: "Search the web for information",
+      parameters: z.object({
+        query: z.string().describe("The search query"),
+      }),
+      execute: async ({ query }) => {
+        // In production, this would call a real search API
+        console.log(`[Tool] Searching for: ${query}`);
+        return `Search results for "${query}": Found 3 relevant articles about ${query}.`;
+      },
+    },
+    summarize: {
+      description: "Summarize a piece of text",
+      parameters: z.object({
+        text: z.string().describe("The text to summarize"),
+      }),
+      execute: async ({ text }) => {
+        console.log(`[Tool] Summarizing ${text.length} chars`);
+        return `Summary: ${text.substring(0, 100)}...`;
+      },
+    },
+  },
+});
+
+async function runAgent() {
+  const result = await searchAgent.run(
+    "Find information about TypeScript 5.0 features and summarize them"
+  );
+
+  console.log("\nFinal Response:");
+  console.log(result.text);
+  console.log("\nSteps taken:", result.steps.length);
+}
+
+runAgent();
+
+
+Output:
+
+[Tool] Searching for: TypeScript 5.0 features
+[Tool] Summarizing 89 chars
+
+Final Response:
+Based on my research, TypeScript 5.0 introduced several important features:
+
+1. **Decorators** - Standardized decorator syntax aligned with TC39 proposal
+2. **const Type Parameters** - Better inference for readonly values
+3. **All Enums are Union Enums** - Improved enum type safety
+4. **Speed Improvements** - Faster builds through improved caching
+
+Steps taken: 3
+
+Controlling Agent Behavior​
+
+The stopWhen and prepareStep options give you fine-grained control over the agent loop:
+
+import { Agent, stepCountIs } from "ai";
+
+const controlledAgent = new Agent({
+  model: openai("gpt-4o"),
+  tools: { /* ... */ },
+
+  // Stop after 5 steps maximum
+  stopWhen: stepCountIs(5),
+
+  // Modify settings between steps
+  prepareStep: async ({ steps }) => {
+    if (steps.length > 2) {
+      // After 2 steps, encourage wrapping up
+      return {
+        system: "You've gathered enough information. Summarize and conclude.",
+      };
+    }
+    return {};
+  },
+});
+
+
+Output:
+
+// Agent automatically stops after 5 tool calls
+// System prompt changes after step 2 to encourage completion
+
+When to Use Each Pattern​
+Pattern	Use Case	Example
+streamText	Simple text generation, chat responses	Chatbots, content generation
+generateObject	Structured data extraction	Form filling, data parsing
+useChat	React chat interfaces	Customer support, AI assistants
+Agent	Multi-step tool workflows	Research assistants, automation
+
+For your FastAPI AI backend SDK (the chapter capstone), you'll primarily use streamText patterns. The Agent class becomes relevant when building orchestration layers that coordinate multiple tool calls.
+
+Try With AI​
+Prompt 1: Build a Streaming Chat Endpoint​
+Help me create a Next.js API route at /api/chat that:
+1. Uses streamText with the OpenAI provider
+2. Accepts messages in the request body
+3. Returns a streaming response using toDataStreamResponse()
+4. Includes proper TypeScript types for the request
+
+Show me both the API route and a simple fetch example that
+consumes the stream.
+
+
+What you're learning: The complete server-to-client streaming pattern that powers production AI chat applications. You'll see how streamText on the server connects to SSE consumption on the client.
+
+Prompt 2: Extract Structured Data​
+I have user-submitted text that describes their project requirements.
+Help me create a generateObject setup that extracts:
+- Project name
+- Tech stack (array of technologies)
+- Estimated timeline (in weeks)
+- Key features (array of feature descriptions)
+- Priority level (low/medium/high)
+
+Include Zod schema with .describe() for each field, and show
+how to handle the case where the AI can't extract all fields.
+
+
+What you're learning: Schema design for real-world data extraction, including how to make fields nullable vs optional, and how descriptions improve extraction accuracy.
+
+Prompt 3: Agent with Tool Calling​
+I want to build a simple code review agent that can:
+1. Read a file's contents (simulated with a tool)
+2. Analyze code quality issues
+3. Suggest improvements
+
+Create an Agent configuration with these tools and show how
+to run it. Include the prepareStep option to limit the agent
+to 3 steps maximum.
+
+
+What you're learning: How the Agent class orchestrates multi-step workflows with tool calling. This pattern becomes essential when building Digital FTE products that need to take autonomous actions.
+
+Safety Note​
+
+The Vercel AI SDK abstracts provider differences, but costs vary significantly. GPT-4o is roughly 10x the cost of GPT-4o-mini, and Claude Opus costs more than Claude Sonnet. During development, use faster, cheaper models (gpt-4o-mini, claude-sonnet) and only switch to more capable models when you've validated your approach works.

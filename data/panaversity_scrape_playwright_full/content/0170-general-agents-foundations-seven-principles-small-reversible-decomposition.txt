@@ -1,0 +1,488 @@
+Principle 4: Small, Reversible Decomposition
+
+You've seen this happen: Someone makes a large, complex change involving multiple files, new dependencies, and refactored architecture. They deploy it. Something breaks. Where's the problem? Is it the new library? The refactored code? The interaction between components? They spend hours debugging, eventually reverting everything and starting over.
+
+Now imagine a different approach: The same work is done as ten small changes, each committed separately. Each change is tested before moving to the next. When something breaks, you know exactly which change caused it,you revert that one commit and keep the rest.
+
+The difference is small, reversible decomposition: breaking problems into small, independently verifiable steps that can be easily rolled back. This is the key to managing complexity in agentic workflows.
+
+Why Small Steps Win: The Psychology and Mathematics of Decomposition​
+The Cognitive Limit: Why Big Changes Fail​
+
+Human cognition has limits. We can hold about 7±2 items in working memory. When you make a large change:
+
+You must understand the before state
+You must understand the after state
+You must track all intermediate changes
+You must remember what you've tested and what you haven't
+
+Exceed these limits, and you make mistakes. You forget to test something. You miss an interaction between components. You create bugs you won't discover until later.
+
+The Mathematics of Debugging​
+
+The cost of finding bugs grows exponentially with change size:
+
+Lines Changed	Variables to Consider	Bug Surface Area	Expected Debugging Time
+10	5	Small	5 minutes
+100	50	Medium	30 minutes
+1,000	500	Large	3 hours
+10,000	5,000	Enormous	Days
+
+With 10 small changes of 10 lines each:
+
+Each change: 5 minutes to debug
+Total: 50 minutes maximum
+Most changes: no debugging needed (tested immediately)
+
+The insight: Ten small, tested changes are faster than one large change even before accounting for debugging,because you catch issues immediately, when context is fresh.
+
+The AI Amplification Effect​
+
+This principle is even more important with AI because:
+
+AI makes plausible mistakes: Code looks right but has subtle bugs
+AI doesn't learn your context: Each change may not fit your patterns
+AI can generate lots of code: It's easy to accept too much at once
+AI has context limits too: When generating 1,000 lines, AI starts losing track of its own earlier logic. Small steps keep its "attention" sharp.
+
+Small decomposition lets you verify AI work incrementally, catching mistakes before they compound.
+
+MONOLITHIC CHANGE                    ATOMIC CHANGES
+
+  ┌─────────────────┐               ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐
+  │                 │               │ 1 │→│ 2 │→│ 3 │→│ 4 │→│ 5 │
+  │  500 lines      │               └─┬─┘ └─┬─┘ └─┬─┘ └─┬─┘ └─┬─┘
+  │  across 8 files │                 ✓      ✓      ✗      ✓      ✓
+  │                 │                              │
+  └────────┬────────┘               Revert ONLY step 3,
+           │ ✗ Bug!                  keep steps 1, 2, 4, 5
+           │
+    Where is it?
+    (hours of debugging)             (seconds to find)
+
+Atomic Changes: The Smallest Verifiable Unit​
+
+Think of it like building with Lego vs sculpting clay:
+
+Approach	Material	If Something Goes Wrong
+Atomic (Lego)	Modular bricks that snap together	Pop off the bad brick, snap in a new one. Rest of the build stays intact.
+Monolithic (Clay)	One continuous mass	Fixing the nose might mean reworking the whole face. Changes ripple outward.
+
+Small, atomic changes give you Lego-style work: each piece is independent, swappable, and doesn't affect the others when changed.
+
+An atomic change is the smallest unit of work that:
+
+Can be independently verified
+Makes sense on its own
+Can be reverted without breaking other work
+What Makes a Change Atomic?​
+
+Atomic: One logical change, one commit
+
+Add user authentication with OAuth, JWT tokens, password reset,
+and email verification
+
+
+Not atomic,too many concerns, hard to verify, hard to revert if partly broken.
+
+Atomic: One concern per commit
+
+Commit 1: Add OAuth login flow
+Commit 2: Add JWT token generation and validation
+Commit 3: Add password reset email functionality
+Commit 4: Add email verification for new accounts
+
+
+Each commit can be tested independently. If JWT has bugs, OAuth still works.
+
+The Atomic Change Checklist​
+
+Before accepting a change, ask:
+
+Can this be tested independently?
+Does this make sense as a standalone unit?
+Can this be reverted without breaking other work?
+Is this small enough to review in one sitting?
+
+If any answer is "no," decompose further.
+
+Reversibility: The Safety Net That Enables Experimentation​
+
+Reversibility means you can undo a change without side effects. This is what enables safe experimentation,you can try something knowing you can always go back.
+
+The "Revert, Don't Fix" Mindset: Beginners try to fix broken code by adding more code. Pros revert to the last working state and try a different approach. Reverting isn't failure,it's a strategic retreat that saves hours of debugging.
+
+Git as Reversibility Mechanism​
+
+Git is designed for reversible changes:
+
+# Each commit is a reversible unit
+git commit -m "Add user authentication"
+
+# Can always revert
+git revert HEAD
+
+# Or reset to previous state
+git reset --hard HEAD~1
+
+# Or compare states
+git diff HEAD~1 HEAD
+
+Commit Boundaries Define Reversibility Units​
+
+Good commit boundaries create natural reversibility points:
+
+a1b2c3d - Add OAuth login flow
+d4e5f6g - Add JWT token validation
+g7h8i9j - Add password reset
+j0k1l2m - Add email verification
+
+
+If JWT has bugs:
+
+# Revert just the JWT commit
+git revert d4e5f6g
+
+# OAuth, password reset, email verification remain intact
+
+
+Bad commit boundaries break reversibility:
+
+a1b2c3d - Add authentication and refactor user service and update database
+d4e5f6g - Add authorization and fix bug in authentication
+
+
+Reverting d4e5f6g might reintroduce the bug. Reverting a1b2c3d loses authentication, refactor, and database changes together.
+
+Strategies for Reversible Changes​
+
+1. Feature Branches
+
+# Each feature on its own branch
+git checkout -b feature/add-auth
+# Work on feature
+git checkout main
+# Merge when ready
+git merge feature/add-auth
+# Or discard if not working
+git branch -D feature/add-auth
+
+
+2. Frequent Commits
+
+# Commit often, even work-in-progress
+git commit -m "WIP: auth skeleton"
+git commit -m "WIP: auth endpoints"
+git commit -m "WIP: auth tests"
+
+# Squash into logical units when done
+git rebase -i HEAD~3
+
+
+3. Staging for Experimentation
+
+# Try something experimental
+git stash
+# Make experimental changes
+# If it works, commit
+git commit -m "Add experimental feature"
+# If not, revert
+git checkout .
+git stash pop
+
+Decomposition Strategies: How to Break Things Down​
+
+Different problems require different decomposition approaches.
+
+Strategy 1: Vertical Slicing (By Feature)​
+
+Build one complete feature at a time, across all layers:
+
+Feature: User login
+├── Change 1: Add login endpoint
+├── Change 2: Add login UI component
+├── Change 3: Add authentication tests
+└── Change 4: Add login error handling
+
+
+When to use: Building features for users, when you need working functionality at each step.
+
+Advantage: Each step produces visible, testable functionality.
+
+Strategy 2: Horizontal Slicing (By Layer)​
+
+Build one layer at a time, across features:
+
+Layer: Database schema
+├── Change 1: Create users table
+├── Change 2: Create sessions table
+└── Change 3: Add indexes and constraints
+
+Layer: Data access layer
+├── Change 4: Add user repository
+├── Change 5: Add session repository
+└── Change 6: Add database migrations
+
+Layer: API layer
+├── Change 7: Add authentication endpoints
+└── Change 8: Add session management endpoints
+
+
+When to use: Building infrastructure, when changes to one layer won't break others.
+
+Advantage: Each layer can be tested independently. Clear separation of concerns.
+
+Strategy 3: Dependency-First (By Prerequisites)​
+
+Build dependencies before dependents:
+
+Change 1: Add input validation library
+Change 2: Add logging utility
+Change 3: Add error handling framework
+Change 4: Add authentication (uses validation, logging, errors)
+Change 5: Add authorization (depends on authentication)
+
+
+When to use: When features have clear dependencies.
+
+Advantage: Never work on something that depends on unfinished code.
+
+Strategy 4: Test-First (By Verification)​
+
+Write tests before implementation:
+
+Change 1: Add test for user authentication
+Change 2: Implement minimal code to pass test
+Change 3: Add test for edge case
+Change 4: Implement code to pass edge case test
+Change 5: Add test for error case
+Change 6: Implement error handling
+
+
+When to use: Complex logic with many edge cases.
+
+Advantage: Each change is immediately verified by tests.
+
+The Iteration Strategy: Small Loops Beat Big Batches​
+
+The essence of this principle: Many small iterations beat one large batch.
+
+Large Batch Approach (Slow)​
+Day 1: Implement entire feature
+Day 2: Debug issues found during implementation
+Day 3: Integrate with existing code
+Day 4: Fix integration issues
+Day 5: Test and discover more issues
+Day 6: Fix test failures
+Day 7: Finally working
+
+Total: 7 days, high stress, uncertain outcome
+
+Small Iteration Approach (Fast)​
+Hour 1: Implement smallest usable piece
+Hour 1: Test and verify it works
+Hour 2: Extend with next feature
+Hour 2: Test and verify
+Hour 3: Handle edge case
+Hour 3: Test and verify
+...
+
+Every hour: Working, tested code
+Total: 2-3 days, low stress, continuous progress
+
+Why Iterations Win​
+Aspect	Large Batch	Small Iterations
+Feedback	Delayed until complete	Immediate each iteration
+Debugging	Hard,isolate from many changes	Easy,only last change could be broken
+Motivation	Low,no visible progress for days	High,each iteration produces results
+Risk	High,everything or nothing	Low,each step is tested
+Course correction	Difficult,committed to large change	Easy,change direction anytime
+Working with AI: Prompting for Small, Reversible Steps​
+
+When working with AI systems, you need to guide them toward small, reversible changes.
+
+Step Zero: Always Start with a Plan​
+
+Before any implementation, make decomposition collaborative:
+
+"I want to build [feature]. Before we write any code,
+help me break this into 5-7 small steps. For each step,
+tell me what it accomplishes and how I'll know it worked."
+
+
+This simple habit transforms decomposition from something you do alone into something you do with the AI. The AI often spots dependencies and edge cases you'd miss. And now you have a roadmap before writing a single line.
+
+Bad Prompt: Too Large​
+"Add user authentication with OAuth, JWT tokens, password reset,
+and email verification"
+
+
+AI generates:
+
+Hundreds of lines of code across many files
+Impossible to review thoroughly
+Hard to test each piece independently
+If broken, where to start debugging?
+Good Prompt: Decomposed​
+"I need to add user authentication. Let's do this step by step.
+
+Step 1: First, add a basic login endpoint that accepts email/password
+and returns a simple token. Focus on just this—no OAuth, no JWT
+validation yet, just the basic structure.
+
+After I review and approve, we'll move to step 2."
+
+
+AI generates:
+
+Focused, small change
+Easy to review
+Easy to test
+Clear what to verify
+Prompt Pattern: Progressive Elaboration​
+"Help me implement [feature]. Break this into small steps.
+
+For each step:
+1. Tell me what you're about to do
+2. Make the change
+3. Show me what changed
+4. Wait for my approval before proceeding
+
+Start with the first step only."
+
+
+This pattern ensures:
+
+You see each change before the next
+You can redirect at any point
+Each step is independently verifiable
+You maintain control throughout
+When Decomposition Goes Wrong: Anti-Patterns​
+Anti-Pattern 1: Micro-Commits​
+Commit: Fix typo
+Commit: Fix another typo
+Commit: Add semicolon
+Commit: Fix the same typo again
+
+
+Too fine-grained. Each commit doesn't make sense independently. Clutters history.
+
+Fix: Group related tiny changes into one atomic change.
+
+Anti-Pattern 2: Mixed Concerns​
+Commit: Add authentication and fix unrelated UI bug
+
+
+Two unrelated changes in one commit. Can't revert without losing both.
+
+Fix: One concern per commit, even if it feels inefficient.
+
+Anti-Pattern 3: Untested Middle States​
+Commit: Add authentication (doesn't compile)
+Commit: Fix compilation errors
+Commit: Add tests
+Commit: Fix test failures
+
+
+Intermediate states don't work. Can't revert to a working state easily.
+
+Fix: Each commit should leave the code in a working state.
+
+Why This Principle Matters: Complexity Management​
+
+Software complexity grows faster than code size. A 1,000-line program isn't 10x more complex than a 100-line program,it's often 100x more complex due to interactions between components.
+
+Small, reversible decomposition manages this complexity by:
+
+Limiting scope: Each change fits in your head
+Enabling verification: Each change can be tested independently
+Facilitating debugging: Problems are isolated to recent changes
+Reducing risk: You can always roll back
+Enabling experimentation: Try something, learn, revert if needed
+
+Without decomposition, you're constantly fighting complexity. With it, complexity becomes manageable,one small step at a time.
+
+This Principle in Both Interfaces​
+
+Decomposition applies universally,whether you're building software or producing documents. In Claude Code, each step is one function and one commit. In Cowork, each step is one section or one file. The mechanism differs; the principle is identical.
+
+In Cowork: When creating a long document, don't ask for the entire thing at once. Ask for the outline first (verify it). Then ask for section 1 (verify it). Then section 2. This way, if section 3 goes wrong, you don't lose sections 1-2.
+
+The universal rule: Large tasks fail silently. Small tasks fail loudly. The smaller your steps, the faster you find and fix problems.
+
+For a detailed comparison of how all seven principles map across both interfaces, see Lesson 9: Putting It All Together.
+
+Try With AI​
+Prompt 1: Decomposition Practice​
+I want to practice breaking complex problems into small, reversible steps.
+
+Here's a feature I need to build: [describe a real feature you're working on or interested in]
+
+Help me decompose this into small, atomic steps. For each step:
+1. What specifically is being changed?
+2. What files are involved?
+3. How will I verify this step works?
+4. How can I revert this step if needed?
+
+Aim for 5-10 steps where each can be completed and tested independently.
+
+After we have the steps, help me understand:
+- Did I miss any dependencies between steps?
+- Are any steps too large or too small?
+- What's the optimal order to do these in?
+
+
+What you're learning: How to decompose complex problems into small, manageable steps. You're developing the skill of breaking work into atomic units that can be independently verified and reverted.
+
+Prompt 2: Commit Boundary Design​
+I want to improve my commit boundaries.
+
+Here are some recent commits I made (or imagine some commits):
+- [Paste actual commit messages or describe commits]
+
+Analyze these commits:
+- Are they atomic (one logical change)?
+- Can they be easily reverted?
+- Do they leave the code in a working state?
+
+For any that aren't ideal, help me understand how to split them into better commits.
+
+Then, help me design a commit strategy for this scenario:
+"I spent the afternoon working on feature X. I changed files A, B, and C. File A changes are mostly complete, file B has some work in progress, file C I just started. How should I commit this work?"
+
+Show me the commit messages and what each commit should contain.
+
+
+What you're learning: How to design good commit boundaries that create natural reversibility points. You're learning to structure your work so that each commit represents a coherent, revertable unit.
+
+Prompt 3: Iteration vs Batch Comparison​
+I want to understand the difference between large batch changes and small iterations.
+
+Pick a feature you could help me build (or suggest one). Show me two approaches:
+
+Approach A: Large batch
+- Implement the entire feature in one go
+- Show me all the code at once
+- Help me understand what would be involved in reviewing this
+
+Approach B: Small iterations
+- Break it into 5-10 small steps
+- Show me the code for just the first step
+- Wait for my feedback before proceeding
+
+After seeing both, help me reflect:
+- Which approach felt more manageable?
+- Where would bugs be easier to find in each approach?
+- What if we needed to change direction halfway through?
+- How does each approach affect my confidence in the code?
+
+Then, let's actually build the feature using approach B and see how it feels.
+
+
+What you're learning: The practical difference between large batch and small iteration approaches. You're experiencing firsthand how small, reversible steps reduce cognitive load and increase confidence.
+
+Safety Note​
+
+git reset --hard and git revert are powerful recovery tools,but they can also destroy work if used carelessly. Before running any reset command, always check git status and git stash any uncommitted work you want to keep. The "revert, don't fix" mindset only works if you have clean commits to revert to.
+
+Flashcards Study Aid​

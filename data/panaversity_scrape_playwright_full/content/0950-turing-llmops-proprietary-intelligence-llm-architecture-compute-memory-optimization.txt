@@ -1,0 +1,434 @@
+Memory Optimization Techniques
+
+Quantization got your model to fit in VRAM. But training requires more than just the model weights. You need space for:
+
+Gradients: Same size as model weights during backpropagation
+Optimizer states: 2x model size for Adam (momentum + variance)
+Activations: Intermediate values saved for backpropagation
+
+For QLoRA, we train only a small fraction of parameters (LoRA adapters), so gradients and optimizer states are tiny. But activations remain the memory bottleneck—and this lesson teaches you to control them.
+
+The Activation Memory Problem​
+
+During the forward pass, we compute and store activations at every layer. These are needed for the backward pass to compute gradients.
+
+Forward Pass:
+Input → [Layer 1] → a₁ → [Layer 2] → a₂ → ... → [Layer N] → Output
+            ↓           ↓                    ↓
+         Save a₁     Save a₂              Save aₙ
+
+Backward Pass:
+Needs a₁, a₂, ..., aₙ to compute gradients
+
+
+For a 7B parameter model with batch size 1 and sequence length 2048:
+
+Each layer stores activations of size: batch × sequence × hidden_dim
+With 32 layers and hidden_dim 4096: 32 × 1 × 2048 × 4096 × 2 bytes = ~500MB
+
+Increase batch size to 8: 500MB × 8 = 4GB of activation memory.
+
+This is why you run out of memory even with a quantized model that "should fit."
+
+Gradient Checkpointing: Trading Time for Memory​
+
+Gradient checkpointing is an elegant solution: don't save all activations. Instead, save only some and recompute the rest during the backward pass.
+
+How It Works​
+Without Checkpointing (standard):
+Save all activations: a₁, a₂, a₃, a₄, a₅, a₆ (6 saved)
+Memory: O(N) where N = number of layers
+
+With Checkpointing:
+Save only: a₁, a₃, a₅ (3 saved = checkpoints)
+Recompute: a₂, a₄, a₆ during backward pass
+Memory: O(√N)
+
+
+The tradeoff: you run the forward pass twice (once normally, once during backprop), but you use much less memory.
+
+Enabling Gradient Checkpointing​
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+import torch
+
+# Load quantized model
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B-Instruct",
+    quantization_config=quantization_config,
+    device_map="auto",
+)
+
+# Enable gradient checkpointing
+model.gradient_checkpointing_enable()
+
+print("Gradient checkpointing enabled!")
+print(f"Model is training-ready: {model.is_gradient_checkpointing}")
+
+
+Output:
+
+Gradient checkpointing enabled!
+Model is training-ready: True
+
+Memory Savings Analysis​
+Configuration	Activation Memory	Training Time	Recommended
+No checkpointing	100% (baseline)	100%	Large GPU (A100+)
+Checkpointing	~30-40%	+25-35%	Consumer GPU
+
+For T4 with 15GB, gradient checkpointing is effectively required for any model over 3B parameters.
+
+Batch Size and Gradient Accumulation​
+
+Batch size affects both training quality and memory usage. Larger batches generally produce more stable gradients, but require more memory.
+
+The Effective Batch Size Formula​
+effective_batch_size = micro_batch_size × gradient_accumulation_steps × num_gpus
+
+
+Example:
+
+Target effective batch size: 32 (common for LLM fine-tuning)
+Your hardware: 1 T4 GPU (15GB)
+Maximum micro_batch that fits: 2
+
+Calculation:
+
+32 = 2 × gradient_accumulation_steps × 1
+gradient_accumulation_steps = 16
+
+
+You train with batch size 2, accumulate gradients for 16 steps, then update weights. The model "sees" an effective batch of 32 examples.
+
+Implementation​
+from transformers import TrainingArguments
+
+# Target: effective batch size of 32 on single T4
+training_args = TrainingArguments(
+    output_dir="./output",
+
+    # Batch size configuration
+    per_device_train_batch_size=2,      # What fits in VRAM
+    gradient_accumulation_steps=16,      # Accumulate to reach 32
+
+    # Memory optimizations
+    gradient_checkpointing=True,
+    fp16=True,  # or bf16=True if hardware supports
+
+    # Training settings
+    learning_rate=2e-4,
+    num_train_epochs=3,
+    logging_steps=10,
+)
+
+# Verify effective batch size
+effective_batch = (
+    training_args.per_device_train_batch_size
+    * training_args.gradient_accumulation_steps
+    * 1  # num_gpus
+)
+print(f"Effective batch size: {effective_batch}")
+
+
+Output:
+
+Effective batch size: 32
+
+Finding Your Optimal Micro Batch Size​
+
+Start high and reduce until training runs without OOM:
+
+def find_max_batch_size(model, tokenizer, max_seq_length=512):
+    """Binary search for maximum batch size that fits in memory."""
+    from torch.cuda import OutOfMemoryError
+
+    low, high = 1, 32
+    best = 1
+
+    while low <= high:
+        mid = (low + high) // 2
+        try:
+            # Try a forward + backward pass
+            inputs = tokenizer(
+                ["Test " * 100] * mid,  # Create batch
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_seq_length,
+            ).to(model.device)
+
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            outputs.loss.backward()
+
+            # Clear memory
+            model.zero_grad()
+            torch.cuda.empty_cache()
+
+            best = mid
+            low = mid + 1
+            print(f"Batch size {mid}: OK")
+
+        except OutOfMemoryError:
+            high = mid - 1
+            torch.cuda.empty_cache()
+            print(f"Batch size {mid}: OOM")
+
+    print(f"\nMaximum batch size: {best}")
+    return best
+
+# Note: Run this before training to find your limit
+# max_batch = find_max_batch_size(model, tokenizer)
+
+Gradient Accumulation Timing​
+
+Important: gradients are accumulated across steps, but optimizer updates happen only after accumulation completes:
+
+Step 1: Forward → Backward → Accumulate gradients
+Step 2: Forward → Backward → Accumulate gradients
+...
+Step 16: Forward → Backward → Accumulate gradients → UPDATE WEIGHTS → Clear gradients
+Step 17: (Repeat cycle)
+
+
+This means:
+
+Logging loss: Log every gradient_accumulation_steps for accurate batch loss
+Learning rate: Applied per optimizer step, not per micro step
+Training time: Increases with more accumulation (more forward/backward passes)
+Mixed Precision Training​
+
+Mixed precision uses FP16 or BF16 for most operations while keeping FP32 for critical ones. This reduces memory and increases speed.
+
+FP16 vs BF16​
+Format	Exponent Bits	Mantissa Bits	Range	Use Case
+FP32	8	23	±3.4×10³⁸	Full precision (baseline)
+FP16	5	10	±65,504	Legacy mixed precision
+BF16	8	7	±3.4×10³⁸	Modern mixed precision
+
+Key insight: BF16 has the same range as FP32 (no overflow issues) but less precision. For training, range matters more than precision.
+
+Configuring Mixed Precision​
+# Option 1: In TrainingArguments (recommended)
+training_args = TrainingArguments(
+    output_dir="./output",
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=16,
+    gradient_checkpointing=True,
+
+    # Mixed precision
+    bf16=True,  # Use BF16 if GPU supports it (Ampere+)
+    # OR
+    # fp16=True,  # Use FP16 for older GPUs (T4, V100)
+
+    # FP16 requires loss scaling
+    fp16_full_eval=False,  # Use FP32 for evaluation
+)
+
+# Option 2: Check hardware support
+def get_mixed_precision_dtype():
+    """Determine best mixed precision format for current hardware."""
+    if not torch.cuda.is_available():
+        return "no"  # CPU training
+
+    capability = torch.cuda.get_device_capability()
+    gpu_name = torch.cuda.get_device_name()
+
+    if capability >= (8, 0):  # Ampere or newer (A100, RTX 3090, etc.)
+        print(f"{gpu_name}: Using BF16 (best)")
+        return "bf16"
+    else:  # Volta, Turing (V100, T4)
+        print(f"{gpu_name}: Using FP16 with loss scaling")
+        return "fp16"
+
+dtype = get_mixed_precision_dtype()
+
+
+Output:
+
+Tesla T4: Using FP16 with loss scaling
+
+Loss Scaling for FP16​
+
+FP16 has a smaller range than FP32, so small gradients can underflow to zero. Loss scaling multiplies the loss before backprop, then divides gradients after:
+
+# Hugging Face Trainer handles this automatically when fp16=True
+# But here's what happens under the hood:
+
+# 1. Forward pass produces loss (FP32)
+loss = model(**inputs, labels=labels).loss
+
+# 2. Scale loss before backward (e.g., multiply by 1024)
+scaled_loss = loss * 1024
+scaled_loss.backward()
+
+# 3. Unscale gradients before optimizer step
+for param in model.parameters():
+    if param.grad is not None:
+        param.grad.data /= 1024
+
+# 4. Check for inf/nan, adjust scale factor dynamically
+# (Trainer's GradScaler does this automatically)
+
+
+The Trainer handles all of this when you set fp16=True.
+
+Putting It All Together: QLoRA Training Config​
+
+Here's a complete memory-optimized configuration for QLoRA on T4:
+
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainingArguments,
+)
+from peft import LoraConfig, get_peft_model
+import torch
+
+# 1. Quantization config
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
+
+# 2. Load model with quantization
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B-Instruct",  # Use 8B in real training
+    quantization_config=quantization_config,
+    device_map="auto",
+)
+
+# 3. Enable gradient checkpointing
+model.gradient_checkpointing_enable()
+
+# 4. Add LoRA adapters
+lora_config = LoraConfig(
+    r=16,               # Rank (affects quality vs. memory)
+    lora_alpha=32,      # Scaling factor
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+model = get_peft_model(model, lora_config)
+
+# 5. Training arguments with all optimizations
+training_args = TrainingArguments(
+    output_dir="./qlora-output",
+
+    # Batch configuration (effective batch = 32)
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=16,
+
+    # Memory optimizations
+    gradient_checkpointing=True,
+    fp16=True,  # T4 doesn't support bf16
+
+    # Optimizer (8-bit Adam for memory savings)
+    optim="paged_adamw_8bit",
+
+    # Training hyperparameters
+    learning_rate=2e-4,
+    num_train_epochs=3,
+    warmup_ratio=0.03,
+
+    # Logging
+    logging_steps=10,
+    save_strategy="epoch",
+)
+
+# Memory check
+if torch.cuda.is_available():
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    print(f"Model loaded, VRAM used: {allocated:.2f} GB")
+    print(f"Trainable parameters: {model.print_trainable_parameters()}")
+
+
+Output:
+
+Model loaded, VRAM used: 1.24 GB
+trainable params: 3,407,872 || all params: 1,239,288,832 || trainable%: 0.2750
+
+Memory Budget Checklist​
+
+Before starting training, verify your memory budget:
+
+Component	8B Model (QLoRA, T4)	Formula
+Base model (4-bit)	~5 GB	params × 0.5 bytes
+LoRA adapters	~0.1 GB	rank × target_modules × hidden_dim
+Gradients (LoRA only)	~0.1 GB	trainable_params × 4 bytes
+Optimizer states	~0.2 GB	trainable_params × 8 bytes (Adam)
+Activations	~4-8 GB	batch × seq_len × hidden × layers
+Total	~10-14 GB	Fits T4 with margin
+
+If you exceed 14GB, reduce:
+
+Batch size (first)
+Sequence length (second)
+LoRA rank (last resort)
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, or Gemini).
+
+Prompt 1: Debug Memory Issues​
+I'm trying to fine-tune Llama-3-8B on a T4 with QLoRA, but I keep
+getting OOM errors. Here's my setup:
+
+- 4-bit quantization enabled
+- Gradient checkpointing enabled
+- Batch size: 4
+- Sequence length: 2048
+- Gradient accumulation: 8
+
+Help me diagnose the problem. Walk me through calculating my memory
+usage step by step. What should I change first?
+
+
+What you're learning: Systematic memory debugging—breaking down the problem into components and identifying the bottleneck.
+
+Prompt 2: Optimize for Speed vs. Memory​
+I have two options for fine-tuning:
+
+Option A: T4 (15GB) - batch size 2, grad accum 16
+Option B: A10 (24GB) - batch size 8, grad accum 4
+
+Both achieve effective batch size 32. Help me understand:
+1. Which will train faster and why?
+2. What's the memory overhead difference?
+3. Are there quality implications?
+
+Challenge my assumptions if I'm thinking about this wrong.
+
+
+What you're learning: Tradeoff analysis—understanding how hardware constraints affect training strategy and outcomes.
+
+Prompt 3: Design a Training Configuration​
+I need to fine-tune a 7B model on customer support conversations.
+My constraints:
+- Hardware: 2x T4 GPUs (15GB each)
+- Dataset: 50,000 conversations, average 500 tokens
+- Time budget: 24 hours maximum
+
+Help me design the complete training configuration:
+- Batch size and gradient accumulation
+- Mixed precision settings
+- Gradient checkpointing decision
+- Estimated training time
+
+Ask me clarifying questions if you need more information about
+my quality requirements or infrastructure.
+
+
+What you're learning: End-to-end planning—translating business constraints into technical configuration.
+
+Safety Note​
+
+When experimenting with memory settings, save your work frequently. OOM errors during training can corrupt checkpoints. Use save_strategy="steps" with small save intervals when testing new configurations.

@@ -1,0 +1,605 @@
+Ingress Fundamentals
+
+Your Task API is deployed to Kubernetes. Run this command:
+
+kubectl get services -n task-api
+
+
+Output:
+
+NAME       TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+task-api   ClusterIP   10.96.45.123   <none>        8000/TCP   2h
+
+
+Now try accessing it from your browser at http://10.96.45.123:8000. What happens?
+
+Nothing. The page never loads.
+
+That ClusterIP address exists only inside the Kubernetes cluster. Your browser, running outside the cluster on your laptop, cannot reach it. The IP 10.96.45.123 is meaningless to your operating system's network stack.
+
+This lesson answers a fundamental question: How do external users reach services running inside Kubernetes?
+
+The External Access Problem​
+
+Kubernetes networking creates a private network inside the cluster. Every Pod gets an IP address, and Services provide stable endpoints for groups of Pods. But this private network is invisible to the outside world.
+
+Think of it like a corporate office building:
+
+Inside the building, employees can call each other using 4-digit extension numbers (3401, 2156)
+Those extension numbers don't work if you dial them from outside the building
+External callers need a public phone number that routes to the internal extension
+
+Kubernetes Services are the internal extension numbers. External users need a public entry point.
+
+kubectl port-forward: The Development Workaround​
+
+You've probably used this already:
+
+kubectl port-forward service/task-api 8000:8000 -n task-api
+
+
+Output:
+
+Forwarding from 127.0.0.1:8000 -> 8000
+Forwarding from [::1]:8000 -> 8000
+
+
+Now http://localhost:8000 works in your browser. But ask yourself: What happens when you close that terminal?
+
+The forwarding stops. Your service becomes unreachable again.
+
+kubectl port-forward tunnels traffic from your local machine through the Kubernetes API server to the Pod. It's useful for debugging, but it's not a solution for production:
+
+Only works while the command runs
+One user at a time (your machine)
+No TLS termination
+No load balancing
+No rate limiting
+
+You need something that provides permanent external access.
+
+Service Types: A Progression​
+
+Kubernetes offers multiple ways to expose Services externally. Each builds on the previous, solving additional problems while adding complexity.
+
+ClusterIP: Internal Only​
+
+ClusterIP is the default Service type. When you create a Service without specifying a type, you get ClusterIP:
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  selector:
+    app: task-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+  # type: ClusterIP  # This is the default
+
+
+Output:
+
+service/task-api created
+
+
+ClusterIP provides:
+
+A stable virtual IP inside the cluster
+DNS name (task-api.task-api.svc.cluster.local)
+Load balancing across matching Pods
+
+ClusterIP does NOT provide:
+
+Any external access
+Reachability from outside the cluster
+
+ClusterIP is perfect for internal services that only other Pods need to reach. Your database, cache, and message queue typically use ClusterIP because external users should never access them directly.
+
+NodePort: Expose on Every Node​
+
+NodePort opens a specific port on every node in your cluster:
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-nodeport
+  namespace: task-api
+spec:
+  type: NodePort
+  selector:
+    app: task-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30080  # Must be 30000-32767
+
+
+Output:
+
+service/task-api-nodeport created
+
+
+Check the service:
+
+kubectl get service task-api-nodeport -n task-api
+
+
+Output:
+
+NAME                TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
+task-api-nodeport   NodePort   10.96.78.234   <none>        8000:30080/TCP   10s
+
+
+Now you can access your service at http://<any-node-ip>:30080. If you're using Docker Desktop, try:
+
+curl http://localhost:30080/health
+
+
+Output:
+
+{"status": "healthy"}
+
+
+NodePort solves external access, but creates new problems:
+
+Problem	Why It Matters
+Port range limited to 30000-32767	Users must type :30080 in URLs
+Which node IP do users use?	If that node goes down, users get errors
+No TLS termination	HTTP only, or you handle TLS in your app
+One port per service	Limited to ~2,700 services cluster-wide
+
+NodePort works for development and testing. For production, you need something that handles node failures and provides standard ports (80/443).
+
+LoadBalancer: Cloud Provider Integration​
+
+LoadBalancer requests an external load balancer from your cloud provider:
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-lb
+  namespace: task-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: task-api
+  ports:
+    - port: 80        # External port
+      targetPort: 8000
+
+
+Output:
+
+service/task-api-lb created
+
+
+Wait a moment, then check:
+
+kubectl get service task-api-lb -n task-api
+
+
+Output (cloud environment):
+
+NAME          TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+task-api-lb   LoadBalancer   10.96.89.123   203.0.113.45     80:31234/TCP   2m
+
+
+Now http://203.0.113.45 reaches your service on port 80. The cloud provider created a load balancer, gave it a public IP, and configured it to forward traffic to your nodes.
+
+Question: If LoadBalancer solves external access, why do we need Ingress?
+
+Answer: Cost and routing.
+
+Consider this scenario: You have 10 microservices. With LoadBalancer Services:
+
+10 load balancers (one per service)
+10 public IP addresses
+10 monthly charges from your cloud provider
+
+At $15-25 per load balancer per month, that's $150-250/month just for external access. And you still can't do:
+
+Path-based routing (/api to service A, /web to service B)
+Host-based routing (api.example.com vs web.example.com)
+TLS termination at one place
+Rate limiting
+
+You need a single entry point that routes to multiple services.
+
+Ingress: Layer 7 Routing​
+
+Ingress provides HTTP/HTTPS routing rules that direct traffic to Services based on hostnames and paths.
+
+                                    ┌─────────────────┐
+                                    │   Service A     │
+                                    │  (ClusterIP)    │
+                                    └────────▲────────┘
+                                             │
+                    ┌────────────────────────┼────────────────────────┐
+                    │                        │ /api/*                 │
+     Internet       │    ┌───────────────────┴───────────────────┐   │
+        │           │    │             Ingress                    │   │
+        │           │    │   - Host: example.com                  │   │
+        └───────────┼───►│   - /api/* → service-a                 │   │
+                    │    │   - /web/* → service-b                 │   │
+                    │    │   - TLS termination                    │   │
+                    │    └───────────────────┬───────────────────┘   │
+                    │                        │ /web/*                 │
+                    │                        ▼                        │
+                    │               ┌─────────────────┐               │
+                    │               │   Service B     │               │
+                    │               │  (ClusterIP)    │               │
+                    └───────────────┴─────────────────┴───────────────┘
+                                      Kubernetes Cluster
+
+
+Here's an Ingress resource:
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+spec:
+  ingressClassName: nginx  # Which controller handles this
+  rules:
+    - host: example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8000
+          - path: /web
+            pathType: Prefix
+            backend:
+              service:
+                name: web-service
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - example.com
+      secretName: example-tls
+
+
+Output:
+
+ingress.networking.k8s.io/example-ingress created
+
+
+Ingress gives you:
+
+Single entry point: One load balancer for multiple services
+Path-based routing: /api goes to API service, /web goes to web service
+Host-based routing: api.example.com vs admin.example.com
+TLS termination: HTTPS handled at the edge, services receive HTTP
+
+This looks like the solution. But there's a problem.
+
+The Annotation Chaos Problem​
+
+Ingress is a Kubernetes-native resource, but it only defines basic routing. Real production needs require:
+
+Rate limiting
+Request timeouts
+Header manipulation
+Authentication
+Circuit breaking
+
+These features don't exist in the Ingress specification. So every Ingress controller added them through annotations.
+
+NGINX Ingress Controller​
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  # ... rules
+
+Traefik Ingress Controller​
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    traefik.ingress.kubernetes.io/rate-limit: "average=100,burst=200"
+    traefik.ingress.kubernetes.io/request-timeout: "60s"
+    traefik.ingress.kubernetes.io/redirect-entry-point: "https"
+    traefik.ingress.kubernetes.io/router.middlewares: "default-ratelimit@kubernetescrd"
+spec:
+  ingressClassName: traefik
+  # ... rules
+
+Kong Ingress Controller​
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    konghq.com/plugins: "rate-limiting"
+    konghq.com/read-timeout: "60000"
+    konghq.com/write-timeout: "60000"
+    konghq.com/strip-path: "true"
+    konghq.com/protocols: "https"
+spec:
+  ingressClassName: kong
+  # ... rules
+
+
+Question: What happens when you switch from NGINX to Traefik?
+
+Answer: You rewrite every annotation. The rate limiting syntax, timeout format, TLS configuration, and middleware references are all different. This is vendor lock-in through annotations.
+
+Even worse: annotations are unstructured strings. There's no schema validation. Typo in an annotation name? Kubernetes accepts it silently and the feature simply doesn't work.
+
+Ingress Limitations​
+
+The annotation problem is one of several fundamental limitations in the Ingress API.
+
+1. No Role Separation​
+
+In production, different teams have different responsibilities:
+
+Role	Responsibility
+Platform Team	Installs and maintains the ingress controller
+Security Team	Configures TLS policies and authentication
+Application Team	Defines routes for their services
+
+With Ingress, everyone edits the same resource. The application developer who adds a route can accidentally modify the TLS configuration. There's no RBAC granularity within the Ingress resource.
+
+2. Annotation Chaos (Vendor Lock-In)​
+
+Every feature beyond basic routing requires vendor-specific annotations. Your infrastructure becomes tightly coupled to one ingress controller. Switching controllers means rewriting every Ingress resource.
+
+3. Limited Expressiveness​
+
+The Ingress spec cannot express common requirements:
+
+Header-based routing: Route based on X-API-Version header
+Traffic splitting: Send 10% of traffic to canary version
+Request mirroring: Copy traffic to shadow environment for testing
+Query parameter matching: Route based on ?version=2
+
+These require controller-specific CRDs or annotations, losing the benefit of a standard API.
+
+4. HTTP/HTTPS Only​
+
+Ingress only handles HTTP traffic. If you need:
+
+gRPC routing
+TCP passthrough
+UDP services (DNS, games)
+WebSocket with specific handling
+
+You're back to vendor-specific solutions.
+
+5. No Status Reporting​
+
+When an Ingress resource fails to configure correctly, how do you know? The Ingress status field is minimal. Controllers report status inconsistently, making debugging difficult.
+
+Enter Gateway API​
+
+The Kubernetes community recognized these limitations and created Gateway API—a successor to Ingress designed from the ground up for:
+
+Gateway API Feature	Ingress Limitation Solved
+Resource separation (GatewayClass, Gateway, HTTPRoute)	Role separation with RBAC
+Typed policies (BackendTrafficPolicy, SecurityPolicy)	No more annotation chaos
+Header matching, traffic splitting, mirroring built-in	Full expressiveness
+TCP, UDP, gRPC, TLS routes	Not HTTP-only
+Rich status reporting	Clear debugging
+The Gateway API Model​
+
+Gateway API splits responsibilities into distinct resources:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Cluster Admin / Platform Team                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ GatewayClass                                               │  │
+│  │   - Defines which controller handles Gateways              │  │
+│  │   - One per controller type (Envoy Gateway, Traefik, etc.) │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Platform Team / Infrastructure                │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Gateway                                                    │  │
+│  │   - Defines listeners (ports, protocols, TLS)              │  │
+│  │   - Binds to GatewayClass                                  │  │
+│  │   - Controls which namespaces can attach routes            │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Application Team / Developers                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ HTTPRoute / GRPCRoute / TCPRoute                           │  │
+│  │   - Defines routing rules (paths, headers, weights)        │  │
+│  │   - Attaches to Gateway                                    │  │
+│  │   - Points to backend Services                             │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+
+
+This separation enables:
+
+Platform teams manage infrastructure (GatewayClass, Gateway)
+Application teams manage routing (HTTPRoute, GRPCRoute)
+RBAC prevents app developers from modifying infrastructure
+Portability because routes use standard API, not annotations
+Portable Configurations​
+
+With Gateway API, switching from Envoy Gateway to Traefik Gateway requires changing ONE field:
+
+# Before: Envoy Gateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+spec:
+  gatewayClassName: eg  # Envoy Gateway
+  # ... listeners unchanged
+
+# After: Traefik Gateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+spec:
+  gatewayClassName: traefik  # Traefik Gateway
+  # ... listeners unchanged (identical)
+
+
+Your HTTPRoute resources remain identical. No annotation rewrites. No vendor lock-in.
+
+Exercises​
+
+Work through these exercises to solidify your understanding of Service types and Ingress limitations.
+
+Exercise 1: Explore Service Types​
+
+If you have a Kubernetes cluster running, list all Services:
+
+kubectl get services --all-namespaces
+
+
+Output:
+
+NAMESPACE     NAME         TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
+default       kubernetes   ClusterIP   10.96.0.1      <none>        443/TCP          7d
+kube-system   kube-dns     ClusterIP   10.96.0.10     <none>        53/UDP,53/TCP    7d
+
+
+For each Service, identify:
+
+Why is it ClusterIP instead of NodePort or LoadBalancer?
+Who needs to reach this Service (internal Pods or external users)?
+Exercise 2: Create and Compare Service Types​
+
+Create a simple deployment to experiment with:
+
+kubectl create deployment nginx-test --image=nginx
+
+
+Output:
+
+deployment.apps/nginx-test created
+
+
+Now expose it with different Service types:
+
+# ClusterIP (default)
+kubectl expose deployment nginx-test --port=80 --name=nginx-clusterip
+
+# NodePort
+kubectl expose deployment nginx-test --port=80 --type=NodePort --name=nginx-nodeport
+
+# LoadBalancer
+kubectl expose deployment nginx-test --port=80 --type=LoadBalancer --name=nginx-lb
+
+
+Output:
+
+service/nginx-clusterip exposed
+service/nginx-nodeport exposed
+service/nginx-lb exposed
+
+
+Compare them:
+
+kubectl get services nginx-clusterip nginx-nodeport nginx-lb
+
+
+Output:
+
+NAME              TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)        AGE
+nginx-clusterip   ClusterIP      10.96.23.45    <none>        80/TCP         30s
+nginx-nodeport    NodePort       10.96.34.56    <none>        80:31234/TCP   25s
+nginx-lb          LoadBalancer   10.96.45.67    <pending>     80:32345/TCP   20s
+
+
+Notice: LoadBalancer shows <pending> on Docker Desktop because there's no cloud provider to create a load balancer. On GKE, EKS, or AKS, it would receive an external IP.
+
+Clean up:
+
+kubectl delete deployment nginx-test
+kubectl delete service nginx-clusterip nginx-nodeport nginx-lb
+
+Exercise 3: Examine Ingress Controller Annotations​
+
+Visit the documentation for any two Ingress controllers:
+
+NGINX Ingress annotations
+Traefik Ingress annotations
+Kong Ingress annotations
+
+Find the annotation for:
+
+Rate limiting
+Request timeout
+TLS redirect
+
+Compare the syntax. How different are they?
+
+Exercise 4: Map Scenarios to Service Types​
+
+For each scenario, which Service type would you choose?
+
+Scenario	Your Choice	Why?
+Database only accessed by app Pods		
+Development testing from your laptop		
+Single service needs internet access (cloud)		
+20 services need internet access (cloud)		
+gRPC service with multiple routes		
+
+Answers:
+
+ClusterIP - Internal only, no external access needed
+NodePort or port-forward - Quick development access
+LoadBalancer - Simple, one service
+Ingress or Gateway API - One entry point, multiple routes
+Gateway API - gRPC routing not supported by Ingress
+Reflect on Your Skill​
+
+You built a traffic-engineer skill in Lesson 0. Based on what you learned about Ingress limitations, consider:
+
+What Decision Logic Should Your Skill Include?​
+
+Your skill should help you choose:
+
+Question	If Yes	If No
+Internal-only service?	ClusterIP	Continue
+Development/testing only?	NodePort	Continue
+Single service, cloud environment?	LoadBalancer	Continue
+Multiple services, complex routing?	Gateway API	LoadBalancer
+Need header matching, traffic splitting?	Gateway API	Ingress might work
+
+Does your skill encode this decision tree?
+
+Which Ingress Limitations Affect Your AI Agent Deployment?​
+
+Consider your Task API deployment:
+
+Rate limiting: AI agents can be expensive. You need per-user limits.
+Traffic splitting: You'll want canary deployments for new model versions.
+Header-based routing: API versioning through headers.
+Observability: Need rich status reporting for debugging.
+
+All of these require Gateway API's expressiveness. Ingress annotations would create vendor lock-in.
+
+What Should You Add to Your Skill?​
+
+If your skill currently generates Ingress resources, you now understand why Gateway API is better. The remaining lessons will teach Gateway API patterns that your skill should capture instead.

@@ -1,0 +1,339 @@
+Workflow Architecture
+
+You've learned that Dapr Workflows provide durable execution that survives failures. But how? When your workflow crashes mid-execution, how does it know where to resume? When your Kubernetes pod gets evicted, how does the workflow continue on a different node?
+
+The answer lies in a clever architectural pattern: replay-based execution. Instead of trying to checkpoint every variable and program counter (like a traditional process migration), Dapr Workflows record what happened and replay the workflow code from the beginning, skipping over work that's already complete.
+
+This approach is powerful, but it has a strict requirement: your workflow code must be deterministic. If your code produces different results on replay than it did originally, the workflow breaks. Understanding this constraint is critical before you write your first workflow.
+
+The Workflow Engine: Inside the Sidecar​
+
+When you call WorkflowRuntime().start() in your Python application, you're connecting to the workflow engine embedded inside the Dapr sidecar. Here's what's happening architecturally:
+
++--------------------------------------------------------------------+
+|  Your Application                                                   |
+|  +----------------------------------------------------------------+ |
+|  |  @wfr.workflow                                                  | |
+|  |  def task_processing(ctx, task):                               | |
+|  |      result = yield ctx.call_activity(validate_task, ...)      | |
+|  |      # Your workflow logic                                      | |
+|  +----------------------------------------------------------------+ |
+|                              |                                      |
+|                        gRPC stream                                  |
+|                              v                                      |
++--------------------------------------------------------------------+
+|  Dapr Sidecar (daprd)                                               |
+|  +----------------------------------------------------------------+ |
+|  |  Workflow Engine (Durable Task Framework - Go implementation)   | |
+|  |                                                                  | |
+|  |  Uses internal actors for state management:                     | |
+|  |  - Workflow Actor: manages workflow instance state              | |
+|  |  - Activity Actor: manages activity execution                   | |
+|  +----------------------------------------------------------------+ |
+|                              |                                      |
+|                              v                                      |
+|                        State Store                                  |
+|                      (Redis, PostgreSQL)                            |
++--------------------------------------------------------------------+
+
+
+The workflow engine is built on the Durable Task Framework, a battle-tested orchestration library. Dapr contributes a storage backend that uses internal actors to manage workflow state, giving you the scalability and distribution characteristics of the actor model.
+
+Key insight: Your application code and the workflow engine communicate over a gRPC stream. The engine sends work items ("start workflow X", "run activity Y"), and your code returns execution results. All the durability magic happens in the sidecar, not in your application.
+
+Replay-Based Execution: The VCR Analogy​
+
+Imagine recording a cooking show on a VCR (or DVR, if you're younger). You can pause at any point, turn off the TV, and later resume exactly where you left off. The recording doesn't store your current "state of understanding"; it stores the sequence of events, and you replay from the beginning, fast-forwarding through parts you've already seen.
+
+Dapr Workflows work the same way:
+
+Recording Phase: As your workflow executes, every significant action (activity calls, timer creations, external events received) gets recorded as an "event" in the workflow's history.
+
+Crash: Your application pod crashes, or the node fails, or you simply restart for a deployment.
+
+Replay Phase: When the workflow resumes, the engine re-executes your workflow code from the beginning. But here's the trick: when the code hits an activity call, the engine checks history. If that activity already completed, it immediately returns the recorded result instead of executing the activity again.
+
+Original Execution                    After Crash: Replay
+==================                    ====================
+
+def my_workflow(ctx, input):          def my_workflow(ctx, input):
+    │                                     │
+    v                                     v
+    result1 = yield call_activity(A)      result1 = yield call_activity(A)
+    │                                     │
+    │  [Activity A executes]              │  [SKIP - return recorded result]
+    │  [History: "A completed: X"]        │
+    v                                     v
+    result2 = yield call_activity(B)      result2 = yield call_activity(B)
+    │                                     │
+    │  [Activity B executes]              │  [SKIP - return recorded result]
+    │  [History: "B completed: Y"]        │
+    v                                     v
+    result3 = yield call_activity(C)      result3 = yield call_activity(C)
+    │                                     │
+    ╳  [CRASH before C completes]         │  [Not in history - EXECUTE NOW]
+                                          v
+                                          return result3
+
+
+The workflow "fast-forwards" through completed work by reading from history, then continues executing new work from where it left off.
+
+State Persistence: What Gets Saved​
+
+The workflow engine persists state to your configured state store (Redis, PostgreSQL, etc.) through internal actors. Each workflow instance is managed by a Workflow Actor that stores several types of data:
+
+State Key Pattern	Contents	Purpose
+inbox-NNNNNN	Pending messages	Queue of work items waiting to be processed
+history-NNNNNN	Completed events	Append-only log of what happened (activity completed, timer fired, etc.)
+metadata	Workflow metadata	History length, inbox length, generation counter
+customStatus	User-defined status	Optional status payload set by your workflow
+
+When your workflow yields at an activity call, here's what happens:
+
+Intent recorded: The engine saves "intending to call activity X with input Y"
+Activity dispatched: An Activity Actor is created to run the activity
+Result recorded: When the activity completes, "activity X completed with result Z" is appended to history
+Checkpoint complete: Your workflow can now safely crash; the result is persisted
+
+This append-only history model means the engine never modifies past events. It only adds new ones. This makes recovery simple: read the history, replay, continue.
+
+State Store Record Counts​
+
+The number of records saved varies by workflow complexity:
+
+Task Type	Approximate Records
+Start workflow	~5 records
+Call activity	~3 records
+Create timer	~3 records
+Raise event	~3 records
+Start child workflow	~8 records
+
+A workflow with 10 chained activities might create 30-35 state store records. This is important for understanding state store load in high-volume scenarios.
+
+Why Workflow Code Must Be Deterministic​
+
+Here's where the replay model has a strict requirement: if your workflow code doesn't behave identically on replay, the engine can't trust the history.
+
+Consider this broken workflow:
+
+import random
+from datetime import datetime
+
+def broken_workflow(ctx, input):
+    # DON'T DO THIS: Non-deterministic decision
+    if random.random() > 0.5:
+        result = yield ctx.call_activity(path_a, input=input)
+    else:
+        result = yield ctx.call_activity(path_b, input=input)
+
+    # DON'T DO THIS: Non-deterministic timestamp
+    timestamp = datetime.utcnow().isoformat()
+
+    return {"result": result, "processed_at": timestamp}
+
+
+What goes wrong:
+
+Original execution: random.random() returns 0.7, so we call path_a. History records: "path_a completed with X"
+Crash and replay: random.random() returns 0.3 (different seed), so we try to call path_b. But history says path_a completed. Mismatch. Workflow fails.
+
+Similarly, datetime.utcnow() returns a different value on replay than during original execution, causing the return value to differ.
+
+Determinism Rules: DO and DON'T​
+
+The rules for deterministic workflow code are straightforward once you understand why:
+
+Category	DON'T (Non-Deterministic)	DO (Deterministic)
+Random values	random.randint(1, 100)	Pass random value as workflow input, or generate in activity
+Current time	datetime.now(), datetime.utcnow()	ctx.current_utc_datetime
+External calls	httpx.get("https://api.example.com")	yield ctx.call_activity(fetch_data, input=url)
+Environment variables	os.getenv("MY_CONFIG")	Pass configuration as workflow input
+UUIDs	uuid.uuid4()	ctx.new_uuid() (if SDK provides) or generate in activity
+File I/O	open("data.json").read()	Read in activity, pass data as input
+Correct Patterns​
+
+Here's how to fix the broken workflow:
+
+def correct_workflow(ctx, input):
+    # DO: Use context for current time
+    timestamp = ctx.current_utc_datetime
+
+    # DO: Make decisions based on input (deterministic)
+    if input.get("priority") == "high":
+        result = yield ctx.call_activity(path_a, input=input)
+    else:
+        result = yield ctx.call_activity(path_b, input=input)
+
+    # DO: If you need randomness, generate it in an activity
+    if input.get("needs_random_value"):
+        random_value = yield ctx.call_activity(generate_random, input={})
+
+    return {"result": result, "processed_at": timestamp.isoformat()}
+
+Why Activities Can Be Non-Deterministic​
+
+Activities execute once and their results are recorded. On replay, activities don't re-execute; the engine returns the recorded result. This means activities can safely:
+
+Call external APIs
+Read environment variables
+Generate random values
+Query databases
+Read files
+
+The result gets captured in history, and that exact result is returned on replay.
+
+def validate_task(ctx, task: dict) -> dict:
+    """Activities CAN be non-deterministic - they're not replayed."""
+    # Safe: Call external service
+    response = httpx.post("https://validation-service/api/validate", json=task)
+
+    # Safe: Use current time (result is recorded)
+    validated_at = datetime.utcnow().isoformat()
+
+    return {"valid": response.json()["is_valid"], "validated_at": validated_at}
+
+Detecting Determinism Violations​
+
+The workflow engine detects many violations at runtime. When replay produces different operations than history records, you'll see errors like:
+
+NON_DETERMINISTIC: Workflow code changed or behaves differently
+UNEXPECTED_ACTIVITY: Workflow tried to call different activity than recorded
+
+Debugging approach:
+
+Check your workflow code for datetime.now(), random, os.getenv() calls
+Ensure all external service calls are in activities
+Verify you're not modifying workflow code while instances are running
+Use deterministic branching (based on input, not runtime values)
+Workflow Latency Considerations​
+
+The durability model has performance implications:
+
+Latency Source	Cause	Mitigation
+State store writes	Every checkpoint writes to store	Use fast state store (Redis vs PostgreSQL)
+History growth	Large histories take longer to replay	Use continue_as_new for long-running workflows
+Reminder overhead	Workflows use actor reminders for recovery	Monitor reminder count in cluster
+Activity coordination	Activities route through actors	Keep activities focused and fast
+
+Dapr Workflows are optimized for correctness over latency. If you need sub-millisecond response times, workflows may not be the right tool. They excel at operations measured in seconds to hours, where durability matters more than speed.
+
+Key Vocabulary​
+Term	Definition
+Replay	Re-executing workflow code from the beginning, using recorded history to skip completed work
+History	Append-only log of events (activities completed, timers fired, events received)
+Checkpoint	Point where workflow state is persisted; occurs at every yield
+Determinism	Property that code produces identical results given identical inputs and history
+Workflow Actor	Internal Dapr actor that manages a single workflow instance's state
+Activity Actor	Internal Dapr actor that manages execution of a single activity invocation
+Durable Task Framework	Go library powering Dapr's workflow engine
+Reflect on Your Skill​
+
+You extended your dapr-deployment skill in Lesson 0 to include workflow patterns. Does it understand workflow architecture?
+
+Test Your Skill​
+Using my dapr-deployment skill, explain why I can't use datetime.utcnow()
+in my workflow code but I can use it in my activity code.
+
+
+Does your skill cover:
+
+The replay-based execution model?
+Why workflows must be deterministic but activities don't?
+The ctx.current_utc_datetime alternative?
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill explain how workflow history enables crash recovery?
+Did it mention the Workflow Actor and Activity Actor architecture?
+Did it list the determinism rules (DO/DON'T table)?
+Improve Your Skill​
+
+If you found gaps:
+
+My dapr-deployment skill is missing coverage of workflow architecture.
+Update it to include:
+- Replay-based execution and the VCR analogy
+- Determinism rules: datetime.now() -> ctx.current_utc_datetime
+- Why activities can call external services (results are recorded)
+- The internal actor architecture (Workflow Actor, Activity Actor)
+
+Try With AI​
+
+Open your AI companion (Claude, ChatGPT, Gemini) and explore workflow architecture concepts.
+
+Prompt 1: Trace Replay Execution​
+Walk me through exactly what happens when a Dapr workflow crashes and restarts.
+
+My workflow has 3 activities: validate_task, assign_task, send_notification.
+It crashed after assign_task completed but before send_notification started.
+
+Show me:
+1. What's in the workflow history at crash time
+2. What happens during replay
+3. How the workflow knows to skip validate_task and assign_task
+4. When send_notification actually executes
+
+Include the state store keys that would be involved.
+
+
+What you're learning: How to reason about workflow recovery. The AI helps you trace the exact sequence of events that makes durability work.
+
+Prompt 2: Identify Determinism Violations​
+Review this workflow code and identify all determinism violations:
+
+def problematic_workflow(ctx, order: dict):
+    # Get current timestamp
+    order_time = datetime.now()
+
+    # Call external service directly
+    pricing = httpx.get(f"https://api/pricing/{order['item']}").json()
+
+    # Make random routing decision
+    import random
+    if random.random() > 0.5:
+        warehouse = "east"
+    else:
+        warehouse = "west"
+
+    # Read configuration
+    config = json.load(open("config.json"))
+
+    result = yield ctx.call_activity(process_order, input={
+        "order": order,
+        "pricing": pricing,
+        "warehouse": warehouse,
+        "config": config
+    })
+
+    return {"order_id": order["id"], "processed_at": order_time.isoformat()}
+
+For each violation, explain:
+- Why it's non-deterministic
+- What breaks during replay
+- The correct alternative
+
+
+What you're learning: How to spot determinism violations. This skill is essential before you write production workflows.
+
+Prompt 3: Design for Determinism​
+I need to build a workflow that:
+1. Gets the current price from an external API
+2. Generates a unique order ID
+3. Makes a routing decision based on time of day (morning vs afternoon)
+4. Retries failed steps automatically
+
+Help me design this workflow to be fully deterministic:
+- What should be workflow code vs activity code?
+- How do I handle the time-of-day routing decision?
+- How do I generate a unique ID deterministically?
+- Where should retry logic live?
+
+Show me the correct code structure with activities and workflow.
+
+
+What you're learning: How to architect workflows from the start with determinism in mind. The AI helps you make the right design decisions before you write code.
+
+Safety Note​
+
+When debugging workflow failures, remember that history is your source of truth. If you suspect a determinism violation, compare your workflow code against the recorded history events. Don't modify workflow code while instances are still running; deploy new workflow versions for significant changes and let old instances complete on old code.

@@ -1,0 +1,244 @@
+Why Agents Need External Knowledge
+
+Your Task API from Chapter 70 stores hundreds of tasks. A user asks: "Show me tasks related to Docker deployment." Right now, you can only filter by exact fields like status or priority. You can search for "pending" but not for "anything about containers."
+
+What if your API could understand meaning? What if it could find tasks about "Docker deployment" even when the word "Docker" never appears - because it understands that "containerization," "image build," and "Kubernetes pod" are semantically related?
+
+This is what RAG enables. But before we build it, we need to understand why agents need external knowledge in the first place.
+
+The Two Types of Memory​
+
+When you ask Claude or GPT a question, where does the answer come from? The model has two fundamentally different sources of knowledge:
+
+Parametric Memory: What the Model "Learned"​
+
+During training, models process billions of documents. Patterns from this data get encoded into the model's parameters - the billions of numbers that define how it responds. This is parametric memory.
+
+Think of it like your own brain after years of education. You don't consciously remember reading every textbook, but the knowledge shaped how you think. When someone asks "What's the capital of France?", you don't retrieve a specific memory - you just know it's Paris.
+
+Strengths of parametric memory:
+
+Fast - no lookup required
+Generalizes well - understands patterns beyond specific examples
+Handles language nuance - knows "Paris" means France's capital, not Paris, Texas
+
+Limitations of parametric memory:
+
+Frozen at training time - can't learn new information
+No source attribution - can't tell you where it learned something
+Prone to confident errors - may "know" things that aren't true
+Non-Parametric Memory: What the Model Retrieves​
+
+The alternative is non-parametric memory - looking things up at query time. Instead of relying solely on what was learned during training, the model retrieves relevant documents and uses them to generate a response.
+
+Think of it like using a reference library. You don't need to memorize every fact - you know how to find the right book and extract the answer.
+
+Strengths of non-parametric memory:
+
+Always current - retrieve the latest documents
+Verifiable - can cite sources
+Scalable - add new knowledge without retraining
+
+Limitations of non-parametric memory:
+
+Slower - requires search before generation
+Quality depends on retrieval - wrong documents produce wrong answers
+Requires infrastructure - need to store and index documents
+Memory Type	Source	Speed	Can Update?	Can Cite?
+Parametric	Training data encoded in weights	Fast	No (requires retraining)	No
+Non-Parametric	Retrieved documents	Slower	Yes (update documents)	Yes
+The Knowledge Cutoff Problem​
+
+Here's a concrete problem: Every model has a training cutoff date. Claude's training data ends at some point. So does GPT-4's. Everything that happened after that date - new APIs, updated documentation, recent events - doesn't exist in parametric memory.
+
+Consequences for agents:
+
+Outdated answers - Ask about a library released after the cutoff, and the model doesn't know it exists
+
+Wrong version information - The model might confidently describe an old API that has since changed
+
+Missing context - If your company added a new product last month, the model has never heard of it
+
+This matters enormously for agent applications. Imagine an agent that helps customers with your product. If your product documentation changed after the model's training cutoff, the agent gives outdated guidance - confidently, without knowing it's wrong.
+
+The Hallucination Risk​
+
+When models don't know something, they don't say "I don't know." They generate plausible-sounding answers. This is called hallucination.
+
+Why does this happen?
+
+Language models are trained to predict what text should come next. When asked about something outside their training, they still produce text that sounds like a good answer. The model has learned patterns like "When asked about a library, describe its main function and give an example." It applies these patterns even when it doesn't actually know the library.
+
+Real-world impact:
+
+A legal research agent invents case citations that don't exist
+A coding assistant suggests API methods that were never implemented
+A customer support agent describes product features that aren't real
+
+The model isn't lying - it genuinely doesn't distinguish between what it knows and what it's generating to fill gaps. From the model's perspective, both feel the same: predicting the next likely token.
+
+When hallucination risk is highest:
+
+Scenario	Risk Level	Why
+General knowledge (history, science)	Lower	Extensively covered in training data
+Recent events (last few months)	Higher	After knowledge cutoff
+Specific internal data (your company docs)	Very High	Never in training data
+Precise technical details (exact API syntax)	Higher	Easy to confuse similar patterns
+RAG: The Solution​
+
+Retrieval-Augmented Generation (RAG) solves these problems by combining both memory types. Instead of relying solely on parametric memory, RAG systems:
+
+Retrieve relevant documents based on the user's query
+Augment the prompt with retrieved context
+Generate a response grounded in the retrieved information
+User Query: "How do I deploy our app to Kubernetes?"
+         ↓
+    ┌────────────────────────────────────────────┐
+    │         1. RETRIEVE                        │
+    │  Search your documentation for relevant    │
+    │  pages about Kubernetes deployment         │
+    └────────────────────────────────────────────┘
+         ↓
+    ┌────────────────────────────────────────────┐
+    │         2. AUGMENT                         │
+    │  Add retrieved docs to the prompt:         │
+    │  "Using this context: [deployment guide]   │
+    │   Answer: How do I deploy to Kubernetes?"  │
+    └────────────────────────────────────────────┘
+         ↓
+    ┌────────────────────────────────────────────┐
+    │         3. GENERATE                        │
+    │  LLM produces response based on YOUR       │
+    │  documentation, not just training data     │
+    └────────────────────────────────────────────┘
+         ↓
+Response grounded in your actual deployment guide
+
+
+Why this works:
+
+Current information - Retrieved documents can be updated anytime
+Source attribution - The response comes from specific documents you control
+Reduced hallucination - The model has actual context instead of guessing
+Domain-specific - Works with your internal knowledge, not just public data
+RAG for Your Task API​
+
+Let's bring this back to our running example. You have a Task API with these tasks:
+
+[
+  {"id": 1, "title": "Set up Docker image build pipeline", "status": "pending"},
+  {"id": 2, "title": "Configure Kubernetes pod manifests", "status": "in_progress"},
+  {"id": 3, "title": "Optimize container resource limits", "status": "completed"},
+  {"id": 4, "title": "Review authentication flow", "status": "pending"}
+]
+
+
+Without RAG (current state):
+
+User asks: "Show me tasks related to deployment"
+Your API can only filter by exact fields: status=pending
+No way to understand that tasks 1, 2, and 3 are all about deployment
+
+With RAG (what you'll build):
+
+User asks: "Show me tasks related to deployment"
+RAG retrieves tasks whose descriptions are semantically similar to "deployment"
+Returns tasks 1, 2, and 3 - even though none contain the word "deployment"
+
+This is what the rest of this chapter teaches: how to add semantic understanding to your Task API.
+
+The Mental Model You Need​
+
+Before diving into implementation details (embeddings, vector databases, retrieval chains), internalize this mental model:
+
+Parametric memory is like your long-term memory after education. You absorbed knowledge during training (school), and now you just "know" things. But you can't easily update it, and you might misremember details.
+
+Non-parametric memory is like having a library at your fingertips. You haven't memorized every book, but you know how to find the right one and extract what you need. You can add new books anytime.
+
+RAG is using the library to supplement your education. When asked a question, you first check if there's a relevant book, then use that book plus your general knowledge to answer well.
+
+This mental model will guide you through the rest of the chapter. When you learn about embeddings (Lesson 2), you're learning how to organize the library so you can find the right book. When you learn about vector databases (Lesson 4), you're learning where to store the library. When you learn about retrieval chains (Lesson 5), you're learning how to read the book and combine it with what you already know.
+
+Key Takeaways for Agents​
+
+If you're building agents, RAG is essential because:
+
+Agents need current information - Your agent advises users about your product. The product changes weekly. Without RAG, the agent gives outdated advice.
+
+Agents need internal knowledge - Your company's processes aren't in any training data. Without RAG, the agent can't help with company-specific questions.
+
+Agents need verifiable responses - When an agent makes a claim, users want to know where it came from. RAG enables source attribution.
+
+Agents need to avoid hallucination - Confident wrong answers destroy user trust. RAG grounds responses in actual documents.
+
+The rest of this chapter gives you the practical skills to implement RAG. By Lesson 8, you'll have extended your Task API with semantic search and applied advanced RAG patterns.
+
+Try With AI​
+
+Now that you understand why agents need external knowledge, explore these concepts further with AI assistance.
+
+Prompt 1: Identify Memory Types in Practice
+
+I'm reading about how Claude and GPT work. When I ask "What year did Python 3 release?" - is that answer coming from parametric memory or non-parametric memory? What about when I paste my company's documentation into the chat and then ask about it? Walk me through the difference.
+
+
+What you're learning: This prompt helps you recognize how memory types work in practice. The first question (Python 3 release date) uses parametric memory - it's in training data. The second (your pasted docs) is essentially manual RAG - you're augmenting the prompt with retrieved context. Understanding this distinction prepares you for implementing automatic retrieval.
+
+Prompt 2: Evaluate Hallucination Scenarios
+
+I'm building an agent for [choose: customer support / code documentation / internal wiki search].
+
+For each of these three scenarios, rate the hallucination risk (low/medium/high) and explain why:
+1. User asks about general programming concepts
+2. User asks about our specific product features
+3. User asks about an API released last month
+
+Then suggest which scenarios most urgently need RAG.
+
+
+What you're learning: This prompt develops your judgment about when RAG adds value. Not every query needs retrieval - general knowledge questions are often fine with parametric memory. But domain-specific and time-sensitive queries are high-risk without RAG. You're learning to prioritize where to apply the techniques you'll learn.
+
+Prompt 3: Design a RAG System for Your Domain
+
+I have a [describe your data source - product docs, internal wiki, customer support tickets, code repository].
+
+Before writing any code, help me think through:
+1. What types of questions will users ask?
+2. What documents should I retrieve for each question type?
+3. How would I know if retrieval found the right documents?
+4. What happens if no relevant documents exist?
+
+I want to understand the design before implementation.
+
+
+What you're learning: This prompt connects RAG concepts to your real work. You're not asking AI to build a system - you're thinking through design decisions that matter: what data sources, what queries, what success looks like. This prepares you to make informed choices when you implement RAG in Lessons 3-6.
+
+Reflect on Your Skill​
+
+You built a rag-deployment skill in Lesson 0. Even before learning implementation details, you can improve it based on the conceptual understanding from this lesson.
+
+Test Your Skill​
+Using my rag-deployment skill, explain when a project should use RAG versus relying on the LLM's parametric memory alone. Give me a decision framework with specific criteria.
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill mention knowledge cutoffs and why they matter?
+Did it explain the trade-offs between parametric and non-parametric memory?
+Did it help identify hallucination risk scenarios?
+Improve Your Skill​
+
+If you found gaps, update your skill:
+
+My rag-deployment skill is missing decision criteria for when to use RAG.
+
+Update the skill to include:
+1. A checklist for identifying when RAG is necessary (knowledge cutoff, domain-specific data, verifiability needs)
+2. Warning signs that an LLM-only approach will hallucinate
+3. The retrieve-augment-generate pattern as a core concept
+
+Show me the updated SKILL.md with these additions.
+
+
+Your skill now has conceptual foundations. The next lessons will add implementation details.

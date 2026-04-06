@@ -1,0 +1,394 @@
+Quantization Deep Dive
+
+You calculated your VRAM budget in Lesson 4 and discovered a problem: Llama-3-8B needs 16GB in FP16, but your T4 GPU only has 15GB. Even without training overhead, the base model won't fit.
+
+This is the situation 90% of practitioners face. The models we want to run exceed the hardware we can afford. But here's the insight that changed everything: you don't need 16 bits per weight. With the right techniques, you can compress models to 4 bits per weight—achieving 4x memory reduction with surprisingly small quality loss.
+
+This lesson teaches you to wield quantization as a precision tool, not a blunt hammer. By the end, you'll load Llama-3-8B in under 5GB of VRAM, leaving room for training overhead.
+
+The Precision Hierarchy​
+
+Every number in a neural network has a representation. The question is: how many bits do we need?
+
+Format	Bits per Weight	VRAM for 8B Model	Precision Loss	Use Case
+FP32	32 bits	32 GB	None (baseline)	Research, exact gradients
+FP16	16 bits	16 GB	Minimal	Standard training
+INT8	8 bits	8 GB	Low	Production inference
+INT4	4 bits	4 GB	Moderate	Memory-constrained training
+NF4	4 bits	4 GB	Low (optimized)	QLoRA fine-tuning
+Why Fewer Bits Works​
+
+Neural network weights cluster around zero in a roughly normal distribution. Most weights are small values like 0.0023 or -0.0156. Very few are large values like 5.7 or -12.3.
+
+This distribution matters because:
+
+FP16 allocates bits uniformly across all possible values
+NF4 (Normal Float 4) allocates bits based on the actual distribution, giving more precision to common values near zero
+
+Result: NF4 achieves better quality than naive 4-bit quantization because it's designed for how neural networks actually work.
+
+The Memory Math​
+
+Calculating savings is straightforward:
+
+def calculate_model_memory(params_billions: float, bits_per_param: int) -> float:
+    """Calculate model memory in GB.
+
+    Args:
+        params_billions: Model size in billions of parameters
+        bits_per_param: Bits used per parameter (32, 16, 8, or 4)
+
+    Returns:
+        Memory requirement in GB
+    """
+    bytes_per_param = bits_per_param / 8
+    total_bytes = params_billions * 1e9 * bytes_per_param
+    return total_bytes / (1024 ** 3)
+
+# Example: Llama-3-8B at different precisions
+model_size = 8.0  # 8 billion parameters
+
+print("Llama-3-8B Memory Requirements:")
+print(f"FP32 (32-bit): {calculate_model_memory(model_size, 32):.1f} GB")
+print(f"FP16 (16-bit): {calculate_model_memory(model_size, 16):.1f} GB")
+print(f"INT8 (8-bit):  {calculate_model_memory(model_size, 8):.1f} GB")
+print(f"INT4 (4-bit):  {calculate_model_memory(model_size, 4):.1f} GB")
+
+
+Output:
+
+Llama-3-8B Memory Requirements:
+FP32 (32-bit): 29.8 GB
+FP16 (16-bit): 14.9 GB
+INT8 (8-bit):  7.5 GB
+INT4 (4-bit):  3.7 GB
+
+
+Notice the progression: each halving of bits halves the memory. Moving from FP16 to INT4 gives you 4x compression.
+
+BitsAndBytes: The Practical Tool​
+
+BitsAndBytes is the library that makes quantization accessible. Developed by Tim Dettmers, it provides GPU-accelerated 4-bit and 8-bit operations that integrate directly with Hugging Face Transformers.
+
+Installation​
+
+On Colab or your GPU machine:
+
+pip install bitsandbytes transformers accelerate
+
+Basic 4-bit Loading​
+
+Here's how to load a model in 4-bit precision:
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import torch
+
+# Configure 4-bit quantization
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",  # Normal Float 4 - optimized for neural networks
+    bnb_4bit_compute_dtype=torch.bfloat16,  # Compute in bfloat16 for stability
+)
+
+model_name = "meta-llama/Llama-3.2-1B-Instruct"  # Start with smaller model for demo
+
+# Load tokenizer (no quantization needed)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Load model with quantization
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=quantization_config,
+    device_map="auto",  # Automatically place on GPU
+)
+
+print(f"Model loaded successfully!")
+print(f"Model dtype: {model.dtype}")
+
+
+Output:
+
+Model loaded successfully!
+Model dtype: torch.float32
+
+
+Note: The model reports FP32 because that's the container format, but the actual weights are stored in 4-bit NF4 format internally.
+
+Understanding the Configuration​
+
+Each parameter in BitsAndBytesConfig serves a specific purpose:
+
+Parameter	Value	Purpose
+load_in_4bit	True	Enable 4-bit quantization
+bnb_4bit_quant_type	"nf4"	Use Normal Float 4 (better than plain INT4)
+bnb_4bit_compute_dtype	bfloat16	Dequantize to bfloat16 for computation
+bnb_4bit_use_double_quant	True	Quantize the quantization constants too
+Double Quantization: The Extra Compression​
+
+Here's a subtlety that matters for memory-constrained environments: quantization itself requires storing scaling factors. For every block of weights (typically 64 or 128), you store one FP32 constant.
+
+Double quantization quantizes these constants too, saving an additional 0.4 bits per parameter:
+
+# Full QLoRA-ready configuration with double quantization
+qlora_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,  # Quantize the scaling factors
+)
+
+# Memory savings breakdown for 8B model:
+# Base 4-bit: 8B × 4 bits = 4 GB
+# Scaling factors: 8B / 64 × 32 bits ≈ 0.4 GB
+# With double quant: 8B × 4.5 bits ≈ 4.2 GB (vs 4.4 GB without)
+
+
+For an 8B model, double quantization saves roughly 200MB—enough to matter when you're at the edge of VRAM limits.
+
+Quantization Quality Analysis​
+
+The question everyone asks: "How much quality do I lose?"
+
+Measuring Quality Loss​
+
+There are two approaches:
+
+1. Perplexity Measurement (automatic, domain-general)
+
+from datasets import load_dataset
+import math
+
+def measure_perplexity(model, tokenizer, texts, max_length=512):
+    """Measure model perplexity on sample texts."""
+    model.eval()
+    total_loss = 0
+    total_tokens = 0
+
+    for text in texts[:10]:  # Sample 10 texts
+        inputs = tokenizer(text, return_tensors="pt",
+                          truncation=True, max_length=max_length)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            total_loss += outputs.loss.item() * inputs["input_ids"].size(1)
+            total_tokens += inputs["input_ids"].size(1)
+
+    perplexity = math.exp(total_loss / total_tokens)
+    return perplexity
+
+# Lower perplexity = better model
+# Typical results:
+# - FP16: perplexity ~6-8
+# - 4-bit NF4: perplexity ~6.5-8.5 (5-10% increase)
+
+
+2. Task-Specific Evaluation (manual, domain-specific)
+
+def compare_outputs(model, tokenizer, prompt):
+    """Generate response for qualitative comparison."""
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=100,
+            temperature=0.7,
+            do_sample=True,
+        )
+
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+# Test prompt
+prompt = """You are a task management assistant.
+
+User: Create a task for reviewing the quarterly budget by Friday.
+Assistant:"""
+
+response = compare_outputs(model, tokenizer, prompt)
+print(response)
+
+
+Output:
+
+You are a task management assistant.
+
+User: Create a task for reviewing the quarterly budget by Friday.
+Assistant: I'll create that task for you:
+
+**Task:** Review Q4 Budget
+**Due Date:** Friday
+**Priority:** High
+**Category:** Finance
+
+Would you like me to set a reminder for Thursday to give you time to prepare?
+
+Research Findings on Quality Loss​
+
+Published research on QLoRA (Dettmers et al., 2023) found:
+
+Benchmark	FP16	4-bit NF4	Degradation
+MMLU	67.2%	66.9%	-0.3%
+HellaSwag	85.1%	84.8%	-0.4%
+GSM8K	52.3%	51.8%	-1.0%
+
+For most applications, 4-bit quantization loses 1-2% accuracy—a tradeoff worth making when it enables running models at all.
+
+When to Use Each Precision Level​
+
+The decision framework:
+
+IF inference only AND quality critical:
+    → Use INT8 (best quality/memory balance)
+
+IF training AND memory constrained (Colab, consumer GPU):
+    → Use 4-bit NF4 with double quantization (QLoRA)
+
+IF training AND memory available (A100, H100):
+    → Use FP16 or BF16 (no quantization needed)
+
+IF research/debugging:
+    → Use FP32 (exact gradients, reproducibility)
+
+Practical Decision Table​
+Your Situation	Recommended	Memory for 8B	Why
+T4 GPU (15GB)	4-bit NF4	~5GB	Only option that fits with training overhead
+A10 GPU (24GB)	4-bit NF4 or INT8	~5-8GB	Comfortable margin; choose based on quality needs
+A100 (40GB)	FP16/BF16	~16GB	No need to quantize; maximum quality
+Inference only	INT8	~8GB	Better quality than 4-bit when not training
+Verifying Your Quantized Model​
+
+After loading, verify the model works correctly:
+
+def verify_quantized_model(model, tokenizer):
+    """Quick sanity check for quantized model."""
+
+    # 1. Check model device
+    print(f"Model device: {next(model.parameters()).device}")
+
+    # 2. Check memory usage
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"VRAM allocated: {allocated:.2f} GB")
+        print(f"VRAM reserved: {reserved:.2f} GB")
+
+    # 3. Quick generation test
+    test_prompt = "The capital of France is"
+    inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_new_tokens=10)
+
+    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    print(f"Test generation: {result}")
+
+    # 4. Check if output is reasonable
+    if "Paris" in result:
+        print("Model verification: PASSED")
+    else:
+        print("Model verification: Check output quality")
+
+verify_quantized_model(model, tokenizer)
+
+
+Output:
+
+Model device: cuda:0
+VRAM allocated: 1.24 GB
+VRAM reserved: 1.38 GB
+Test generation: The capital of France is Paris, which is also the largest city
+Model verification: PASSED
+
+Common Quantization Issues​
+Issue 1: CUDA Out of Memory on Load​
+# WRONG: Loading full model first, then quantizing
+model = AutoModelForCausalLM.from_pretrained(model_name)  # OOM here!
+model = quantize(model)
+
+# CORRECT: Quantization during load
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=quantization_config,
+    device_map="auto",
+)
+
+Issue 2: Slow Generation​
+
+Quantized models can be slower than FP16 because of dequantization overhead:
+
+# Enable optimizations for faster inference
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=quantization_config,
+    device_map="auto",
+    torch_dtype=torch.bfloat16,  # Faster compute dtype
+    attn_implementation="flash_attention_2",  # If supported
+)
+
+Issue 3: Quality Issues with Specific Tasks​
+
+Some tasks are more sensitive to quantization:
+
+Math reasoning: More affected (use INT8 if possible)
+Creative writing: Less affected (4-bit usually fine)
+Code generation: Moderate (test on your domain)
+
+When quality matters, always compare against non-quantized baseline on your specific use case.
+
+Try With AI​
+
+Use your AI companion (Claude, ChatGPT, or Gemini).
+
+Prompt 1: Calculate Quantization Savings​
+I have an NVIDIA RTX 3090 with 24GB VRAM. I want to run Mistral-7B
+for fine-tuning with QLoRA.
+
+Help me calculate:
+1. Memory needed for the base model at FP16 vs 4-bit NF4
+2. How much headroom I'll have for training overhead (gradients, activations)
+3. What batch size might be feasible
+
+Walk me through the calculations step by step, and tell me if my hardware
+choice is reasonable for this task.
+
+
+What you're learning: Applying the VRAM calculation framework to your specific hardware scenario, with AI helping verify your reasoning.
+
+Prompt 2: Debug a Quantization Problem​
+I tried loading Llama-3-8B with BitsAndBytes on Colab, but I'm getting
+this error:
+
+"RuntimeError: CUDA out of memory. Tried to allocate 256.00 MiB"
+
+Here's my code:
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3-8B-Instruct",
+    load_in_4bit=True
+)
+
+What's wrong? I thought 4-bit quantization should fit in 15GB easily.
+Ask me clarifying questions about my setup if needed, then help me fix it.
+
+
+What you're learning: Iterative debugging with AI—providing context, receiving diagnostic questions, and converging on a solution.
+
+Prompt 3: Design a Quality Evaluation Plan​
+I'm fine-tuning a model for customer support ticket classification.
+The quantized model needs to maintain at least 95% of the original
+accuracy on my test set.
+
+Help me design an evaluation plan:
+1. What metrics should I track?
+2. How should I compare FP16 vs 4-bit versions?
+3. What's my fallback if 4-bit quality is too low?
+
+Challenge me if my 95% threshold is too strict or too lenient
+for this use case.
+
+
+What you're learning: Strategic planning for quantization—when to accept quality tradeoffs and when to find alternatives.
+
+Safety Note​
+
+When loading quantized models, verify outputs on your specific use case before deploying. Quantization affects different tasks differently—what works for general chat may not work for specialized domains like medical or legal text.

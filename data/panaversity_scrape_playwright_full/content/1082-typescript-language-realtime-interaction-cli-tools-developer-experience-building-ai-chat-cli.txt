@@ -1,0 +1,618 @@
+Building an AI Chat CLI
+
+Everything from Part 9 converges here. TypeScript's type system for safe API interfaces. Async patterns for streaming. AbortController for cancellation. Now you'll combine these into something you can actually ship: a professional AI chat CLI.
+
+This isn't a toy example. By the end of this lesson, you'll have a CLI that streams AI responses to your terminal, maintains conversation history, shows when the AI uses tools, and handles Ctrl+C gracefully. The same patterns power Claude Code, Cursor's terminal integration, and countless developer tools.
+
+The goal is production quality. Every pattern you implement here transfers directly to CLIs you'll build for your own AI products and Digital FTEs.
+
+What You're Building​
+
+A complete AI chat CLI with these features:
+
+Feature	Why It Matters
+Streaming output	Users see responses as they generate, not after completion
+Conversation history	Multi-turn dialogues remember context
+Tool call visualization	Users see when AI accesses external tools
+Graceful cancellation	Ctrl+C stops generation cleanly
+Professional UX	Spinners, colors, clear formatting
+
+The finished CLI:
+
+# Single prompt
+ai-chat "Explain async/await in TypeScript"
+
+# With options
+ai-chat --model gpt-4 --stream "Write a haiku about streaming"
+
+# Multi-turn (maintains history within session)
+ai-chat --interactive
+> What is TypeScript?
+TypeScript is a typed superset of JavaScript...
+> How does it compare to Python?
+Both are high-level languages, but TypeScript...
+
+Project Structure​
+
+Start with a clean architecture that separates concerns:
+
+ai-chat/
+├── src/
+│   ├── index.ts           # Entry point, Commander setup
+│   ├── chat.ts            # Chat command implementation
+│   ├── streaming.ts       # Terminal streaming utilities
+│   └── types.ts           # Shared types
+├── package.json
+└── tsconfig.json
+
+
+This structure scales. When you add more commands later (config, history, export), each gets its own file without cluttering the main entry point.
+
+Setting Up Commander.js​
+
+Commander.js handles argument parsing, help generation, and command structure. Install the dependencies:
+
+npm init -y
+npm install commander ora chalk
+npm install -D typescript @types/node tsx
+
+
+Output:
+
+added 15 packages in 2s
+
+
+Create the entry point with proper command structure:
+
+// src/index.ts
+import { Command } from "commander";
+import { chat } from "./chat.js";
+
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("A professional AI chat CLI with streaming and history")
+  .version("1.0.0");
+
+program
+  .command("chat")
+  .description("Send a message to the AI")
+  .argument("<prompt>", "The message to send")
+  .option("-m, --model <model>", "Model to use", "gpt-4")
+  .option("-s, --stream", "Enable streaming output", true)
+  .option("--no-stream", "Disable streaming output")
+  .action(chat);
+
+// Default command: if no subcommand, treat first arg as prompt
+program
+  .argument("[prompt]", "Quick chat without subcommand")
+  .option("-m, --model <model>", "Model to use", "gpt-4")
+  .action(async (prompt, options) => {
+    if (prompt) {
+      await chat(prompt, options);
+    } else {
+      program.help();
+    }
+  });
+
+program.parse();
+
+
+Output:
+
+$ npx tsx src/index.ts --help
+Usage: ai-chat [options] [command] [prompt]
+
+A professional AI chat CLI with streaming and history
+
+Options:
+  -V, --version        output the version number
+  -m, --model <model>  Model to use (default: "gpt-4")
+  -h, --help           display help for command
+
+Commands:
+  chat <prompt>        Send a message to the AI
+
+
+The dual setup (explicit chat command plus default argument) provides flexibility. Users can type ai-chat "hello" for quick prompts or ai-chat chat "hello" --model gpt-4 for explicit command usage.
+
+Core Types​
+
+Define types that model your domain clearly:
+
+// src/types.ts
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface StreamChunk {
+  type: "content" | "tool_call" | "tool_result" | "done" | "error";
+  delta?: string;
+  name?: string;       // Tool name
+  arguments?: string;  // Tool arguments
+  result?: string;     // Tool result
+  usage?: {
+    prompt: number;
+    completion: number;
+    total: number;
+  };
+  error?: string;
+}
+
+export interface ChatOptions {
+  model: string;
+  stream: boolean;
+}
+
+export interface ChatState {
+  messages: ChatMessage[];
+  isStreaming: boolean;
+  controller: AbortController | null;
+}
+
+
+These types reflect what you learned about discriminated unions in Chapter 103. The StreamChunk type with its type discriminator enables TypeScript to narrow the type in switch statements.
+
+The Streaming Engine​
+
+The heart of the CLI is streaming tokens to the terminal. This combines ora for spinners, chalk for colors, and AbortController for cancellation:
+
+// src/streaming.ts
+import ora from "ora";
+import chalk from "chalk";
+import { StreamChunk, ChatMessage } from "./types.js";
+
+// Simulated streaming client (replace with your actual SDK)
+async function* mockStream(
+  messages: ChatMessage[],
+  signal: AbortSignal
+): AsyncGenerator<StreamChunk> {
+  // Simulate API response delay
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const response = "This is a simulated streaming response. Each word arrives separately to demonstrate the streaming pattern.";
+  const words = response.split(" ");
+
+  for (const word of words) {
+    // Check for cancellation
+    if (signal.aborted) {
+      return;
+    }
+
+    yield { type: "content", delta: word + " " };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  yield {
+    type: "done",
+    usage: { prompt: 50, completion: words.length, total: 50 + words.length },
+  };
+}
+
+export async function streamToTerminal(
+  messages: ChatMessage[],
+  signal: AbortSignal,
+  model: string
+): Promise<string> {
+  const spinner = ora({
+    text: chalk.dim("Thinking..."),
+    spinner: "dots",
+  }).start();
+
+  let fullResponse = "";
+  let firstChunk = true;
+
+  try {
+    // Replace mockStream with your actual API client
+    const stream = mockStream(messages, signal);
+
+    for await (const chunk of stream) {
+      // Stop spinner on first content
+      if (firstChunk && chunk.type === "content") {
+        spinner.stop();
+        firstChunk = false;
+      }
+
+      switch (chunk.type) {
+        case "content":
+          if (chunk.delta) {
+            process.stdout.write(chunk.delta);
+            fullResponse += chunk.delta;
+          }
+          break;
+
+        case "tool_call":
+          // Visual indicator for tool calls
+          console.log(chalk.yellow(`\nCalling tool: ${chunk.name}`));
+          if (chunk.arguments) {
+            console.log(chalk.dim(`   Args: ${chunk.arguments}`));
+          }
+          break;
+
+        case "tool_result":
+          console.log(chalk.green(`   Result received`));
+          break;
+
+        case "done":
+          console.log(); // Final newline
+          if (chunk.usage) {
+            console.log(
+              chalk.dim(
+                `\nTokens: ${chunk.usage.prompt} prompt + ${chunk.usage.completion} completion = ${chunk.usage.total} total`
+              )
+            );
+          }
+          break;
+
+        case "error":
+          spinner.stop();
+          console.error(chalk.red(`\nError: ${chunk.error}`));
+          break;
+      }
+    }
+  } catch (error) {
+    spinner.stop();
+
+    if (error instanceof Error && error.name === "AbortError") {
+      console.log(chalk.yellow("\n\n[Cancelled]"));
+      return fullResponse;
+    }
+
+    throw error;
+  }
+
+  return fullResponse;
+}
+
+
+Output:
+
+$ npx tsx src/index.ts "Explain streaming"
+Thinking...
+This is a simulated streaming response. Each word arrives separately to demonstrate the streaming pattern.
+
+Tokens: 50 prompt + 12 completion = 62 total
+
+
+Key patterns:
+
+Spinner on start: Shows "Thinking..." while waiting for first token
+Spinner stops on first content: Immediate visual transition to streaming
+process.stdout.write(): Writes without newlines for continuous token flow
+Tool call visualization: Yellow indicators when AI uses tools
+Usage stats on completion: Shows token consumption for cost awareness
+AbortError handling: Clean message on Ctrl+C
+Conversation History​
+
+Multi-turn conversations require maintaining message history:
+
+// In chat.ts, add to the chat state
+const state: ChatState = {
+  messages: [],
+  isStreaming: false,
+  controller: null,
+};
+
+function addUserMessage(content: string): void {
+  state.messages.push({ role: "user", content });
+}
+
+function addAssistantMessage(content: string): void {
+  state.messages.push({ role: "assistant", content });
+}
+
+function clearHistory(): void {
+  state.messages = [];
+}
+
+
+The history grows with each turn:
+
+Turn 1: [user: "What is TypeScript?"]
+Turn 2: [user: "What is TypeScript?", assistant: "TypeScript is...", user: "How does it compare to Python?"]
+Turn 3: [... all previous messages ..., assistant: "Both are...", user: "Which should I learn first?"]
+
+
+This context window lets the AI maintain coherent multi-turn conversations, referencing earlier parts of the dialogue.
+
+The Main Chat Command​
+
+Now combine everything into the chat command:
+
+// src/chat.ts
+import chalk from "chalk";
+import { ChatMessage, ChatOptions, ChatState } from "./types.js";
+import { streamToTerminal } from "./streaming.js";
+
+const state: ChatState = {
+  messages: [],
+  isStreaming: false,
+  controller: null,
+};
+
+export async function chat(
+  prompt: string,
+  options: ChatOptions
+): Promise<void> {
+  // Create new controller for this request
+  state.controller = new AbortController();
+  state.isStreaming = true;
+
+  // Wire up Ctrl+C handling
+  const sigintHandler = (): void => {
+    if (state.controller) {
+      console.log(chalk.yellow("\n[Cancelling...]"));
+      state.controller.abort();
+    }
+  };
+
+  process.on("SIGINT", sigintHandler);
+
+  try {
+    // Add user message to history
+    state.messages.push({ role: "user", content: prompt });
+
+    // Show user message
+    console.log(chalk.blue("\nYou: ") + prompt);
+    console.log(chalk.green("\nAssistant: "));
+
+    // Stream the response
+    const response = await streamToTerminal(
+      state.messages,
+      state.controller.signal,
+      options.model
+    );
+
+    // Add assistant response to history
+    if (response) {
+      state.messages.push({ role: "assistant", content: response });
+    }
+
+  } catch (error) {
+    if (error instanceof Error && error.name !== "AbortError") {
+      console.error(chalk.red(`\nError: ${error.message}`));
+      process.exit(1);
+    }
+  } finally {
+    // Cleanup
+    process.removeListener("SIGINT", sigintHandler);
+    state.isStreaming = false;
+    state.controller = null;
+  }
+}
+
+
+Output:
+
+$ npx tsx src/index.ts "What is TypeScript?"
+
+You: What is TypeScript?
+Assistant:
+Thinking...
+This is a simulated streaming response. Each word arrives separately to demonstrate the streaming pattern.
+
+Tokens: 50 prompt + 12 completion = 62 total
+
+
+Key patterns in the chat function:
+
+New controller per request: Each streaming operation gets its own AbortController
+SIGINT handler: Wired to call abort() on Ctrl+C
+Handler cleanup: Remove the SIGINT listener in finally to prevent memory leaks
+History accumulation: Both user and assistant messages added to state
+Complete Implementation​
+
+Here is the full, working implementation that ties everything together:
+
+// src/index.ts - Complete entry point
+import { Command } from "commander";
+import ora from "ora";
+import chalk from "chalk";
+
+// Types
+interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+interface StreamChunk {
+  type: "content" | "tool_call" | "tool_result" | "done" | "error";
+  delta?: string;
+  name?: string;
+  arguments?: string;
+  usage?: { prompt: number; completion: number; total: number };
+  error?: string;
+}
+
+interface ChatOptions {
+  model: string;
+  stream: boolean;
+}
+
+// State
+const history: ChatMessage[] = [];
+let controller: AbortController | null = null;
+
+// Simulated streaming (replace with real API client)
+async function* streamFromAPI(
+  messages: ChatMessage[],
+  model: string,
+  signal: AbortSignal
+): AsyncGenerator<StreamChunk> {
+  await new Promise((r) => setTimeout(r, 500));
+
+  const words = "TypeScript adds static typing to JavaScript, catching errors at compile time.".split(" ");
+
+  for (const word of words) {
+    if (signal.aborted) return;
+    yield { type: "content", delta: word + " " };
+    await new Promise((r) => setTimeout(r, 80));
+  }
+
+  yield {
+    type: "done",
+    usage: {
+      prompt: messages.length * 20,
+      completion: words.length,
+      total: messages.length * 20 + words.length
+    }
+  };
+}
+
+// Chat function with all patterns
+async function chat(prompt: string, options: ChatOptions): Promise<void> {
+  controller = new AbortController();
+
+  const sigintHandler = () => {
+    console.log(chalk.yellow("\n[Cancelling...]"));
+    controller?.abort();
+  };
+  process.on("SIGINT", sigintHandler);
+
+  try {
+    history.push({ role: "user", content: prompt });
+    console.log(chalk.blue("\nYou: ") + prompt);
+    console.log(chalk.green("\nAssistant: "));
+
+    const spinner = ora({ text: chalk.dim("Thinking..."), spinner: "dots" }).start();
+    let response = "";
+    let firstChunk = true;
+
+    for await (const chunk of streamFromAPI(history, options.model, controller.signal)) {
+      if (firstChunk && chunk.type === "content") {
+        spinner.stop();
+        firstChunk = false;
+      }
+
+      switch (chunk.type) {
+        case "content":
+          process.stdout.write(chunk.delta || "");
+          response += chunk.delta || "";
+          break;
+        case "tool_call":
+          console.log(chalk.yellow(`\nCalling: ${chunk.name}`));
+          break;
+        case "done":
+          console.log();
+          if (chunk.usage) {
+            console.log(chalk.dim(`\nTokens: ${chunk.usage.total} total`));
+          }
+          break;
+        case "error":
+          spinner.stop();
+          console.error(chalk.red(`Error: ${chunk.error}`));
+          break;
+      }
+    }
+
+    if (response) {
+      history.push({ role: "assistant", content: response });
+    }
+
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      console.log(chalk.yellow("\n[Cancelled]"));
+    } else {
+      throw error;
+    }
+  } finally {
+    process.removeListener("SIGINT", sigintHandler);
+    controller = null;
+  }
+}
+
+// CLI setup
+const program = new Command();
+
+program
+  .name("ai-chat")
+  .description("AI chat CLI with streaming and history")
+  .version("1.0.0");
+
+program
+  .argument("[prompt]", "Message to send")
+  .option("-m, --model <model>", "Model to use", "gpt-4")
+  .action(async (prompt, options) => {
+    if (prompt) {
+      await chat(prompt, { model: options.model, stream: true });
+    } else {
+      program.help();
+    }
+  });
+
+program.parse();
+
+
+Output:
+
+$ npx tsx src/index.ts "What is TypeScript?"
+
+You: What is TypeScript?
+Assistant:
+Thinking...
+TypeScript adds static typing to JavaScript, catching errors at compile time.
+
+Tokens: 32 total
+
+
+Run it and watch the streaming happen word by word. Press Ctrl+C mid-stream and see the graceful cancellation.
+
+Patterns Summary​
+Pattern	Purpose	Where Applied
+Commander.js	CLI structure, args, options, help	src/index.ts
+ora spinners	Visual feedback while waiting	streamToTerminal()
+chalk colors	Distinguish user/assistant/system	Throughout
+AbortController	Cancellation infrastructure	chat() function
+process.on("SIGINT")	Ctrl+C handling	chat() function
+Discriminated unions	Type-safe chunk handling	StreamChunk type
+AsyncGenerator	Stream processing	streamFromAPI()
+process.stdout.write()	Continuous token output	Switch case "content"
+Try With AI​
+Prompt 1: Add Interactive Mode​
+I have this AI chat CLI that works for single prompts. I want to add an
+--interactive flag that keeps the CLI running, accepting multiple prompts
+in a loop with readline. Help me:
+
+1. Add the --interactive option to Commander
+2. Create a readline interface for continuous input
+3. Maintain conversation history across prompts
+4. Handle Ctrl+C to exit interactive mode gracefully
+
+Show me the implementation pattern for interactive CLI mode.
+
+
+What you're learning: How to extend a single-command CLI into an interactive REPL-style interface. The readline module provides line-by-line input, and you'll learn to manage the event-based input alongside your async streaming.
+
+Prompt 2: Connect to Real API​
+I have this CLI with mock streaming. I want to connect it to a real AI API
+(OpenAI, Anthropic, or similar). The API returns SSE streams. Help me:
+
+1. Replace mockStream with real fetch to the API
+2. Parse SSE data: lines format
+3. Handle the specific chunk format (content_block_delta, etc.)
+4. Map API chunks to my StreamChunk type
+
+Show me how to integrate with [your preferred API].
+
+
+What you're learning: How to adapt the abstract streaming pattern to real API specifics. Each provider has slightly different SSE formats, but the core pattern (AsyncGenerator yielding chunks) remains the same.
+
+Prompt 3: Add Tool Call Handling​
+My CLI shows when tool calls happen, but I need to actually execute them.
+When the AI calls a tool (like "read_file" or "web_search"), I need to:
+
+1. Detect the tool call chunk
+2. Execute the tool locally
+3. Send the result back to the AI
+4. Continue streaming the response
+
+Show me the tool execution loop pattern for CLI applications.
+
+
+What you're learning: The complete agentic loop for CLI tools. This is how Claude Code, GitHub Copilot CLI, and similar tools work: they stream responses, execute tools when requested, and continue the conversation with tool results.
+
+Safety Note​
+
+When building CLI tools that execute code or access files, implement proper sandboxing and user confirmation for dangerous operations. Never auto-execute shell commands without user review. The patterns in this lesson focus on the communication infrastructure; production CLIs need additional security layers.

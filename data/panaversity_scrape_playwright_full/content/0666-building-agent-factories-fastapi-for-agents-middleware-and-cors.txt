@@ -1,0 +1,410 @@
+Middleware & CORS
+
+Every request to your API passes through the same door. Every response leaves through the same door. Middleware sits at that door—inspecting, modifying, logging, timing.
+
+For agent APIs, middleware solves two critical problems:
+
+CORS — Frontends on different domains need permission to call your API
+Observability — You need to know how long requests take and what's happening
+What Is Middleware?​
+
+Middleware intercepts every request before it reaches your endpoints and every response before it returns to the client:
+
+Client Request
+      ↓
+┌─────────────────┐
+│   Middleware    │ ← Log request, start timer
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│   Your Route    │ ← /tasks, /users/me, etc.
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│   Middleware    │ ← Add headers, log response time
+└────────┬────────┘
+         ↓
+   Client Response
+
+
+This is powerful because you write the logic once and it applies to ALL endpoints.
+
+Creating Custom Middleware​
+
+Use the @app.middleware("http") decorator:
+
+import time
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    """Add processing time to every response."""
+    start_time = time.perf_counter()
+
+    response = await call_next(request)  # Pass to route
+
+    process_time = time.perf_counter() - start_time
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+
+
+Key components:
+
+Component	Purpose
+request: Request	The incoming HTTP request
+call_next	Function that passes request to the route (or next middleware)
+await call_next(request)	Execute the route and get the response
+response.headers[...]	Modify the response before returning
+
+Test it:
+
+curl -i http://localhost:8000/tasks
+
+
+Output:
+
+HTTP/1.1 200 OK
+x-process-time: 0.0023456
+content-type: application/json
+...
+
+
+Every response now includes timing information.
+
+Request Logging Middleware​
+
+Log every request for debugging and monitoring:
+
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests."""
+    logger.info(f"{request.method} {request.url.path}")
+
+    response = await call_next(request)
+
+    logger.info(f"{request.method} {request.url.path} → {response.status_code}")
+    return response
+
+
+Output (server logs):
+
+INFO: GET /tasks
+INFO: GET /tasks → 200
+INFO: POST /tasks
+INFO: POST /tasks → 201
+INFO: GET /tasks/999
+INFO: GET /tasks/999 → 404
+
+
+Now you can see every request flowing through your API.
+
+Middleware Execution Order​
+
+When you have multiple middlewares, order matters. They form a stack:
+
+@app.middleware("http")
+async def middleware_a(request: Request, call_next):
+    print("A: before")
+    response = await call_next(request)
+    print("A: after")
+    return response
+
+
+@app.middleware("http")
+async def middleware_b(request: Request, call_next):
+    print("B: before")
+    response = await call_next(request)
+    print("B: after")
+    return response
+
+
+Output:
+
+B: before
+A: before
+[route executes]
+A: after
+B: after
+
+
+The last added middleware is the outermost (first to receive request, last to process response).
+
+CORS: Cross-Origin Resource Sharing​
+
+When your frontend (e.g., http://localhost:3000) calls your API (e.g., http://localhost:8000), the browser blocks it by default. Different ports = different origins = blocked.
+
+CORS tells browsers: "Yes, this frontend is allowed to call me."
+
+What Is an Origin?​
+
+An origin is: protocol + domain + port
+
+URL	Origin
+http://localhost:3000	http://localhost:3000
+http://localhost:8000	http://localhost:8000
+https://myapp.com	https://myapp.com
+https://api.myapp.com	https://api.myapp.com
+
+These are ALL different origins. Cross-origin requests are blocked unless you explicitly allow them.
+
+Configuring CORSMiddleware​
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+origins = [
+    "http://localhost:3000",      # React dev server
+    "http://localhost:5173",      # Vite dev server
+    "https://myapp.com",          # Production frontend
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+Now frontends on those origins can call your API.
+
+CORS Parameters​
+Parameter	Purpose	Common Value
+allow_origins	Which origins can call the API	List of URLs
+allow_methods	Which HTTP methods are allowed	["*"] for all
+allow_headers	Which request headers are allowed	["*"] for all
+allow_credentials	Allow cookies/auth headers	True
+expose_headers	Which response headers browser can access	["X-Process-Time"]
+max_age	How long to cache CORS response	600 (10 minutes)
+Development vs Production​
+
+Development (allow everything):
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Any origin
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+Production (explicit origins):
+
+from config import get_settings
+
+settings = get_settings()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,  # From environment
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+Add to .env:
+
+CORS_ORIGINS=["https://myapp.com","https://admin.myapp.com"]
+
+Important CORS Rule​
+
+If allow_credentials=True, you cannot use ["*"] for origins. You must list specific origins. This prevents credential leakage to malicious sites.
+
+Complete Middleware Setup​
+
+Here's a production-ready middleware configuration:
+
+import time
+import logging
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from config import get_settings
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+settings = get_settings()
+app = FastAPI(title="Task API")
+
+# CORS - must be added first (outermost)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Process-Time"],
+)
+
+
+@app.middleware("http")
+async def add_process_time(request: Request, call_next):
+    """Add processing time header."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    response.headers["X-Process-Time"] = f"{time.perf_counter() - start:.4f}"
+    return response
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests."""
+    logger.info(f"→ {request.method} {request.url.path}")
+    response = await call_next(request)
+    logger.info(f"← {request.method} {request.url.path} [{response.status_code}]")
+    return response
+
+
+Execution order for a request:
+
+log_requests (logs incoming)
+add_process_time (starts timer)
+CORSMiddleware (adds CORS headers)
+Route executes
+CORSMiddleware (response)
+add_process_time (adds header)
+log_requests (logs outgoing)
+Hands-On Exercise​
+
+Step 1: Add timing middleware to your Task API
+
+Step 2: Add request logging middleware
+
+Step 3: Configure CORS for http://localhost:3000
+
+Step 4: Test with curl:
+
+# Check timing header
+curl -i http://localhost:8000/tasks
+
+# Simulate CORS preflight
+curl -X OPTIONS http://localhost:8000/tasks \
+  -H "Origin: http://localhost:3000" \
+  -H "Access-Control-Request-Method: POST" \
+  -i
+
+
+Step 5: Verify CORS headers in response:
+
+Access-Control-Allow-Origin: http://localhost:3000
+Access-Control-Allow-Methods: *
+Access-Control-Allow-Headers: *
+
+Common Mistakes​
+
+Mistake 1: Forgetting to await call_next
+
+# Wrong - blocks forever
+response = call_next(request)
+
+# Correct
+response = await call_next(request)
+
+
+Mistake 2: Using credentials with wildcard origin
+
+# Wrong - browser rejects this
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,  # Can't use with wildcard!
+)
+
+# Correct - explicit origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+)
+
+
+Mistake 3: Not returning the response
+
+# Wrong - returns None
+@app.middleware("http")
+async def bad_middleware(request: Request, call_next):
+    response = await call_next(request)
+    # Forgot to return!
+
+# Correct
+@app.middleware("http")
+async def good_middleware(request: Request, call_next):
+    response = await call_next(request)
+    return response
+
+Why This Matters for Agents​
+
+When you expose agent endpoints:
+
+Frontends need CORS — A React app calling your /agent/chat endpoint
+Timing matters — Know if agent responses are slow
+Logging helps debug — See what's being sent to agents
+Consistent headers — All responses get the same treatment
+
+Middleware ensures every request to your agent API is tracked, timed, and accessible.
+
+Try With AI​
+
+Prompt 1: Error Handling Middleware
+
+I want middleware that catches exceptions and returns
+consistent JSON error responses instead of HTML error pages.
+Show me how to wrap call_next in try/except and format errors.
+
+
+What you're learning: Middleware can normalize error responses across all endpoints.
+
+Prompt 2: Rate Limit Headers
+
+I'm adding rate limiting to my API. How do I add
+X-RateLimit-Remaining and X-RateLimit-Reset headers
+via middleware so all endpoints show rate limit status?
+
+
+What you're learning: Middleware can add information from external systems (like rate limiters) to responses.
+
+Prompt 3: Request ID Tracing
+
+I want to add a unique X-Request-ID header to every request
+for distributed tracing. Show me how to generate a UUID
+in middleware and add it to both the request (for logging)
+and the response (for client correlation).
+
+
+What you're learning: Request IDs enable tracing requests across microservices and logs.
+
+Reflect on Your Skill​
+
+You built a fastapi-agent skill in Lesson 0. Test and improve it based on what you learned.
+
+Test Your Skill​
+Using my fastapi-agent skill, help me add middleware for timing and CORS.
+Does my skill include @app.middleware patterns and CORSMiddleware configuration?
+
+Identify Gaps​
+
+Ask yourself:
+
+Did my skill include custom middleware with call_next?
+Did it configure CORS for frontend access?
+Did it handle middleware execution order?
+Improve Your Skill​
+
+If you found gaps:
+
+My fastapi-agent skill is missing middleware patterns.
+Update it to include timing middleware with @app.middleware,
+CORSMiddleware configuration with explicit origins,
+and request logging for observability.

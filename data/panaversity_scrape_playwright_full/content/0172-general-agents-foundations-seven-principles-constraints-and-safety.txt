@@ -1,0 +1,554 @@
+Principle 6: Constraints and Safety
+
+You give an AI system access to your codebase. It's working well,making helpful changes, running tests, suggesting improvements. Then you notice something odd in git history. The AI deleted a directory you didn't ask it to touch. It ran commands you don't remember approving. It's refactoring code you specifically said not to change.
+
+This isn't science fiction,these are real incidents that have happened. AI systems are powerful, and power without constraints is dangerous.
+
+This principle is about balancing capability with safety. You want AI to be effective,but not so effective it causes damage. You want autonomy,but not so much autonomy that you lose control. The solution is thoughtful constraints and safety measures.
+
+The Safety Mantra: "As long as I haven't git pushed, I am the master of my machine." Everything the AI does locally can be undone. Uncommitted changes can be reverted. Commits can be reset. The moment of no return is the push,and you control that moment.
+
+The Risk Spectrum: Understanding What Can Go Wrong​
+
+Before designing safety measures, understand what you're protecting against.
+
+Category 1: Data Loss (Destructive Operations)​
+
+AI deletes or overwrites important data:
+
+rm -rf on the wrong directory
+Overwriting files without confirmation
+Git operations that discard work
+Database changes without backups
+
+Impact: Hours to weeks of lost work Likelihood: Medium,AI follows instructions literally
+
+Category 2: Security Vulnerabilities​
+
+AI introduces security issues:
+
+Hardcoded credentials in code
+Insecure authentication implementations
+SQL injection vulnerabilities
+Dependency confusion attacks
+
+Impact: System compromise, data breach Likelihood: Medium,AI doesn't automatically think like an attacker
+
+Category 3: Cost Overruns​
+
+AI generates expensive operations:
+
+Infinite loops in cloud resources
+API calls without rate limiting
+Inefficient algorithms consuming compute
+Unintended large-scale operations
+
+Impact: Unexpected cloud bills Likelihood: Low,AI tries to be efficient, but doesn't know costs
+
+Category 4: Reputation Damage​
+
+AI makes changes that affect users:
+
+Offensive content in user-facing materials
+Bugs that corrupt user data
+Performance issues that cause downtime
+Privacy violations
+
+Impact: Lost trust, user churn Likelihood: Low,but high impact
+
+Category 5: Workflow Disruption​
+
+AI interferes with team processes:
+
+Commits that break CI/CD
+Changes that conflict with others' work
+Alters agreed-upon conventions
+Makes conflicting changes across branches
+
+Impact: Team friction, lost productivity Likelihood: Medium,AI doesn't know team context
+
+The Safety Hierarchy: Defense in Depth​
+
+No single safety measure is sufficient. You need layers,each protecting against different failure modes.
+
+┌───────────────────────────────────────────┐
+│  Layer 5: HUMAN VERIFICATION              │  ← Final safety net
+│  ┌───────────────────────────────────────┐│
+│  │  Layer 4: PROCESS CONTROLS            ││  ← Review, test, rollback
+│  │  ┌───────────────────────────────────┐││
+│  │  │  Layer 3: ENVIRONMENT ISOLATION   │││  ← Sandbox, staging
+│  │  │  ┌───────────────────────────────┐│││
+│  │  │  │  Layer 2: PERMISSION CONTROLS ││││  ← Approve/deny actions
+│  │  │  │  ┌───────────────────────────┐│││││
+│  │  │  │  │ Layer 1: TECHNICAL LIMITS │││││  ← Hard constraints
+│  │  │  │  │    (AI works here)        ││││││
+│  │  │  │  └───────────────────────────┘│││││
+│  │  │  └───────────────────────────────┘││││
+│  │  └───────────────────────────────────┘│││
+│  └───────────────────────────────────────┘││
+└───────────────────────────────────────────┘│
+
+Layer 1: Technical Constraints​
+
+What: Hard limits on what AI can do
+
+Examples:
+
+# Read-only filesystem access (sandbox)
+# Network restrictions (no external API calls)
+# Resource limits (CPU, memory, disk)
+# Whitelisted commands only
+
+
+Protects against: Accidental damage, runaway processes
+
+Layer 2: Permission Controls​
+
+What: Require approval for certain actions
+
+Examples:
+
+# Approve before: deleting files
+# Approve before: running git push
+# Approve before: installing packages
+# Approve before: modifying config files
+
+
+Protects against: Unintended destructive operations
+
+Layer 3: Environment Isolation​
+
+What: Separate AI work from production
+
+Examples:
+
+# AI works in staging/sandbox environment
+# Production requires manual deployment
+# Separate database instances
+# Separate API keys/tokens
+
+
+Protects against: Production incidents
+
+Layer 4: Process Controls​
+
+What: Workflow that incorporates safety
+
+Examples:
+
+# Always review diffs before applying
+# Run tests before committing
+# Peer review for AI-generated changes
+# Rollback plans prepared in advance
+
+
+Protects against: Bad code reaching production
+
+Layer 5: Human Verification​
+
+What: Human review before impact
+
+Examples:
+
+# Review AI suggestions before accepting
+# Manual approval for deployments
+# Security review for sensitive changes
+# Testing in isolated environment first
+
+
+Protects against: All categories,final safety net
+
+Permission Models: Choosing Your Safety Level​
+
+Different AI tools offer different permission models. Understanding them helps you choose appropriate settings.
+
+Model 1: Permissive (Auto-Approve Safe Operations)​
+
+How it works: AI executes read operations and safe writes automatically; prompts for destructive actions
+
+Best for: Experienced users, trusted AI, familiar codebase
+
+Example configuration:
+
+Auto-approve:
+- Read operations (cat, grep, find)
+- Test execution (npm test, pytest)
+- Git status/diff
+- File creation (new files only)
+
+Require approval:
+- File deletion (rm)
+- Git reset/rebase
+- Package installation
+- Config file changes
+
+Model 2: Confirming (Approve All Writes)​
+
+How it works: AI prompts before any write operation
+
+Best for: New AI collaboration, unfamiliar codebase, learning phase
+
+Example configuration:
+
+Auto-approve:
+- Read operations only
+
+Require approval:
+- All write operations
+- All file modifications
+- All command execution
+
+Model 3: Restricted (Sandbox Mode)​
+
+How it works: AI can only read; cannot modify anything
+
+Best for: Exploration, code review, understanding unfamiliar codebases
+
+Example configuration:
+
+Auto-approve:
+- Read operations only
+
+Blocked:
+- All write operations
+- All command execution
+- All file modifications
+
+Choosing Your Model​
+Situation	Recommended Model	Rationale
+First time with AI	Confirming	Build trust before autonomy
+Routine work on familiar project	Permissive	Efficiency for safe operations
+Exploring unfamiliar code	Restricted	Understand before modifying
+Production systems	Confirming + Staging	Extra caution for critical systems
+Prototype/experimental work	Permissive	Speed over caution, rollback available
+The Destructive Operations List​
+
+Know which commands require extra scrutiny. These should always trigger confirmation:
+
+File Operations​
+rm, rm -rf              # Delete files/directories
+mv                      # Move (can overwrite)
+cp                      # Copy (can overwrite)
+> file                  # Redirect and overwrite
+dd                      # Low-level disk write
+
+Version Control​
+git reset --hard        # Discard all changes
+git rebase              # Rewrite history
+git push --force        # Overwrite remote
+git clean -fd           # Delete untracked files
+git checkout -- .       # Discard working directory changes
+
+Package Management​
+npm install             # Can change dependencies
+pip install             # Can change dependencies
+apt install             # System-level changes
+brew install            # System-level changes
+
+System Operations​
+sudo                    # Elevated privileges
+systemctl               # Service management
+kill -9                # Force kill processes
+reboot, shutdown        # System operations
+
+Data Operations​
+DROP DATABASE           # Database destruction
+DELETE FROM            # Data deletion (without WHERE)
+TRUNCATE TABLE         # Remove all data
+UPDATE (no WHERE)      # Modify all rows
+
+Sandboxing: Isolating AI Work​
+
+The most effective safety measure: don't let AI touch production directly.
+
+The Simplest Sandbox: A Git Branch​
+
+Before you worry about Docker containers or staging environments, know this: a git branch is 90% of the safety most people need.
+
+git checkout -b ai-experiment
+
+
+That's it. Now the AI can do whatever it wants,and you can throw it all away with git checkout main && git branch -D ai-experiment. No Docker knowledge required. No DevOps complexity. Just git.
+
+Start here. Graduate to more sophisticated sandboxes only when you need them.
+
+Advanced Sandbox Strategies​
+
+1. Docker Container Sandbox
+
+# Run AI work in container
+docker run -it -v $(pwd):/workspace -w /workspace node:18 bash
+
+# AI works inside container
+# Can't affect host system
+# Can't access production resources
+
+
+2. Staging Environment
+
+AI works on: staging.example.com
+Manual deploy: production.example.com
+
+AI can make all the changes it wants to staging
+You review before promoting to production
+
+
+3. Feature Branch Workflow
+
+# AI works on feature branch
+git checkout -b feature/ai-work
+
+# Changes isolated from main
+# Merge only after review
+
+
+4. Separate Credentials
+
+# .env.ai - AI's environment
+AI_DATABASE_URL=postgresql://localhost:5432/sandbox_db
+AI_API_KEY=sandbox_key_limited_permissions
+
+# .env - Production (never shown to AI)
+PRODUCTION_DATABASE_URL=postgresql://prod-server:5432/real_db
+PRODUCTION_API_KEY=production_key_full_permissions
+
+Trust Gradualism: Easing into Autonomy​
+
+Don't go from zero autonomy to full autonomy overnight. Build trust gradually.
+
+Phase 1: Observation Only (Week 1)​
+AI reads files and explains them
+AI suggests changes but doesn't apply them
+You manually apply AI suggestions
+Goal: Understand AI's capabilities and patterns
+Phase 2: Supervised Autonomy (Week 2-4)​
+AI makes changes in sandbox/feature branches
+You review all diffs before applying
+Destructive operations always require approval
+Goal: Build confidence with safety net
+Phase 3: Selective Autonomy (Month 2-3)​
+AI autonomously handles safe operations (tests, linting)
+AI handles routine refactors within approved patterns
+Destructive operations still require approval
+Goal: Accelerate routine work while maintaining oversight
+Phase 4: Calibrated Autonomy (Month 3+)​
+AI autonomously handles most operations
+Pre-approve known-safe command patterns
+Approval only for novel or high-risk operations
+Goal: Maximum efficiency with maintained safety
+Trust Signals to Track​
+
+Track these to decide when to increase autonomy:
+
+Error rate: How often does AI make mistakes?
+Correction ease: How easy is it to fix AI mistakes?
+Pattern adherence: Does AI follow project conventions?
+Risk awareness: Does AI avoid known dangerous operations?
+Safety Checklist: Before Each Session​
+
+Before starting an AI session, verify:
+
+Environment:
+
+ Working in correct directory (not production)
+ On correct branch (feature branch, not main)
+ Environment variables set correctly (sandbox credentials)
+ Uncommitted work is backed up or committed
+
+Tool Configuration:
+
+ Permission mode appropriate for task
+ Destructive operations require approval
+ Read-only mode if just exploring
+ Logging enabled for audit trail
+
+Mental Model:
+
+ Clear task scope (what AI should and shouldn't do)
+ Identified high-risk operations to watch for
+ Rollback plan if things go wrong
+ Stopping point defined
+Incident Response: What to Do When Something Goes Wrong​
+
+Despite all precautions, things will go wrong. Have a plan.
+
+Emergency Cheat Sheet (Memorize This)​
+Situation	Command	What It Does
+Stop AI immediately	Ctrl+C	Kills the current operation
+See what changed	git status	Shows modified/deleted files
+Undo uncommitted changes	git checkout -- .	Restores all files to last commit
+Nuclear reset	git reset --hard HEAD	Discards everything since last commit
+Undo last commit	git reset --hard HEAD~1	Removes the most recent commit entirely
+
+Print this. Tape it to your monitor. When panic hits, you won't remember,but you can read.
+
+Immediate Actions​
+# 1. Stop the AI
+# Ctrl+C or stop button
+
+# 2. Assess damage
+git status          # What changed?
+git diff            # What's the diff?
+
+# 3. If bad, revert
+git checkout -- .   # Revert working directory
+git reset --hard    # Reset to last commit
+
+# 4. If already committed
+git revert HEAD     # Revert the commit
+git reset --hard HEAD~1  # Or remove commit entirely
+
+Post-Incident Review​
+
+After an incident, ask:
+
+What happened?
+Why did safeguards fail?
+What constraint would have prevented this?
+How do I adjust permissions/configuration?
+Example: AI Deleted Wrong Directory​
+
+Incident: AI ran rm -rf node_modules/ but executed in wrong directory, deleting source files.
+
+Immediate: Ctrl+C immediately. Assess damage with git status.
+
+Recovery: git checkout -- . to restore from git.
+
+Prevention for next time:
+
+Add safeguard: AI must pwd before destructive operations
+Change permission mode: require approval for all rm commands
+Add alias: rm → rm -i (interactive mode)
+Why This Principle Matters: Trust Through Safety​
+
+Paradoxically, constraints enable autonomy. When you have good safety measures:
+
+You feel comfortable giving AI more autonomy
+You can focus on high-level direction rather than worrying
+AI can be more effective without risking disaster
+
+Without safety measures, you're constantly on edge,afraid to let AI do anything meaningful. With safety measures, you can collaborate confidently.
+
+The goal isn't to prevent AI from doing anything. The goal is to prevent AI from doing certain things: while enabling everything else.
+
+Prompt-Based Safety: Guardrails in Your Instructions​
+
+Beyond tool configuration, you can build safety directly into your prompts.
+
+The Safety Hook (Cost Control)​
+
+For operations that might incur costs (API calls, cloud resources), add this to your prompt:
+
+Before performing any operation that might cost money (API calls,
+cloud deployments, external service requests), stop and tell me
+the estimated cost. Don't proceed until I approve.
+
+
+This catches the invisible risks,the $500 API bill from an infinite loop, the runaway cloud instance.
+
+The Guardrail Prompt Template​
+
+For maximum safety, start sessions with explicit constraints:
+
+You are helping me with [task]. Follow these safety rules:
+
+FORBIDDEN actions (never do these):
+- Never use `rm` on any file containing `.env`, `config`, or `credentials`
+- Never run `git push` without my explicit approval
+- Never modify files outside the /src directory
+
+REQUIRED checks (always do these):
+- Before any destructive command, run `pwd` and show me the current directory
+- Before deleting anything, show me what will be deleted and wait for confirmation
+- Before running commands with side effects, explain what they'll do
+
+If you're unsure whether an action is safe, ask me first.
+
+
+Customize this template for your specific project and risk tolerance.
+
+This Principle in Both Interfaces​
+
+In Claude Code, you configure constraints through permission flags, CLAUDE.md restrictions, and hooks. In Cowork, constraints are built into the GUI,confirmation dialogs and folder-level access controls.
+
+In Cowork: The confirmation dialogs ARE the constraint system. When Cowork asks "Should I delete this file?", it's implementing the same safety principle that Claude Code's permission model provides. You don't configure them,you respond to them.
+
+The paradox applies equally: In both interfaces, constraints enable capability. When you trust the safety model, you give the agent more autonomy. Without constraints, you'd never let either agent do meaningful work on important files.
+
+For a detailed comparison of how all seven principles map across both interfaces, see Lesson 9: Putting It All Together.
+
+Try With AI​
+Prompt 1: Risk Assessment Exercise​
+I want to practice assessing safety risks in AI workflows.
+
+Here's a scenario: I'm planning to have AI help me [describe a task—refactor database schema, update authentication system, optimize performance, etc.]
+
+Help me assess:
+1. What could go wrong? Brainstorm specific risks
+2. What's the impact if something does go wrong?
+3. What safety measures should I put in place?
+
+For each safety measure, categorize it:
+- Technical constraint (what to restrict)
+- Permission control (what to approve)
+- Environment isolation (where to work)
+- Process control (how to work)
+- Human verification (when to review)
+
+Then, help me create a specific plan: "Before starting, I will X. During work, AI can Y but not Z. After work, I will verify W."
+
+
+What you're learning: How to identify risks and design appropriate safety measures. You're developing the skill of anticipating problems before they occur and structuring AI work to be safe by design.
+
+Prompt 2: Permission Model Design​
+I want to design an appropriate permission model for my situation.
+
+Here's my context:
+- [Your experience level with AI]
+- [How familiar you are with your codebase]
+- [What you're working on—prototype, production, personal project, team project]
+- [Your risk tolerance—low, medium, high]
+
+Help me design a permission model:
+1. Should I use Permissive, Confirming, or Restricted mode? Why?
+2. What operations should be auto-approved?
+3. What operations should require approval?
+4. What operations should be blocked entirely?
+
+Also, help me understand:
+- When should I move to a more permissive model?
+- What signals should I track to build trust?
+- What would cause me to tighten restrictions?
+
+
+What you're learning: How to choose appropriate permission models based on context and experience. You're learning to calibrate autonomy based on trust and risk,balancing safety with effectiveness.
+
+Prompt 3: Sandbox Setup​
+I want to set up a safe sandbox environment for AI work.
+
+Help me design a sandboxing strategy for my project:
+- [Project type—web app, data pipeline, scripts, etc.]
+- [Current setup—local development, cloud, etc.]
+
+I want to make sure:
+1. AI can't affect production systems
+2. AI can experiment freely without risk
+3. I can easily promote AI work to production after review
+
+Design a sandbox setup that includes:
+- Directory structure (sandbox vs production)
+- Git workflow (branches, merge process)
+- Environment variables (sandbox credentials)
+- Database approach (separate instances)
+- Deployment process (manual promotion after review)
+
+After we design it, help me actually set it up step by step.
+
+
+What you're learning: How to create isolated environments where AI can work safely. You're learning to structure your workflow so that AI experimentation never puts production at risk,enabling confident collaboration.
+
+Safety Note​
+
+When in doubt, start with more restrictions and ease into autonomy. It's always easier to loosen constraints later than to recover from a preventable incident. The best safety measure is a cautious approach,especially when you're just starting with AI collaboration.
+
+Flashcards Study Aid​
